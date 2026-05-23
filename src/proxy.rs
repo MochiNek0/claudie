@@ -12,6 +12,7 @@ use crate::settings::LlmProfile;
 const MAX_PROXY_REQUEST_BYTES: usize = 10 * 1024 * 1024;
 const TOOL_RESULT_CHAR_BUDGET: usize = 12_000;
 const TOOL_RESULT_HEAD_CHARS: usize = 8_000;
+const GENERIC_VALUE_TEXT_BUDGET: usize = 2_000;
 
 pub(crate) fn start_openai_proxy_server(state: Arc<Mutex<AppState>>) -> Result<(), String> {
     let listener = TcpListener::bind(("127.0.0.1", DEFAULT_PROXY_PORT))
@@ -485,8 +486,17 @@ fn content_to_text(content: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         Value::Null => String::new(),
-        other => other.to_string(),
+        other => stringify_value_with_budget(other, GENERIC_VALUE_TEXT_BUDGET),
     }
+}
+
+fn stringify_value_with_budget(value: &Value, budget: usize) -> String {
+    let text = value.to_string();
+    if text.chars().count() <= budget {
+        return text;
+    }
+    let trimmed = text.chars().take(budget).collect::<String>();
+    format!("{trimmed}...[value truncated by claudie proxy]")
 }
 
 fn trim_tool_result_content(content: String) -> String {
@@ -841,5 +851,12 @@ mod tests {
         assert!(tool_content.starts_with(&"x".repeat(128)));
         assert!(tool_content.ends_with(&"x".repeat(128)));
         assert!(tool_content.chars().count() > TOOL_RESULT_CHAR_BUDGET);
+    }
+
+    #[test]
+    fn caps_generic_non_string_content_to_limit_token_bloat() {
+        let payload = json!({ "blob": "x".repeat(GENERIC_VALUE_TEXT_BUDGET + 500) });
+        let text = content_to_text(&payload);
+        assert!(text.contains("[value truncated by claudie proxy]"));
     }
 }
