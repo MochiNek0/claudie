@@ -59,59 +59,13 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
             state.quota.transcript_path = path.to_string();
         }
 
-        match event.as_str() {
-            "UserPromptSubmit" | "SessionStart" | "SessionResume" => {
-                state.set_mood(PetMood::Thinking);
-                state.show_speech(
-                    "Claude is thinking",
-                    "New work session",
-                    Duration::from_secs(4),
-                    3,
-                );
-            }
-            "PreToolUse" => {
-                state.start_tool_mood(mood_for_tool(&tool_name));
-            }
-            "PostToolUse" => {
-                state.finish_tool_mood(mood_for_tool(&tool_name));
-                let next_mood = state.activity_mood().unwrap_or(PetMood::Happy);
-                state.set_mood(next_mood);
-            }
-            "PostToolBatch" => {
-                state.finish_all_tools();
-                let next_mood = state.activity_mood().unwrap_or(PetMood::Happy);
-                state.set_mood(next_mood);
-            }
-            "PostToolUseFailure" | "StopFailure" | "PermissionDenied" => {
-                state.finish_tool_mood(mood_for_tool(&tool_name));
-                state.last_error = summarize_payload(&payload);
-                state.set_mood(PetMood::Error);
-                let error = state.last_error.clone();
-                state.show_speech("Blocked", error, Duration::from_secs(5), 6);
-            }
-            "SubagentStart" | "TaskCreated" => {
-                state.active_subagents = state.active_subagents.saturating_add(1);
-                state.set_mood(PetMood::Subagent);
-                state.show_speech(
-                    "Subagent started",
-                    "Parallel work is running",
-                    Duration::from_secs(4),
-                    4,
-                );
-            }
-            "SubagentStop" | "TaskCompleted" => {
-                state.active_subagents = state.active_subagents.saturating_sub(1);
-                let next_mood = state.activity_mood().unwrap_or(PetMood::Happy);
-                state.set_mood(next_mood);
-            }
-            "Notification" => state.set_mood(PetMood::Thinking),
-            "Stop" | "SessionEnd" => {
-                state.clear_activity();
-                state.set_mood(PetMood::Happy);
-                state.show_speech("Done", "Claude Code finished", Duration::from_secs(4), 4);
-            }
-            _ => {}
-        }
+        apply_state_event(
+            &mut state,
+            event.as_str(),
+            &payload,
+            &tool_name,
+            transcript_path.as_deref(),
+        );
 
         let detail = if tool_name.is_empty() {
             summarize_payload(&payload)
@@ -163,6 +117,93 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
     }
 
     json!({})
+}
+
+fn apply_state_event(
+    state: &mut AppState,
+    event: &str,
+    payload: &Value,
+    tool_name: &str,
+    transcript_path: Option<&str>,
+) {
+    match event {
+        "UserPromptSubmit" | "SessionStart" | "SessionResume" => {
+            state.set_mood(PetMood::Thinking);
+            state.show_speech(
+                "Claude is thinking",
+                "New work session",
+                Duration::from_secs(4),
+                3,
+            );
+        }
+        "PreToolUse" => {
+            let mood = mood_for_event(event, tool_name, payload);
+            state.start_tool_mood(mood);
+            if mood == PetMood::Subagent {
+                state.active_subagents = state.active_subagents.saturating_add(1);
+            }
+        }
+        "PostToolUse" => {
+            let mood = mood_for_event("PreToolUse", tool_name, payload);
+            state.finish_tool_mood(mood);
+            if mood == PetMood::Subagent {
+                state.active_subagents = state.active_subagents.saturating_sub(1);
+            }
+            state.set_mood(state.activity_mood().unwrap_or(PetMood::Happy));
+        }
+        "PostToolBatch" => {
+            state.finish_all_tools();
+            state.set_mood(state.activity_mood().unwrap_or(PetMood::Happy));
+        }
+        "PostToolUseFailure" | "StopFailure" | "PermissionDenied" => {
+            state.finish_tool_mood(mood_for_event("PreToolUse", tool_name, payload));
+            state.last_error = summarize_payload(payload);
+            state.set_mood(PetMood::Error);
+            state.show_speech(
+                "Blocked",
+                state.last_error.clone(),
+                Duration::from_secs(5),
+                6,
+            );
+        }
+        "SubagentStart" | "TaskCreated" => {
+            state.active_subagents = state.active_subagents.saturating_add(1);
+            state.set_mood(PetMood::Subagent);
+            state.show_speech(
+                "Subagent started",
+                "Parallel work is running",
+                Duration::from_secs(4),
+                4,
+            );
+        }
+        "SubagentStop" | "TaskCompleted" => {
+            state.active_subagents = state.active_subagents.saturating_sub(1);
+            state.set_mood(state.activity_mood().unwrap_or(PetMood::Happy));
+        }
+        "Notification" | "Elicitation" => state.set_mood(PetMood::Thinking),
+        "PreCompact" => state.set_mood(PetMood::Building),
+        "PostCompact" => state.set_mood(PetMood::Happy),
+        "Stop" | "SessionEnd" => {
+            state.clear_activity();
+            if event == "SessionEnd" && string_field(payload, "source").as_deref() == Some("clear")
+            {
+                state.set_mood(PetMood::Building);
+                state.show_speech(
+                    "Context cleared",
+                    "Preparing a fresh session",
+                    Duration::from_secs(3),
+                    4,
+                );
+            } else {
+                state.set_mood(PetMood::Happy);
+                state.show_speech("Done", "Claude Code finished", Duration::from_secs(4), 4);
+            }
+            if let Some(path) = transcript_path {
+                state.quota.transcript_path = path.to_string();
+            }
+        }
+        _ => {}
+    }
 }
 
 fn handle_permission_request(
@@ -787,6 +828,16 @@ fn clears_pending_interaction(event: &str) -> bool {
     matches!(event, "PreToolUse" | "PostToolUse" | "PostToolBatch")
 }
 
+fn mood_for_event(event: &str, tool_name: &str, payload: &Value) -> PetMood {
+    if event == "PreToolUse" && tool_name == "Task" {
+        return PetMood::Subagent;
+    }
+    if event == "SessionEnd" && string_field(payload, "source").as_deref() == Some("clear") {
+        return PetMood::Building;
+    }
+    mood_for_tool(tool_name)
+}
+
 fn mood_for_tool(tool_name: &str) -> PetMood {
     match tool_name {
         "Task" => PetMood::Subagent,
@@ -809,6 +860,14 @@ mod tests {
         assert_eq!(mood_for_tool("Edit"), PetMood::Typing);
         assert_eq!(mood_for_tool("Read"), PetMood::Thinking);
         assert_eq!(mood_for_tool("AskUserQuestion"), PetMood::Thinking);
+    }
+
+    #[test]
+    fn pre_tool_task_maps_to_subagent() {
+        assert_eq!(
+            mood_for_event("PreToolUse", "Task", &json!({})),
+            PetMood::Subagent
+        );
     }
 
     #[test]
