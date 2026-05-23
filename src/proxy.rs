@@ -10,6 +10,8 @@ use crate::config::DEFAULT_PROXY_PORT;
 use crate::settings::LlmProfile;
 
 const MAX_PROXY_REQUEST_BYTES: usize = 10 * 1024 * 1024;
+const TOOL_RESULT_CHAR_BUDGET: usize = 12_000;
+const TOOL_RESULT_HEAD_CHARS: usize = 8_000;
 
 pub(crate) fn start_openai_proxy_server(state: Arc<Mutex<AppState>>) -> Result<(), String> {
     let listener = TcpListener::bind(("127.0.0.1", DEFAULT_PROXY_PORT))
@@ -290,10 +292,13 @@ fn append_user_content(messages: &mut Vec<Value>, content: &Value) {
                     .get("tool_use_id")
                     .and_then(Value::as_str)
                     .unwrap_or("tool_call");
+                let tool_result_text = trim_tool_result_content(content_to_text(
+                    block.get("content").unwrap_or(&Value::Null),
+                ));
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
-                    "content": content_to_text(block.get("content").unwrap_or(&Value::Null))
+                    "content": tool_result_text
                 }));
             }
             Some("text") => {
@@ -481,6 +486,38 @@ fn content_to_text(content: &Value) -> String {
             .join("\n"),
         Value::Null => String::new(),
         other => other.to_string(),
+    }
+}
+
+fn trim_tool_result_content(content: String) -> String {
+    if content.chars().count() <= TOOL_RESULT_CHAR_BUDGET {
+        return content;
+    }
+    let chars = content.chars().collect::<Vec<_>>();
+    let total = chars.len();
+    let head_len = TOOL_RESULT_HEAD_CHARS
+        .min(TOOL_RESULT_CHAR_BUDGET)
+        .min(total);
+    let tail_len = TOOL_RESULT_CHAR_BUDGET
+        .saturating_sub(head_len)
+        .min(total - head_len);
+    let omitted = total.saturating_sub(head_len + tail_len);
+
+    let head = chars[..head_len].iter().collect::<String>();
+    let tail = if tail_len > 0 {
+        chars[total - tail_len..].iter().collect::<String>()
+    } else {
+        String::new()
+    };
+
+    if tail.is_empty() {
+        format!(
+            "{head}\n\n[tool_result truncated by claudie proxy: omitted {omitted} chars out of {total}]"
+        )
+    } else {
+        format!(
+            "{head}\n\n[... omitted {omitted} chars out of {total} by claudie proxy to reduce token usage ...]\n\n{tail}"
+        )
     }
 }
 
@@ -775,5 +812,34 @@ mod tests {
         assert_eq!(converted["stop_reason"], "tool_use");
         assert_eq!(converted["content"][0]["type"], "tool_use");
         assert_eq!(converted["content"][0]["input"]["file_path"], "a.txt");
+    }
+
+    #[test]
+    fn truncates_large_tool_result_payloads() {
+        let profile = LlmProfile {
+            model: "gpt-test".to_string(),
+            ..LlmProfile::default()
+        };
+        let large = "x".repeat(TOOL_RESULT_CHAR_BUDGET + 1_000);
+        let request = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "call_1",
+                    "content": large
+                }]
+            }]
+        });
+
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        let tool_content = converted["messages"][0]["content"]
+            .as_str()
+            .expect("tool content is text");
+        assert!(tool_content.contains("omitted"));
+        assert!(tool_content.contains("reduce token usage"));
+        assert!(tool_content.starts_with(&"x".repeat(128)));
+        assert!(tool_content.ends_with(&"x".repeat(128)));
+        assert!(tool_content.chars().count() > TOOL_RESULT_CHAR_BUDGET);
     }
 }
