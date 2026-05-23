@@ -227,6 +227,19 @@ impl LlmProfile {
         self.extra_env_usize("CLAUDIE_GENERIC_VALUE_TEXT_BUDGET", 2_000, 200, 20_000)
     }
 
+    pub(crate) fn token_auto_summary_threshold_chars(&self) -> usize {
+        self.extra_env_usize(
+            "CLAUDIE_AUTO_SUMMARY_THRESHOLD_CHARS",
+            6_000,
+            1_000,
+            200_000,
+        )
+    }
+
+    pub(crate) fn token_auto_summary_max_chars(&self) -> usize {
+        self.extra_env_usize("CLAUDIE_AUTO_SUMMARY_MAX_CHARS", 1_500, 300, 20_000)
+    }
+
     fn extra_env_usize(&self, key: &str, default: usize, min: usize, max: usize) -> usize {
         self.extra_env
             .lines()
@@ -892,11 +905,13 @@ mod tests {
     #[test]
     fn token_budgets_can_be_overridden_from_extra_env() {
         let profile = LlmProfile {
-            extra_env: "CLAUDIE_TOOL_RESULT_CHAR_BUDGET=16000\nCLAUDIE_TOOL_RESULT_HEAD_CHARS=9000\nCLAUDIE_GENERIC_VALUE_TEXT_BUDGET=3000".to_string(),
+            extra_env: "CLAUDIE_TOOL_RESULT_CHAR_BUDGET=16000\nCLAUDIE_TOOL_RESULT_HEAD_CHARS=9000\nCLAUDIE_GENERIC_VALUE_TEXT_BUDGET=3000\nCLAUDIE_AUTO_SUMMARY_THRESHOLD_CHARS=7000\nCLAUDIE_AUTO_SUMMARY_MAX_CHARS=1700".to_string(),
             ..LlmProfile::default()
         };
         assert_eq!(profile.token_tool_result_char_budget(), 16_000);
         assert_eq!(profile.token_tool_result_head_chars(), 9_000);
         assert_eq!(profile.token_generic_value_text_budget(), 3_000);
+        assert_eq!(profile.token_auto_summary_threshold_chars(), 7_000);
+        assert_eq!(profile.token_auto_summary_max_chars(), 1_700);
     }
 }

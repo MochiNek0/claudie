@@ -290,9 +290,13 @@ fn append_user_content(messages: &mut Vec<Value>, content: &Value, profile: &Llm
                     .and_then(Value::as_str)
                     .unwrap_or("tool_call");
                 let tool_result_text = trim_tool_result_content(
-                    content_to_text(
-                        block.get("content").unwrap_or(&Value::Null),
-                        profile.token_generic_value_text_budget(),
+                    summarize_tool_result_if_needed(
+                        content_to_text(
+                            block.get("content").unwrap_or(&Value::Null),
+                            profile.token_generic_value_text_budget(),
+                        ),
+                        profile.token_auto_summary_threshold_chars(),
+                        profile.token_auto_summary_max_chars(),
                     ),
                     profile.token_tool_result_char_budget(),
                     profile.token_tool_result_head_chars(),
@@ -530,6 +534,56 @@ fn trim_tool_result_content(content: String, total_budget: usize, head_budget: u
             "{head}\n\n[... omitted {omitted} chars out of {total} by claudie proxy to reduce token usage ...]\n\n{tail}"
         )
     }
+}
+
+fn summarize_tool_result_if_needed(content: String, threshold: usize, max_chars: usize) -> String {
+    if content.chars().count() <= threshold {
+        return content;
+    }
+
+    let mut summary_lines = Vec::new();
+    let mut input_lines = content.lines();
+    let first_line = input_lines.next().unwrap_or_default().trim();
+    if !first_line.is_empty() {
+        summary_lines.push(format!("first: {first_line}"));
+    }
+
+    let error_lines = content
+        .lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("error")
+                || lower.contains("exception")
+                || lower.contains("failed")
+                || lower.contains("traceback")
+                || lower.contains("panic")
+        })
+        .take(3)
+        .map(|line| format!("signal: {}", line.trim()))
+        .collect::<Vec<_>>();
+    summary_lines.extend(error_lines);
+
+    if let Some(last_line) = content.lines().last() {
+        let trimmed = last_line.trim();
+        if !trimmed.is_empty() {
+            summary_lines.push(format!("last: {trimmed}"));
+        }
+    }
+
+    if summary_lines.is_empty() {
+        summary_lines.push("(no salient lines detected)".to_string());
+    }
+
+    let mut summary = format!(
+        "[tool_result auto-summary by claudie proxy; original length={} chars]\n{}",
+        content.chars().count(),
+        summary_lines.join("\n")
+    );
+    if summary.chars().count() > max_chars {
+        summary = summary.chars().take(max_chars).collect::<String>();
+        summary.push_str("\n...[auto-summary truncated]");
+    }
+    summary
 }
 
 fn copy_number(input: &Value, output: &mut Map<String, Value>, key: &str) {
@@ -829,6 +883,7 @@ mod tests {
     fn truncates_large_tool_result_payloads() {
         let profile = LlmProfile {
             model: "gpt-test".to_string(),
+            extra_env: "CLAUDIE_AUTO_SUMMARY_THRESHOLD_CHARS=50000".to_string(),
             ..LlmProfile::default()
         };
         let budget = profile.token_tool_result_char_budget();
@@ -862,5 +917,37 @@ mod tests {
         let payload = json!({ "blob": "x".repeat(budget + 500) });
         let text = content_to_text(&payload, budget);
         assert!(text.contains("[value truncated by claudie proxy]"));
+    }
+
+    #[test]
+    fn auto_summarizes_large_tool_result_before_trim() {
+        let profile = LlmProfile {
+            extra_env:
+                "CLAUDIE_AUTO_SUMMARY_THRESHOLD_CHARS=1000\nCLAUDIE_AUTO_SUMMARY_MAX_CHARS=500"
+                    .to_string(),
+            ..LlmProfile::default()
+        };
+        let large = format!(
+            "start line\n{}\nerror: important failure\n{}\nlast line",
+            "x".repeat(1200),
+            "y".repeat(1200)
+        );
+        let request = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "call_1",
+                    "content": large
+                }]
+            }]
+        });
+
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        let tool_content = converted["messages"][0]["content"]
+            .as_str()
+            .expect("tool content is text");
+        assert!(tool_content.contains("auto-summary"));
+        assert!(tool_content.contains("signal: error: important failure"));
     }
 }
