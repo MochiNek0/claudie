@@ -1,4 +1,5 @@
 pub(crate) mod gif_animation;
+pub(crate) mod theme;
 
 mod settings_panel;
 mod window;

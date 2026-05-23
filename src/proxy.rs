@@ -233,6 +233,10 @@ fn anthropic_to_openai_request(request: &Value, profile: &LlmProfile) -> Result<
         }
     }
 
+    for (key, value) in profile.openai_extra_body_fields()? {
+        out.insert(key, value);
+    }
+
     Ok(Value::Object(out))
 }
 
@@ -728,6 +732,7 @@ mod tests {
     fn converts_basic_text_request() {
         let profile = LlmProfile {
             model: "gpt-test".to_string(),
+            openai_extra_body: r#"{"reasoning_effort":"xhigh"}"#.to_string(),
             ..LlmProfile::default()
         };
         let request = json!({
@@ -742,6 +747,7 @@ mod tests {
         assert_eq!(converted["stream"], false);
         assert_eq!(converted["messages"][0]["role"], "system");
         assert_eq!(converted["messages"][1]["content"], "hello");
+        assert_eq!(converted["reasoning_effort"], "xhigh");
     }
 
     #[test]

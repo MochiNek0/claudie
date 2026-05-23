@@ -10,6 +10,7 @@ use crate::app::{AppState, PendingChoice, PendingPermission, PetMood};
 use crate::config::*;
 use crate::globals::PET_RENDERER;
 use crate::settings::UserSettings;
+use crate::ui::theme;
 use crate::util::{compact_path, shorten, wide};
 
 pub(super) fn render_scene(hdc: HDC, rect: &RECT, state: &RenderState) {
@@ -63,7 +64,7 @@ fn draw_permission_request(hdc: HDC, permission: &PendingPermission) {
         card_y + 22,
         text_w,
         "Permission request",
-        color_ink(),
+        theme::INK,
     );
     text_fit(
         hdc,
@@ -71,12 +72,12 @@ fn draw_permission_request(hdc: HDC, permission: &PendingPermission) {
         card_y + 47,
         text_w,
         &format!("{} wants access", permission.tool_name.trim()),
-        color_muted(),
+        theme::MUTED,
     );
     draw_permission_detail_panel(hdc, permission, text_x, card_y + 76, text_w);
-    button_tuple(hdc, ALLOW_BUTTON, "Allow", color_header(), color_accent());
-    button_tuple(hdc, ALWAYS_BUTTON, "Always", color_ink(), color_field());
-    button_tuple(hdc, DENY_BUTTON, "Deny", rgb(186, 63, 56), color_card());
+    draw_overlay_button(hdc, ALLOW_BUTTON, "Allow", OverlayButtonKind::Primary);
+    draw_overlay_button(hdc, ALWAYS_BUTTON, "Always", OverlayButtonKind::Secondary);
+    draw_overlay_button(hdc, DENY_BUTTON, "Deny", OverlayButtonKind::Danger);
 }
 
 fn draw_permission_detail_panel(hdc: HDC, permission: &PendingPermission, x: i32, y: i32, w: i32) {
@@ -87,9 +88,9 @@ fn draw_permission_detail_panel(hdc: HDC, permission: &PendingPermission, x: i32
         y,
         w,
         panel_h,
-        16,
-        color_field(),
-        color_field_border(),
+        theme::RADIUS_FIELD,
+        theme::FIELD,
+        theme::FIELD_BORDER,
     );
     let mut next_y = draw_wrapped_text_limited(
         hdc,
@@ -97,7 +98,7 @@ fn draw_permission_detail_panel(hdc: HDC, permission: &PendingPermission, x: i32
         y + 14,
         w - 32,
         &permission.summary,
-        color_ink(),
+        theme::INK,
         17,
         3,
     );
@@ -108,7 +109,7 @@ fn draw_permission_detail_panel(hdc: HDC, permission: &PendingPermission, x: i32
         next_y,
         w - 32,
         &format!("session {}", shorten(&permission.session_id, 8)),
-        color_muted(),
+        theme::MUTED,
     );
     next_y += 17;
     if !permission.cwd.is_empty() {
@@ -118,7 +119,7 @@ fn draw_permission_detail_panel(hdc: HDC, permission: &PendingPermission, x: i32
             next_y,
             w - 32,
             &compact_path(&permission.cwd),
-            color_muted(),
+            theme::MUTED_SOFT,
             17,
             2,
         );
@@ -141,7 +142,7 @@ fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
         CHOICE_CARD_Y + 22,
         text_w,
         &choice.title,
-        color_ink(),
+        theme::INK,
     );
     let mut next_y = CHOICE_CARD_Y + 50;
     if !choice.detail.trim().is_empty() {
@@ -151,7 +152,7 @@ fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
             next_y,
             text_w,
             &choice.detail,
-            color_muted(),
+            theme::MUTED,
             17,
             5,
         );
@@ -169,14 +170,14 @@ fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
             question.header.clone()
         };
         let question_y = next_y;
-        text_fit(hdc, text_x, question_y, text_w, &heading, color_muted());
+        text_fit(hdc, text_x, question_y, text_w, &heading, theme::MUTED);
         draw_wrapped_text_limited(
             hdc,
             text_x,
             question_y + 16,
             text_w,
             &question.question,
-            color_ink(),
+            theme::INK,
             17,
             2,
         );
@@ -190,15 +191,10 @@ fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
                 .selected
                 .get(question_index)
                 .is_some_and(|items| items.contains(&option_index));
-            let fill = if selected {
-                color_accent_soft()
+            let (fill, border) = if selected {
+                (theme::ACCENT_SOFT, theme::ACCENT)
             } else {
-                color_field()
-            };
-            let border = if selected {
-                color_accent()
-            } else {
-                color_field_border()
+                (theme::SURFACE, theme::FIELD_BORDER)
             };
             filled_round_rect(
                 hdc,
@@ -206,18 +202,17 @@ fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
                 next_y,
                 CHOICE_OPTION_W,
                 CHOICE_OPTION_H,
-                10,
+                theme::RADIUS_CHIP,
                 fill,
                 border,
             );
-            let marker = if selected { "[x]" } else { "[ ]" };
-            text(
-                hdc,
-                CHOICE_OPTION_X + 12,
-                next_y + 6,
-                marker,
-                color_accent(),
-            );
+            // Marker glyph: filled check for selected, hollow circle for idle.
+            let (marker, marker_color) = if selected {
+                ("\u{2713}", theme::ACCENT)
+            } else {
+                ("\u{25cb}", theme::MUTED_SOFT)
+            };
+            text(hdc, CHOICE_OPTION_X + 12, next_y + 6, marker, marker_color);
             let label = if option.description.is_empty() {
                 option.label.clone()
             } else {
@@ -225,11 +220,11 @@ fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
             };
             text_fit(
                 hdc,
-                CHOICE_OPTION_X + 44,
+                CHOICE_OPTION_X + 36,
                 next_y + 6,
-                CHOICE_OPTION_W - 56,
+                CHOICE_OPTION_W - 48,
                 &label,
-                color_ink(),
+                theme::INK,
             );
             next_y += CHOICE_OPTION_H + 4;
         }
@@ -237,29 +232,17 @@ fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
     }
 
     let all_answered = choice.selected.iter().all(|items| !items.is_empty());
-    let submit_fill = if all_answered {
-        color_accent()
+    let submit_kind = if all_answered {
+        OverlayButtonKind::Primary
     } else {
-        color_field()
+        OverlayButtonKind::PrimaryDisabled
     };
-    let submit_text = if all_answered {
-        color_header()
-    } else {
-        color_muted()
-    };
-    button_tuple(
-        hdc,
-        CHOICE_SUBMIT_BUTTON,
-        "Submit",
-        submit_text,
-        submit_fill,
-    );
-    button_tuple(
+    draw_overlay_button(hdc, CHOICE_SUBMIT_BUTTON, "Submit", submit_kind);
+    draw_overlay_button(
         hdc,
         CHOICE_DENY_BUTTON,
         "Cancel",
-        rgb(186, 63, 56),
-        color_card(),
+        OverlayButtonKind::Secondary,
     );
 }
 
@@ -275,7 +258,7 @@ fn draw_status_hud(hdc: HDC, state: &RenderState) {
             label,
             format_remaining(state.pomodoro.remaining(&state.settings.pomodoro))
         );
-        text_fit(hdc, BUBBLE_X + 14, 208, 180, &timer, rgb(62, 91, 150));
+        text_fit(hdc, BUBBLE_X + 14, 208, 180, &timer, theme::FOCUS_INDIGO);
     }
 }
 
@@ -363,9 +346,19 @@ fn draw_pet_fallback(hdc: HDC, mood: PetMood, x: i32, y: i32, w: i32, h: i32) {
 }
 
 fn draw_permission_card(hdc: HDC, x: i32, y: i32, w: i32, h: i32) {
-    let radius = 20;
-    filled_round_rect(hdc, x, y, w, h, radius, color_card(), color_border());
-    filled_round_rect(hdc, x, y + 1, w, 64, radius, color_header(), color_header());
+    let radius = theme::RADIUS_CARD;
+    filled_round_rect(hdc, x, y, w, h, radius, theme::SURFACE, theme::HAIRLINE);
+    // Header band: tinted surface; its bottom is masked by the hairline.
+    filled_round_rect(
+        hdc,
+        x,
+        y + 1,
+        w,
+        64,
+        radius,
+        theme::SURFACE_ALT,
+        theme::SURFACE_ALT,
+    );
     fill_rect(
         hdc,
         &RECT {
@@ -374,24 +367,31 @@ fn draw_permission_card(hdc: HDC, x: i32, y: i32, w: i32, h: i32) {
             right: x + w - 1,
             bottom: y + 65,
         },
-        color_border(),
+        theme::HAIRLINE,
     );
 }
 
-fn button_tuple(hdc: HDC, rect: (i32, i32, i32, i32), label: &str, border: u32, fill: u32) {
-    let (x, y, w, h) = rect;
-    button(hdc, x, y, w, h, label, border, fill);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OverlayButtonKind {
+    Primary,
+    PrimaryDisabled,
+    Secondary,
+    Danger,
 }
 
-fn button(hdc: HDC, x: i32, y: i32, w: i32, h: i32, label: &str, border: u32, fill: u32) {
-    let outline = if fill == color_accent() {
-        color_accent()
-    } else {
-        color_field_border()
+fn draw_overlay_button(hdc: HDC, rect: (i32, i32, i32, i32), label: &str, kind: OverlayButtonKind) {
+    let (x, y, w, h) = rect;
+    let (fill, border, text_color) = match kind {
+        OverlayButtonKind::Primary => (theme::ACCENT, theme::ACCENT, theme::SURFACE),
+        OverlayButtonKind::PrimaryDisabled => {
+            (theme::FIELD, theme::FIELD_BORDER, theme::MUTED_SOFT)
+        }
+        OverlayButtonKind::Secondary => (theme::SURFACE, theme::FIELD_BORDER, theme::INK),
+        OverlayButtonKind::Danger => (theme::SURFACE, theme::DANGER_SOFT, theme::DANGER),
     };
-    filled_round_rect(hdc, x, y, w, h, 12, fill, outline);
+    filled_round_rect(hdc, x, y, w, h, theme::RADIUS_BUTTON, fill, border);
     let label_x = x + (w - text_width(hdc, label)).max(0) / 2;
-    text(hdc, label_x, y + 8, label, border);
+    text(hdc, label_x, y + 8, label, text_color);
 }
 
 pub(super) fn fill_rect(hdc: HDC, rect: &RECT, color: u32) {
@@ -590,40 +590,4 @@ fn text(hdc: HDC, x: i32, y: i32, value: &str, color: u32) {
 
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
-}
-
-fn color_header() -> u32 {
-    rgb(255, 255, 255)
-}
-
-fn color_card() -> u32 {
-    rgb(255, 255, 255)
-}
-
-fn color_field() -> u32 {
-    rgb(240, 242, 245)
-}
-
-fn color_border() -> u32 {
-    rgb(210, 210, 215)
-}
-
-fn color_field_border() -> u32 {
-    rgb(210, 210, 215)
-}
-
-fn color_accent() -> u32 {
-    rgb(0, 122, 255)
-}
-
-fn color_accent_soft() -> u32 {
-    rgb(224, 239, 255)
-}
-
-fn color_ink() -> u32 {
-    rgb(29, 29, 31)
-}
-
-fn color_muted() -> u32 {
-    rgb(134, 134, 139)
 }

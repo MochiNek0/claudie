@@ -1,7 +1,7 @@
 pub(crate) mod storage;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,11 +21,18 @@ pub(crate) struct UserSettings {
     pub(crate) pet_dir: String,
     pub(crate) gif_dir: String,
     pub(crate) animations: AnimationSettings,
+    pub(crate) window_position: Option<WindowPosition>,
     #[serde(default = "default_pet_scale_percent")]
     pub(crate) pet_scale_percent: u32,
     #[serde(default = "default_sleep_after_secs")]
     pub(crate) sleep_after_secs: u32,
     pub(crate) pomodoro: PomodoroSettings,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) struct WindowPosition {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,6 +61,7 @@ pub(crate) struct LlmProfile {
     pub(crate) opus_model: String,
     pub(crate) sonnet_model: String,
     pub(crate) haiku_model: String,
+    pub(crate) openai_extra_body: String,
     pub(crate) extra_env: String,
 }
 
@@ -70,6 +78,7 @@ impl Default for UserSettings {
             pet_dir: String::new(),
             gif_dir: DEFAULT_GIF_DIR.to_string(),
             animations: AnimationSettings::default(),
+            window_position: None,
             pet_scale_percent: 80,
             sleep_after_secs: DEFAULT_SLEEP_AFTER_SECS,
             pomodoro: PomodoroSettings::default(),
@@ -251,6 +260,10 @@ impl LlmProfile {
         } else {
             api_key
         }
+    }
+
+    pub(crate) fn openai_extra_body_fields(&self) -> Result<Map<String, Value>, String> {
+        parse_openai_extra_body(&self.openai_extra_body)
     }
 
     fn env_pairs(&self) -> Vec<(&'static str, String)> {
@@ -456,6 +469,7 @@ pub(crate) fn current_claude_llm_profile() -> Option<LlmProfile> {
         haiku_model: env
             .and_then(|env| env_string(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL"))
             .unwrap_or_default(),
+        openai_extra_body: String::new(),
         extra_env: env.map(extra_env_from_claude).unwrap_or_default(),
     })
 }
@@ -573,6 +587,66 @@ fn parse_extra_env(value: &str) -> Result<Vec<(String, String)>, String> {
         pairs.push((key.to_string(), value.trim().to_string()));
     }
     Ok(pairs)
+}
+
+fn parse_openai_extra_body(value: &str) -> Result<Map<String, Value>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(Map::new());
+    }
+
+    if trimmed.starts_with('{') {
+        let value = serde_json::from_str::<Value>(trimmed)
+            .map_err(|err| format!("OpenAI extra body must be valid JSON: {err}"))?;
+        let Value::Object(map) = value else {
+            return Err("OpenAI extra body must be a JSON object".to_string());
+        };
+        return validate_openai_extra_body(map);
+    }
+
+    let mut map = Map::new();
+    for (index, line) in trimmed.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, raw_value)) = line.split_once('=').or_else(|| line.split_once(':')) else {
+            return Err(format!(
+                "OpenAI extra body line {} must be key=value or a JSON object",
+                index + 1
+            ));
+        };
+        let key = normalize_openai_extra_key(key.trim());
+        if key.is_empty() {
+            return Err(format!(
+                "OpenAI extra body line {} has an empty key",
+                index + 1
+            ));
+        }
+        let raw_value = raw_value.trim();
+        let parsed = serde_json::from_str::<Value>(raw_value)
+            .unwrap_or_else(|_| Value::String(raw_value.to_string()));
+        map.insert(key, parsed);
+    }
+    validate_openai_extra_body(map)
+}
+
+fn validate_openai_extra_body(map: Map<String, Value>) -> Result<Map<String, Value>, String> {
+    for key in map.keys() {
+        if matches!(key.as_str(), "messages" | "stream") {
+            return Err(format!(
+                "OpenAI extra body cannot override the managed `{key}` field"
+            ));
+        }
+    }
+    Ok(map)
+}
+
+fn normalize_openai_extra_key(key: &str) -> String {
+    match key {
+        "model_reasoning_effort" => "reasoning_effort".to_string(),
+        _ => key.to_string(),
+    }
 }
 
 fn managed_llm_env_keys() -> &'static [&'static str] {
@@ -761,5 +835,31 @@ mod tests {
         };
 
         assert_eq!(profile.openai_upstream_api_key(), "upstream-token");
+    }
+
+    #[test]
+    fn openai_extra_body_accepts_json_object() {
+        let profile = LlmProfile {
+            openai_extra_body: r#"{"reasoning_effort":"xhigh","parallel_tool_calls":false}"#
+                .to_string(),
+            ..LlmProfile::default()
+        };
+
+        let body = profile.openai_extra_body_fields().unwrap();
+        assert_eq!(body["reasoning_effort"], "xhigh");
+        assert_eq!(body["parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn openai_extra_body_accepts_assignment_lines() {
+        let profile = LlmProfile {
+            openai_extra_body: "model_reasoning_effort = \"xhigh\"\nservice_tier = flex"
+                .to_string(),
+            ..LlmProfile::default()
+        };
+
+        let body = profile.openai_extra_body_fields().unwrap();
+        assert_eq!(body["reasoning_effort"], "xhigh");
+        assert_eq!(body["service_tier"], "flex");
     }
 }

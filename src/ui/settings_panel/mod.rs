@@ -10,16 +10,18 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
-    ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
+    DRAWITEMSTRUCT, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     FindWindowW, GWLP_USERDATA, GetDlgCtrlID, GetSystemMetrics, GetWindowLongPtrW, HTCAPTION,
-    HTCLIENT, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_HAND, LoadCursorW, LoadIconW, RegisterClassW,
-    SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SendMessageW, SetCursor, SetForegroundWindow,
-    SetTimer, SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
-    WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND, WM_HSCROLL,
-    WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SETICON, WM_TIMER, WNDCLASSW, WS_POPUP, WS_VISIBLE,
+    HTCLIENT, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOPMOST, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_HAND,
+    LoadCursorW, LoadIconW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetCursor, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_HSCROLL, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SETICON,
+    WM_TIMER, WNDCLASSW, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::app::pomodoro::{PomodoroMode, PomodoroStatus, format_remaining};
@@ -34,6 +36,7 @@ use crate::settings::{
     mood_rows, save_llm_profile_db, save_user_settings,
 };
 use crate::ui::gif_animation::reload_animation_store;
+use crate::ui::theme;
 use crate::util::wide;
 
 const CLASS_NAME: &str = "ClaudieSettingsWindow";
@@ -52,6 +55,7 @@ const ID_OPUS_MODEL: usize = 2007;
 const ID_SONNET_MODEL: usize = 2008;
 const ID_HAIKU_MODEL: usize = 2009;
 const ID_EXTRA_ENV: usize = 2010;
+const ID_OPENAI_EXTRA_BODY: usize = 2011;
 const ID_PET_SCALE: usize = 2090;
 const ID_POMODORO_FOCUS: usize = 2091;
 const ID_POMODORO_SHORT_BREAK: usize = 2092;
@@ -88,27 +92,39 @@ const SETTINGS_PANEL_PADDING: i32 = 16;
 const SETTINGS_CONTAINER_PAD_X: i32 = 12;
 const SETTINGS_CONTAINER_PAD_Y: i32 = 8;
 const SETTINGS_GAP: i32 = 8;
-const SETTINGS_PANEL_RADIUS: i32 = 16;
-const COLOR_BG: u32 = rgb(245, 245, 247);
-const COLOR_HEADER: u32 = rgb(255, 255, 255);
-const COLOR_CARD: u32 = rgb(255, 255, 255);
-const COLOR_FIELD: u32 = rgb(240, 242, 245);
-const COLOR_BORDER: u32 = rgb(210, 210, 215);
-const COLOR_FIELD_BORDER: u32 = rgb(210, 210, 215);
-const COLOR_ACCENT: u32 = rgb(0, 122, 255);
-const COLOR_ACCENT_SOFT: u32 = rgb(226, 226, 231);
-const COLOR_INK: u32 = rgb(29, 29, 31);
-const COLOR_MUTED: u32 = rgb(134, 134, 139);
+const SETTINGS_PANEL_RADIUS: i32 = theme::RADIUS_WINDOW;
+const SETTINGS_HEADER_HEIGHT: i32 = 118;
+const SETTINGS_TAB_HEIGHT: i32 = 34;
+const SETTINGS_TAB_TOP: i32 = 76;
 
-const fn rgb(r: u8, g: u8, b: u8) -> u32 {
-    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
-}
+const COLOR_BG: u32 = theme::BG;
+const COLOR_HEADER: u32 = theme::SURFACE_ALT;
+const COLOR_CARD: u32 = theme::SURFACE;
+const COLOR_FIELD: u32 = theme::FIELD;
+const COLOR_BORDER: u32 = theme::HAIRLINE;
+const COLOR_FIELD_BORDER: u32 = theme::FIELD_BORDER;
+const COLOR_ACCENT: u32 = theme::ACCENT;
+const COLOR_INK: u32 = theme::INK;
+const COLOR_MUTED: u32 = theme::MUTED;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     Basic,
     Llm,
     Pomodoro,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ButtonKind {
+    Primary,
+    Secondary,
+}
+
+pub(super) fn button_kind(id: usize) -> ButtonKind {
+    match id {
+        ID_PROFILE_USE | ID_SAVE_PET | ID_SAVE_POMODORO | ID_START_POMODORO => ButtonKind::Primary,
+        _ => ButtonKind::Secondary,
+    }
 }
 
 pub(crate) unsafe fn show_settings_panel(parent: HWND) {
@@ -123,8 +139,10 @@ unsafe fn show_settings_panel_tab(parent: HWND, tab: SettingsTab) {
     let existing = FindWindowW(class_name.as_ptr(), std::ptr::null());
     if !existing.is_null() {
         switch_tab(existing, tab);
+        set_settings_selected_layer(existing, true);
         ShowWindow(existing, SW_SHOW);
         SetForegroundWindow(existing);
+        keep_pet_above(parent);
         return;
     }
 
@@ -141,7 +159,7 @@ unsafe fn show_settings_panel_tab(parent: HWND, tab: SettingsTab) {
         y,
         SETTINGS_WIDTH,
         SETTINGS_HEIGHT,
-        parent,
+        std::ptr::null_mut(),
         std::ptr::null_mut(),
         GetModuleHandleW(std::ptr::null()),
         Box::into_raw(settings) as *mut _,
@@ -150,8 +168,10 @@ unsafe fn show_settings_panel_tab(parent: HWND, tab: SettingsTab) {
     if !hwnd.is_null() {
         apply_settings_window_chrome(hwnd);
         switch_tab(hwnd, tab);
+        set_settings_selected_layer(hwnd, true);
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
+        keep_pet_above(parent);
     }
 }
 
@@ -207,6 +227,54 @@ unsafe fn apply_settings_window_chrome(hwnd: HWND) {
     if !region.is_null() && SetWindowRgn(hwnd, region, 1) == 0 {
         DeleteObject(region as _);
     }
+}
+
+unsafe fn set_settings_selected_layer(hwnd: HWND, selected: bool) {
+    if selected {
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    } else {
+        SetWindowPos(
+            hwnd,
+            HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+unsafe fn keep_pet_above(hwnd: HWND) {
+    if hwnd.is_null() {
+        return;
+    }
+    SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+    );
 }
 
 unsafe fn is_pointer_control(hwnd: HWND) -> bool {
@@ -273,8 +341,22 @@ unsafe extern "system" fn settings_proc(
             SetTimer(hwnd, 1, 1000, None);
             0
         }
+        WM_ACTIVATE => {
+            set_settings_selected_layer(hwnd, loword(wparam) != 0);
+            0
+        }
         WM_PAINT => {
             paint_settings(hwnd);
+            0
+        }
+        WM_DRAWITEM => {
+            let draw = lparam as *const DRAWITEMSTRUCT;
+            if !draw.is_null()
+                && let Some(panel) = panel(hwnd)
+            {
+                draw_button_item(panel, &*draw);
+                return 1;
+            }
             0
         }
         WM_ERASEBKGND => 1,
@@ -468,6 +550,7 @@ struct SettingsPanel {
     opus_model: HWND,
     sonnet_model: HWND,
     haiku_model: HWND,
+    openai_extra_body: HWND,
     extra_env: HWND,
     pet_dir: HWND,
     gif_dir: HWND,
@@ -512,6 +595,7 @@ impl SettingsPanel {
             opus_model: std::ptr::null_mut(),
             sonnet_model: std::ptr::null_mut(),
             haiku_model: std::ptr::null_mut(),
+            openai_extra_body: std::ptr::null_mut(),
             extra_env: std::ptr::null_mut(),
             pet_dir: std::ptr::null_mut(),
             gif_dir: std::ptr::null_mut(),
@@ -543,44 +627,44 @@ unsafe fn create_controls(hwnd: HWND, panel: &mut SettingsPanel) {
     let close = clickable_label(
         hwnd,
         ID_CLOSE_SETTINGS,
-        SETTINGS_WIDTH - 54,
-        22,
-        30,
-        30,
-        "X",
+        SETTINGS_WIDTH - 56,
+        20,
+        32,
+        32,
+        "\u{00d7}",
     );
-    set_control_font(close, panel.font_label);
+    set_control_font(close, panel.font_heading);
 
     panel.tab_basic = clickable_label(
         hwnd,
         ID_TAB_BASIC,
         SETTINGS_PANEL_PADDING + SETTINGS_CONTAINER_PAD_X,
-        76,
+        SETTINGS_TAB_TOP,
         110,
-        34,
+        SETTINGS_TAB_HEIGHT,
         "Basic",
     );
-    set_control_font(panel.tab_basic, panel.font_label);
+    set_control_font(panel.tab_basic, panel.font_heading);
     panel.tab_pomodoro = clickable_label(
         hwnd,
         ID_TAB_POMODORO,
         SETTINGS_PANEL_PADDING + SETTINGS_CONTAINER_PAD_X + 110 + SETTINGS_GAP,
-        76,
+        SETTINGS_TAB_TOP,
         124,
-        34,
+        SETTINGS_TAB_HEIGHT,
         "Pomodoro",
     );
-    set_control_font(panel.tab_pomodoro, panel.font_label);
+    set_control_font(panel.tab_pomodoro, panel.font_heading);
     panel.tab_llm = clickable_label(
         hwnd,
         ID_TAB_LLM,
         SETTINGS_PANEL_PADDING + SETTINGS_CONTAINER_PAD_X + 110 + SETTINGS_GAP + 124 + SETTINGS_GAP,
-        76,
+        SETTINGS_TAB_TOP,
         140,
-        34,
+        SETTINGS_TAB_HEIGHT,
         "LLM Profiles",
     );
-    set_control_font(panel.tab_llm, panel.font_label);
+    set_control_font(panel.tab_llm, panel.font_heading);
 
     add_llm_heading(panel, hwnd, 48, 138, 240, 26, "Provider profiles");
     add_llm_note(
@@ -631,7 +715,10 @@ unsafe fn create_controls(hwnd: HWND, panel: &mut SettingsPanel) {
     panel.haiku_model = add_llm_edit(panel, hwnd, ID_HAIKU_MODEL, 540, 450, 240, 36, "");
 
     add_llm_label(panel, hwnd, 48, 488, 118, 16, "Extra env");
-    panel.extra_env = add_llm_multiline(panel, hwnd, ID_EXTRA_ENV, 48, 508, 732, 62, "");
+    panel.extra_env = add_llm_multiline(panel, hwnd, ID_EXTRA_ENV, 48, 508, 338, 62, "");
+    add_llm_label(panel, hwnd, 394, 488, 170, 16, "OpenAI body");
+    panel.openai_extra_body =
+        add_llm_multiline(panel, hwnd, ID_OPENAI_EXTRA_BODY, 394, 508, 386, 62, "");
 
     add_llm_button(
         panel,
@@ -982,6 +1069,10 @@ unsafe fn save_profile(hwnd: HWND, activate_profile: bool) -> Option<SavedProfil
         );
         return None;
     }
+    if let Err(err) = profile.openai_extra_body_fields() {
+        message(hwnd, "Invalid OpenAI body", &err);
+        return None;
+    }
     if profile.id.trim().is_empty() {
         profile.id = default_profile_id(&profile.name);
     }
@@ -1306,6 +1397,7 @@ unsafe fn current_profile_from_fields(panel: &SettingsPanel) -> LlmProfile {
         opus_model: text_value(panel.opus_model),
         sonnet_model: text_value(panel.sonnet_model),
         haiku_model: text_value(panel.haiku_model),
+        openai_extra_body: text_value(panel.openai_extra_body),
         extra_env: text_value(panel.extra_env),
     }
 }
@@ -1320,6 +1412,7 @@ unsafe fn set_profile_fields(panel: &SettingsPanel, profile: &LlmProfile) {
     set_text(panel.opus_model, &profile.opus_model);
     set_text(panel.sonnet_model, &profile.sonnet_model);
     set_text(panel.haiku_model, &profile.haiku_model);
+    set_text(panel.openai_extra_body, &profile.openai_extra_body);
     set_text(panel.extra_env, &profile.extra_env);
 }
 

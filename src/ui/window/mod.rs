@@ -1,5 +1,6 @@
 mod render;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use render::{RenderState, fill_rect, render_permission_overlay, render_scene, snapshot_state};
@@ -17,15 +18,16 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-    GetClientRect, GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, HTCAPTION,
-    HWND_TOPMOST, IDC_ARROW, IDC_HAND, LWA_COLORKEY, LoadCursorW, MF_SEPARATOR, MF_STRING, MSG,
-    PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SendMessageW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TPM_TOPALIGN, TrackPopupMenu, TranslateMessage, WM_CREATE, WM_DESTROY, WM_ERASEBKGND,
-    WM_HOTKEY, WM_LBUTTONDOWN, WM_NCLBUTTONDOWN, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WS_VISIBLE,
+    GetClientRect, GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
+    HTCAPTION, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LWA_COLORKEY, LoadCursorW, MF_SEPARATOR,
+    MF_STRING, MSG, PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SendMessageW, SetCursor, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN, TrackPopupMenu, TranslateMessage, WM_CREATE,
+    WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_NCLBUTTONDOWN, WM_PAINT, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::app::pomodoro::PomodoroStatus;
@@ -36,8 +38,11 @@ use crate::hooks::{
     decide_current_permission, deny_current_choice, submit_current_choice,
     toggle_current_choice_option,
 };
+use crate::settings::{UserSettings, WindowPosition, load_user_settings, save_user_settings};
 use crate::ui::settings_panel::show_settings_panel;
 use crate::util::wide;
+
+static CONTEXT_MENU_OPEN: AtomicBool = AtomicBool::new(false);
 
 pub(crate) unsafe fn run_window(port: u16) {
     let class_name = wide("ClaudieWindow");
@@ -64,13 +69,15 @@ pub(crate) unsafe fn run_window(port: u16) {
     };
     RegisterClassW(&overlay_wc);
 
+    let settings = current_user_settings();
+    let (x, y) = initial_pet_position(&settings);
     let hwnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
         class_name.as_ptr(),
         title.as_ptr(),
         WS_POPUP | WS_VISIBLE,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
+        x,
+        y,
         WINDOW_WIDTH,
         WINDOW_HEIGHT,
         std::ptr::null_mut(),
@@ -105,6 +112,7 @@ pub(crate) unsafe fn run_window(port: u16) {
 
     SetLayeredWindowAttributes(hwnd, TRANSPARENT_KEY, 255, LWA_COLORKEY);
     ShowWindow(hwnd, SW_SHOW);
+    ensure_pet_topmost(hwnd);
     RegisterHotKey(hwnd, 1, MOD_CONTROL | MOD_SHIFT, 'Y' as u32);
     RegisterHotKey(hwnd, 2, MOD_CONTROL | MOD_SHIFT, 'N' as u32);
     SetTimer(hwnd, 1, 33, None);
@@ -145,6 +153,9 @@ unsafe extern "system" fn window_proc(
                     user_idle.map(|snapshot| snapshot.1),
                 );
             }
+            if !CONTEXT_MENU_OPEN.load(Ordering::Relaxed) {
+                ensure_pet_topmost(hwnd);
+            }
             sync_permission_overlay(overlay_hwnd(hwnd));
             InvalidateRect(hwnd, std::ptr::null(), 0);
             0
@@ -176,6 +187,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_SETCURSOR => DefWindowProcW(hwnd, msg, wparam, lparam),
         WM_DESTROY => {
+            persist_pet_window_position(hwnd);
             let overlay = overlay_hwnd(hwnd);
             if !overlay.is_null() {
                 DestroyWindow(overlay);
@@ -184,6 +196,68 @@ unsafe extern "system" fn window_proc(
             0
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn current_user_settings() -> UserSettings {
+    APP_STATE
+        .get()
+        .map(|state| state.lock().expect("state poisoned").settings.clone())
+        .unwrap_or_else(load_user_settings)
+}
+
+unsafe fn initial_pet_position(settings: &UserSettings) -> (i32, i32) {
+    let Some(position) = settings.window_position else {
+        return (CW_USEDEFAULT, CW_USEDEFAULT);
+    };
+    clamp_window_position(position.x, position.y, WINDOW_WIDTH, WINDOW_HEIGHT)
+}
+
+unsafe fn clamp_window_position(x: i32, y: i32, width: i32, height: i32) -> (i32, i32) {
+    let mut min_x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    let mut min_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    let mut screen_w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    let mut screen_h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if screen_w <= 0 || screen_h <= 0 {
+        min_x = 0;
+        min_y = 0;
+        screen_w = GetSystemMetrics(SM_CXSCREEN);
+        screen_h = GetSystemMetrics(SM_CYSCREEN);
+    }
+    let screen_w = screen_w.max(width);
+    let screen_h = screen_h.max(height);
+    let max_x = (min_x + screen_w - width).max(min_x);
+    let max_y = (min_y + screen_h - height).max(min_y);
+    (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
+}
+
+unsafe fn ensure_pet_topmost(hwnd: HWND) {
+    SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+    );
+}
+
+unsafe fn persist_pet_window_position(hwnd: HWND) {
+    let mut rect = RECT::default();
+    if GetWindowRect(hwnd, &mut rect) == 0 {
+        return;
+    }
+
+    let mut settings = current_user_settings();
+    settings.window_position = Some(WindowPosition {
+        x: rect.left,
+        y: rect.top,
+    });
+    if save_user_settings(&settings).is_ok()
+        && let Some(state) = APP_STATE.get()
+    {
+        state.lock().expect("state poisoned").settings = settings;
     }
 }
 
@@ -342,6 +416,7 @@ unsafe fn show_context_menu(hwnd: HWND) {
     let mut point = POINT { x: 0, y: 0 };
     if GetCursorPos(&mut point) != 0 {
         SetForegroundWindow(hwnd);
+        CONTEXT_MENU_OPEN.store(true, Ordering::Relaxed);
         let command = TrackPopupMenu(
             menu,
             TPM_RIGHTBUTTON | TPM_TOPALIGN | TPM_RETURNCMD,
@@ -351,6 +426,8 @@ unsafe fn show_context_menu(hwnd: HWND) {
             hwnd,
             std::ptr::null(),
         );
+        CONTEXT_MENU_OPEN.store(false, Ordering::Relaxed);
+        ensure_pet_topmost(hwnd);
         if command as usize == MENU_SETTINGS_ID {
             show_settings_panel(hwnd);
         } else if command as usize == MENU_POMODORO_START_ID {

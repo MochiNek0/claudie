@@ -6,11 +6,12 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BS_DEFPUSHBUTTON, BS_FLAT, BS_PUSHBUTTON, CBS_DROPDOWNLIST, CreateWindowExW, ES_AUTOHSCROLL,
-    ES_AUTOVSCROLL, ES_MULTILINE, GetWindowTextLengthW, GetWindowTextW, MB_ICONERROR, MB_OK,
-    MessageBoxW, SendMessageW, SetWindowTextW, WM_SETFONT, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
+    BS_OWNERDRAW, CBS_DROPDOWNLIST, CreateWindowExW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE,
+    GetWindowTextLengthW, GetWindowTextW, MB_ICONERROR, MB_OK, MessageBoxW, SendMessageW,
+    SetWindowTextW, WM_SETFONT, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
 };
 
+use crate::ui::theme;
 use crate::util::wide;
 
 use super::{
@@ -442,18 +443,16 @@ pub(super) unsafe fn button(
     w: i32,
     h: i32,
     value: &str,
-    default: bool,
+    _default: bool,
 ) -> HWND {
-    let style = if default {
-        BS_DEFPUSHBUTTON
-    } else {
-        BS_PUSHBUTTON
-    } | BS_FLAT;
+    // All settings buttons are owner-drawn so primary / secondary chrome can
+    // match the rest of the panel; the kind is resolved from the control id
+    // when WM_DRAWITEM fires.
     create_control(
         parent,
         0,
         "BUTTON",
-        WS_TABSTOP | style as u32,
+        WS_TABSTOP | BS_OWNERDRAW as u32,
         x,
         y,
         w,
@@ -503,17 +502,17 @@ pub(super) unsafe fn create_control(
 }
 
 pub(super) unsafe fn create_style_resources(panel: &mut SettingsPanel) {
-    panel.font_title = create_font(24, 650);
-    panel.font_heading = create_font(18, 600);
-    panel.font_body = create_font(14, 400);
-    panel.font_label = create_font(13, 600);
+    panel.font_title = create_font(theme::FONT_TITLE_PX, theme::WEIGHT_SEMIBOLD);
+    panel.font_heading = create_font(theme::FONT_HEADING_PX, theme::WEIGHT_SEMIBOLD);
+    panel.font_body = create_font(theme::FONT_BODY_PX, theme::WEIGHT_REGULAR);
+    panel.font_label = create_font(theme::FONT_LABEL_PX, theme::WEIGHT_SEMIBOLD);
     panel.brush_bg = CreateSolidBrush(COLOR_BG);
     panel.brush_card = CreateSolidBrush(COLOR_CARD);
     panel.brush_field = CreateSolidBrush(COLOR_FIELD);
 }
 
 pub(super) unsafe fn create_font(height: i32, weight: i32) -> HFONT {
-    let face = wide("Segoe UI");
+    let face = wide(theme::FONT_FACE);
     CreateFontW(
         -height,
         0,
