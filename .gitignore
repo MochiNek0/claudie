@@ -1,0 +1,4 @@
+/target/
+/.claude-pet-state.json
+bash.exe.stackdump
+/dist/

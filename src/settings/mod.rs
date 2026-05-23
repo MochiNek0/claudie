@@ -1,0 +1,765 @@
+pub(crate) mod storage;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::app::{PetMood, pomodoro::PomodoroSettings};
+use crate::config::{DEFAULT_PROXY_PORT, PET_SCALE_MAX_PERCENT, PET_SCALE_MIN_PERCENT};
+use storage::{json_without_bom, read_json, read_json_or_default, save_pretty_json};
+
+const DEFAULT_GIF_DIR: &str = "assets/claudie";
+const DEFAULT_SLEEP_AFTER_SECS: u32 = 75;
+const SLEEP_AFTER_MIN_SECS: u32 = 15;
+const SLEEP_AFTER_MAX_SECS: u32 = 1800;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct UserSettings {
+    pub(crate) pet_dir: String,
+    pub(crate) gif_dir: String,
+    pub(crate) animations: AnimationSettings,
+    #[serde(default = "default_pet_scale_percent")]
+    pub(crate) pet_scale_percent: u32,
+    #[serde(default = "default_sleep_after_secs")]
+    pub(crate) sleep_after_secs: u32,
+    pub(crate) pomodoro: PomodoroSettings,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct AnimationSettings {
+    pub(crate) idle: String,
+    pub(crate) thinking: String,
+    pub(crate) typing: String,
+    pub(crate) building: String,
+    pub(crate) permission: String,
+    pub(crate) happy: String,
+    pub(crate) error: String,
+    pub(crate) sleeping: String,
+    pub(crate) subagent: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct LlmProfile {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) base_url: String,
+    pub(crate) auth_token: String,
+    pub(crate) api_key: String,
+    pub(crate) model: String,
+    pub(crate) opus_model: String,
+    pub(crate) sonnet_model: String,
+    pub(crate) haiku_model: String,
+    pub(crate) extra_env: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct LlmProfileDb {
+    pub(crate) profiles: Vec<LlmProfile>,
+    pub(crate) active_profile_id: String,
+}
+
+impl Default for UserSettings {
+    fn default() -> Self {
+        Self {
+            pet_dir: String::new(),
+            gif_dir: DEFAULT_GIF_DIR.to_string(),
+            animations: AnimationSettings::default(),
+            pet_scale_percent: 80,
+            sleep_after_secs: DEFAULT_SLEEP_AFTER_SECS,
+            pomodoro: PomodoroSettings::default(),
+        }
+    }
+}
+
+impl Default for AnimationSettings {
+    fn default() -> Self {
+        Self {
+            idle: "idle".to_string(),
+            thinking: "thinking".to_string(),
+            typing: "typing".to_string(),
+            building: "building".to_string(),
+            permission: "permission".to_string(),
+            happy: "happy".to_string(),
+            error: "error".to_string(),
+            sleeping: "sleeping".to_string(),
+            subagent: "subagent".to_string(),
+        }
+    }
+}
+
+impl UserSettings {
+    pub(crate) fn pet_scale_percent(&self) -> u32 {
+        self.pet_scale_percent
+            .clamp(PET_SCALE_MIN_PERCENT, PET_SCALE_MAX_PERCENT)
+    }
+
+    pub(crate) fn sleep_after_secs(&self) -> u32 {
+        self.sleep_after_secs
+            .clamp(SLEEP_AFTER_MIN_SECS, SLEEP_AFTER_MAX_SECS)
+    }
+
+    pub(crate) fn animation_value(&self, mood: PetMood) -> &str {
+        match mood {
+            PetMood::Idle => &self.animations.idle,
+            PetMood::Thinking => &self.animations.thinking,
+            PetMood::Typing => &self.animations.typing,
+            PetMood::Building => &self.animations.building,
+            PetMood::Permission => &self.animations.permission,
+            PetMood::Happy => &self.animations.happy,
+            PetMood::Error => &self.animations.error,
+            PetMood::Sleeping => &self.animations.sleeping,
+            PetMood::Subagent => &self.animations.subagent,
+        }
+    }
+
+    pub(crate) fn set_animation_value(&mut self, mood: PetMood, value: String) {
+        match mood {
+            PetMood::Idle => self.animations.idle = value,
+            PetMood::Thinking => self.animations.thinking = value,
+            PetMood::Typing => self.animations.typing = value,
+            PetMood::Building => self.animations.building = value,
+            PetMood::Permission => self.animations.permission = value,
+            PetMood::Happy => self.animations.happy = value,
+            PetMood::Error => self.animations.error = value,
+            PetMood::Sleeping => self.animations.sleeping = value,
+            PetMood::Subagent => self.animations.subagent = value,
+        }
+    }
+
+    pub(crate) fn pet_asset_base_dir(&self) -> PathBuf {
+        let trimmed = self.pet_dir.trim();
+        if trimmed.is_empty() {
+            default_bundled_pet_dir()
+        } else {
+            expand_home(trimmed)
+        }
+    }
+}
+
+fn default_pet_scale_percent() -> u32 {
+    80
+}
+
+fn default_sleep_after_secs() -> u32 {
+    DEFAULT_SLEEP_AFTER_SECS
+}
+
+impl LlmProfileDb {
+    pub(crate) fn normalize(&mut self) {
+        self.profiles.retain(|profile| {
+            !profile.id.trim().is_empty()
+                || !profile.name.trim().is_empty()
+                || !profile.model.trim().is_empty()
+        });
+        for profile in &mut self.profiles {
+            if profile.id.trim().is_empty() {
+                profile.id = default_profile_id(&profile.name);
+            } else {
+                profile.id = profile.id.trim().to_string();
+            }
+        }
+        if self.active_profile_id.trim().is_empty() {
+            if let Some(profile) = self.profiles.first() {
+                self.active_profile_id = profile.id.clone();
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn active_profile(&self) -> Option<&LlmProfile> {
+        self.profiles
+            .iter()
+            .find(|profile| profile.id == self.active_profile_id)
+            .or_else(|| self.profiles.first())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn active_label(&self) -> String {
+        self.active_profile()
+            .map(LlmProfile::display_label)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn upsert_profile(&mut self, mut profile: LlmProfile) {
+        if profile.id.trim().is_empty() {
+            profile.id = default_profile_id(&profile.name);
+        } else {
+            profile.id = profile.id.trim().to_string();
+        }
+        if let Some(existing) = self
+            .profiles
+            .iter_mut()
+            .find(|existing| existing.id == profile.id)
+        {
+            *existing = profile;
+        } else {
+            self.profiles.push(profile);
+        }
+    }
+}
+
+impl LlmProfile {
+    pub(crate) fn display_label(&self) -> String {
+        match (self.name.trim().is_empty(), self.model.trim().is_empty()) {
+            (false, false) => format!("{} {}", self.name.trim(), self.model.trim()),
+            (false, true) => self.name.trim().to_string(),
+            (true, false) => format!("model {}", self.model.trim()),
+            (true, true) => String::new(),
+        }
+    }
+
+    pub(crate) fn is_openai_chat_proxy(&self) -> bool {
+        let base_url = self.base_url.trim().to_ascii_lowercase();
+        base_url.contains("/chat/completions")
+            || self.extra_env.lines().any(|line| {
+                let Some((key, value)) = line.split_once('=') else {
+                    return false;
+                };
+                let key = key.trim();
+                let value = value.trim().to_ascii_lowercase();
+                (matches!(key, "CLAUDIE_API_FORMAT" | "CLAUDIE_LLM_FORMAT")
+                    && matches!(
+                        value.as_str(),
+                        "openai" | "openai-chat" | "openai-chat-completions"
+                    ))
+                    || (key == "CLAUDIE_OPENAI_PROXY"
+                        && matches!(value.as_str(), "1" | "true" | "yes"))
+            })
+    }
+
+    pub(crate) fn openai_chat_completions_url(&self) -> String {
+        let base_url = self.base_url.trim().trim_end_matches('/');
+        if base_url.ends_with("/chat/completions") {
+            base_url.to_string()
+        } else if base_url.ends_with("/v1") {
+            format!("{base_url}/chat/completions")
+        } else {
+            format!("{base_url}/v1/chat/completions")
+        }
+    }
+
+    pub(crate) fn openai_upstream_api_key(&self) -> &str {
+        let api_key = self.api_key.trim();
+        if api_key.is_empty() {
+            self.auth_token.trim()
+        } else {
+            api_key
+        }
+    }
+
+    fn env_pairs(&self) -> Vec<(&'static str, String)> {
+        let proxy_base_url = format!("http://127.0.0.1:{DEFAULT_PROXY_PORT}");
+        let proxy_auth_token = self
+            .auth_token
+            .trim()
+            .is_empty()
+            .then(|| "claudie-openai-proxy".to_string())
+            .unwrap_or_else(|| self.auth_token.trim().to_string());
+        let fields = if self.is_openai_chat_proxy() {
+            [
+                ("ANTHROPIC_BASE_URL", proxy_base_url.as_str()),
+                ("ANTHROPIC_AUTH_TOKEN", proxy_auth_token.as_str()),
+                ("ANTHROPIC_API_KEY", ""),
+                ("ANTHROPIC_MODEL", self.model.trim()),
+                ("ANTHROPIC_DEFAULT_OPUS_MODEL", self.opus_model.trim()),
+                ("ANTHROPIC_DEFAULT_SONNET_MODEL", self.sonnet_model.trim()),
+                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", self.haiku_model.trim()),
+            ]
+        } else {
+            [
+                ("ANTHROPIC_BASE_URL", self.base_url.trim()),
+                ("ANTHROPIC_AUTH_TOKEN", self.auth_token.trim()),
+                ("ANTHROPIC_API_KEY", self.api_key.trim()),
+                ("ANTHROPIC_MODEL", self.model.trim()),
+                ("ANTHROPIC_DEFAULT_OPUS_MODEL", self.opus_model.trim()),
+                ("ANTHROPIC_DEFAULT_SONNET_MODEL", self.sonnet_model.trim()),
+                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", self.haiku_model.trim()),
+            ]
+        };
+        fields
+            .into_iter()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(key, value)| (key, value.to_string()))
+            .collect()
+    }
+}
+
+pub(crate) fn settings_path() -> PathBuf {
+    claudie_home().join("settings.json")
+}
+
+pub(crate) fn llm_profiles_path() -> PathBuf {
+    claudie_home().join("llm_profiles.json")
+}
+
+pub(crate) fn load_user_settings() -> UserSettings {
+    let path = settings_path();
+    let mut had_settings_file = true;
+    let mut settings = match read_json(&path) {
+        Ok(settings) => settings,
+        Err(_) => {
+            had_settings_file = false;
+            UserSettings::default()
+        }
+    };
+
+    if normalize_user_settings(&mut settings) && had_settings_file {
+        let _ = save_user_settings(&settings);
+    }
+    settings
+}
+
+fn normalize_user_settings(settings: &mut UserSettings) -> bool {
+    let mut changed = false;
+
+    if settings.gif_dir.trim().is_empty() {
+        settings.gif_dir = DEFAULT_GIF_DIR.to_string();
+        changed = true;
+    }
+
+    // If the persisted gif_dir doesn't actually contain the required GIFs
+    // (e.g. left over from a previous build), reset it to the bundled default
+    // so the panel surfaces the right path next time it loads.
+    if !settings.gif_dir.trim().is_empty()
+        && settings.gif_dir != DEFAULT_GIF_DIR
+        && configured_gif_dir_strict(settings).is_none()
+    {
+        settings.gif_dir = DEFAULT_GIF_DIR.to_string();
+        changed = true;
+    }
+
+    if settings.pet_scale_percent != settings.pet_scale_percent() {
+        settings.pet_scale_percent = settings.pet_scale_percent();
+        changed = true;
+    }
+
+    if settings.sleep_after_secs != settings.sleep_after_secs() {
+        settings.sleep_after_secs = settings.sleep_after_secs();
+        changed = true;
+    }
+
+    if settings.pomodoro.normalize() {
+        changed = true;
+    }
+
+    changed
+}
+
+pub(crate) fn load_llm_profile_db() -> LlmProfileDb {
+    let mut db: LlmProfileDb = read_json_or_default(&llm_profiles_path());
+    db.normalize();
+    db
+}
+
+pub(crate) fn save_llm_profile_db(db: &LlmProfileDb) -> Result<(), String> {
+    save_pretty_json(&llm_profiles_path(), db)
+}
+
+pub(crate) fn save_user_settings(settings: &UserSettings) -> Result<(), String> {
+    save_pretty_json(&settings_path(), settings)
+}
+
+pub(crate) fn apply_llm_profile_to_claude(profile: &LlmProfile) -> Result<(), String> {
+    if profile.name.trim().is_empty() {
+        return Err("Profile name is required".to_string());
+    }
+
+    let path = claude_settings_path();
+    let mut settings = if path.exists() {
+        let text = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+        serde_json::from_str::<Value>(json_without_bom(&text))
+            .map_err(|err| format!("~/.claude/settings.json is not valid JSON: {err}"))?
+    } else {
+        Value::Object(serde_json::Map::new())
+    };
+
+    if !settings.is_object() {
+        settings = Value::Object(serde_json::Map::new());
+    }
+    let root = settings.as_object_mut().expect("settings object");
+    let env_value = root
+        .entry("env".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !env_value.is_object() {
+        *env_value = Value::Object(serde_json::Map::new());
+    }
+    let env = env_value.as_object_mut().expect("env object");
+
+    for key in managed_llm_env_keys() {
+        env.remove(*key);
+    }
+    for (key, value) in profile.env_pairs() {
+        env.insert(key.to_string(), Value::String(value));
+    }
+    for (key, value) in parse_extra_env(&profile.extra_env)? {
+        env.insert(key, Value::String(value));
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let backup_path = path.with_extension("json.claudie.bak");
+    if path.exists() && !backup_path.exists() {
+        let _ = fs::copy(&path, backup_path);
+    }
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?
+        ),
+    )
+    .map_err(|err| err.to_string())
+}
+
+pub(crate) fn current_claude_llm_profile() -> Option<LlmProfile> {
+    let text = fs::read_to_string(claude_settings_path()).ok()?;
+    let value: Value = serde_json::from_str(json_without_bom(&text)).ok()?;
+    let env = value.get("env").and_then(Value::as_object);
+    let model = env
+        .and_then(|env| env_string(env, "ANTHROPIC_MODEL"))
+        .or_else(|| {
+            value
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let name = env
+        .map(|env| provider_name_from_env(env, &model))
+        .unwrap_or_else(|| provider_name_from_model(&model));
+    Some(LlmProfile {
+        id: default_profile_id(&name),
+        name,
+        base_url: env
+            .and_then(|env| env_string(env, "ANTHROPIC_BASE_URL"))
+            .unwrap_or_default(),
+        auth_token: env
+            .and_then(|env| env_string(env, "ANTHROPIC_AUTH_TOKEN"))
+            .unwrap_or_default(),
+        api_key: env
+            .and_then(|env| env_string(env, "ANTHROPIC_API_KEY"))
+            .unwrap_or_default(),
+        model,
+        opus_model: env
+            .and_then(|env| env_string(env, "ANTHROPIC_DEFAULT_OPUS_MODEL"))
+            .unwrap_or_default(),
+        sonnet_model: env
+            .and_then(|env| env_string(env, "ANTHROPIC_DEFAULT_SONNET_MODEL"))
+            .unwrap_or_default(),
+        haiku_model: env
+            .and_then(|env| env_string(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL"))
+            .unwrap_or_default(),
+        extra_env: env.map(extra_env_from_claude).unwrap_or_default(),
+    })
+}
+
+pub(crate) fn configured_gif_dir(settings: &UserSettings) -> Option<PathBuf> {
+    let raw = settings.gif_dir.trim();
+    let candidate = if raw.is_empty() { DEFAULT_GIF_DIR } else { raw };
+    let configured = expand_home(candidate);
+
+    let configured_dir = if configured.is_absolute() {
+        configured.is_dir().then(|| configured.clone())
+    } else {
+        let direct = settings.pet_asset_base_dir().join(&configured);
+        direct.is_dir().then_some(direct)
+    };
+    if let Some(dir) = configured_dir {
+        if dir_has_required_gifs(&dir, settings) {
+            return Some(dir);
+        }
+    }
+
+    // Configured path is missing or stale (e.g. left over from an older
+    // build); fall back to the bundled default so the pet still renders.
+    let fallback = settings.pet_asset_base_dir().join(DEFAULT_GIF_DIR);
+    if dir_has_required_gifs(&fallback, settings) {
+        return Some(fallback);
+    }
+
+    None
+}
+
+fn configured_gif_dir_strict(settings: &UserSettings) -> Option<PathBuf> {
+    let raw = settings.gif_dir.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let candidate = expand_home(raw);
+    let dir = if candidate.is_absolute() {
+        candidate.is_dir().then_some(candidate)?
+    } else {
+        let direct = settings.pet_asset_base_dir().join(&candidate);
+        direct.is_dir().then_some(direct)?
+    };
+    dir_has_required_gifs(&dir, settings).then_some(dir)
+}
+
+fn dir_has_required_gifs(dir: &Path, settings: &UserSettings) -> bool {
+    use crate::app::PetMood;
+    let moods = [
+        PetMood::Idle,
+        PetMood::Thinking,
+        PetMood::Typing,
+        PetMood::Building,
+        PetMood::Permission,
+        PetMood::Happy,
+        PetMood::Error,
+        PetMood::Sleeping,
+        PetMood::Subagent,
+    ];
+    moods.iter().all(|mood| {
+        let name = settings.animation_value(*mood);
+        let filename = if name.ends_with(".gif") || name.ends_with(".GIF") {
+            name.to_string()
+        } else {
+            format!("{name}.gif")
+        };
+        dir.join(filename).is_file()
+    })
+}
+
+pub(crate) fn mood_rows() -> &'static [(PetMood, &'static str)] {
+    &[
+        (PetMood::Idle, "Idle"),
+        (PetMood::Thinking, "Thinking"),
+        (PetMood::Typing, "Typing"),
+        (PetMood::Building, "Building"),
+        (PetMood::Permission, "Permission"),
+        (PetMood::Happy, "Happy"),
+        (PetMood::Error, "Error"),
+        (PetMood::Sleeping, "Sleeping"),
+        (PetMood::Subagent, "Subagent"),
+    ]
+}
+
+pub(crate) fn claudie_home() -> PathBuf {
+    env::var_os("USERPROFILE")
+        .or_else(|| env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claudie")
+}
+
+pub(crate) fn default_profile_id(name: &str) -> String {
+    profile_id_from_name(name)
+}
+
+fn claude_settings_path() -> PathBuf {
+    home_dir().join(".claude").join("settings.json")
+}
+
+fn parse_extra_env(value: &str) -> Result<Vec<(String, String)>, String> {
+    let mut pairs = Vec::new();
+    for (index, line) in value.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(format!("Extra env line {} must be KEY=VALUE", index + 1));
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(format!("Extra env line {} has an empty key", index + 1));
+        }
+        pairs.push((key.to_string(), value.trim().to_string()));
+    }
+    Ok(pairs)
+}
+
+fn managed_llm_env_keys() -> &'static [&'static str] {
+    &[
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+        "CLAUDE_CODE_USE_VERTEX",
+        "ANTHROPIC_VERTEX_BASE_URL",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "ANTHROPIC_BEDROCK_BASE_URL",
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+        "ANTHROPIC_AWS_BASE_URL",
+    ]
+}
+
+fn extra_env_from_claude(env: &serde_json::Map<String, Value>) -> String {
+    let mut lines = Vec::new();
+    for key in managed_llm_env_keys() {
+        if matches!(
+            *key,
+            "ANTHROPIC_BASE_URL"
+                | "ANTHROPIC_AUTH_TOKEN"
+                | "ANTHROPIC_API_KEY"
+                | "ANTHROPIC_MODEL"
+                | "ANTHROPIC_DEFAULT_OPUS_MODEL"
+                | "ANTHROPIC_DEFAULT_SONNET_MODEL"
+                | "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+        ) {
+            continue;
+        }
+        if let Some(value) = env_string(env, key) {
+            lines.push(format!("{key}={value}"));
+        }
+    }
+    lines.join("\n")
+}
+
+fn provider_name_from_env(env: &serde_json::Map<String, Value>, model: &str) -> String {
+    if let Some(base_url) = env_string(env, "ANTHROPIC_BASE_URL") {
+        let without_scheme = base_url
+            .strip_prefix("https://")
+            .or_else(|| base_url.strip_prefix("http://"))
+            .unwrap_or(&base_url);
+        let host = without_scheme
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or(without_scheme)
+            .trim();
+        if !host.is_empty() && host != "api.anthropic.com" {
+            return host.to_string();
+        }
+    }
+    provider_name_from_model(model)
+}
+
+fn provider_name_from_model(model: &str) -> String {
+    if !model.trim().is_empty() {
+        "Claude Code".to_string()
+    } else {
+        "LLM Profile".to_string()
+    }
+}
+
+fn env_string(env: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    env.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn profile_id_from_name(name: &str) -> String {
+    let mut id = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            id.push(ch.to_ascii_lowercase());
+        } else if !id.ends_with('-') {
+            id.push('-');
+        }
+    }
+    let id = id.trim_matches('-');
+    if id.is_empty() {
+        format!("profile-{}", timestamp_millis())
+    } else {
+        id.to_string()
+    }
+}
+
+fn timestamp_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+fn expand_home(value: &str) -> PathBuf {
+    if value == "~" {
+        return home_dir();
+    }
+    if let Some(rest) = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\"))
+    {
+        return home_dir().join(rest);
+    }
+    Path::new(value).to_path_buf()
+}
+
+fn home_dir() -> PathBuf {
+    env::var_os("USERPROFILE")
+        .or_else(|| env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn default_bundled_pet_dir() -> PathBuf {
+    let mut candidates = Vec::new();
+    if let Ok(current) = env::current_dir() {
+        candidates.push(current.clone());
+        candidates.push(current.join("assets"));
+        candidates.push(current.join("assets").join("pet"));
+    }
+    if let Ok(exe) = env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.to_path_buf());
+        candidates.push(dir.join("assets"));
+        candidates.push(dir.join("assets").join("pet"));
+        if let Some(project_dir) = dir.parent().and_then(Path::parent) {
+            candidates.push(project_dir.to_path_buf());
+            candidates.push(project_dir.join("assets"));
+            candidates.push(project_dir.join("assets").join("pet"));
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|path| path.join(DEFAULT_GIF_DIR).is_dir())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openai_proxy_profile_writes_auth_token_not_api_key_to_claude_env() {
+        let profile = LlmProfile {
+            base_url: "https://example.com/v1/chat/completions".to_string(),
+            auth_token: "local-token".to_string(),
+            api_key: "upstream-key".to_string(),
+            model: "gpt-test".to_string(),
+            ..LlmProfile::default()
+        };
+        let env = profile.env_pairs();
+
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| *key == "ANTHROPIC_BASE_URL")
+                .map(|(_, value)| value.as_str()),
+            Some("http://127.0.0.1:17388")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| *key == "ANTHROPIC_AUTH_TOKEN")
+                .map(|(_, value)| value.as_str()),
+            Some("local-token")
+        );
+        assert!(!env.iter().any(|(key, _)| *key == "ANTHROPIC_API_KEY"));
+        assert!(!env.iter().any(|(_, value)| value == "upstream-key"));
+    }
+
+    #[test]
+    fn openai_proxy_uses_auth_token_when_api_key_field_is_empty() {
+        let profile = LlmProfile {
+            auth_token: "upstream-token".to_string(),
+            ..LlmProfile::default()
+        };
+
+        assert_eq!(profile.openai_upstream_api_key(), "upstream-token");
+    }
+}
