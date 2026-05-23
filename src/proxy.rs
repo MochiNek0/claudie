@@ -10,7 +10,6 @@ use crate::config::DEFAULT_PROXY_PORT;
 use crate::settings::LlmProfile;
 
 const MAX_PROXY_REQUEST_BYTES: usize = 10 * 1024 * 1024;
-
 pub(crate) fn start_openai_proxy_server(state: Arc<Mutex<AppState>>) -> Result<(), String> {
     let listener = TcpListener::bind(("127.0.0.1", DEFAULT_PROXY_PORT))
         .map_err(|err| format!("OpenAI proxy failed: {err}"))?;
@@ -181,7 +180,7 @@ fn call_openai(agent: &ureq::Agent, profile: &LlmProfile, body: &Value) -> Resul
 fn anthropic_to_openai_request(request: &Value, profile: &LlmProfile) -> Result<Value, String> {
     let mut messages = Vec::new();
     if let Some(system) = request.get("system") {
-        let text = content_to_text(system);
+        let text = content_to_text(system, profile.token_generic_value_text_budget());
         if !text.trim().is_empty() {
             messages.push(json!({ "role": "system", "content": text }));
         }
@@ -191,7 +190,7 @@ fn anthropic_to_openai_request(request: &Value, profile: &LlmProfile) -> Result<
         return Err("messages must be an array".to_string());
     };
     for message in input_messages {
-        append_openai_messages(&mut messages, message);
+        append_openai_messages(&mut messages, message, profile);
     }
 
     let mut out = Map::new();
@@ -240,7 +239,7 @@ fn anthropic_to_openai_request(request: &Value, profile: &LlmProfile) -> Result<
     Ok(Value::Object(out))
 }
 
-fn append_openai_messages(messages: &mut Vec<Value>, message: &Value) {
+fn append_openai_messages(messages: &mut Vec<Value>, message: &Value, profile: &LlmProfile) {
     let role = message
         .get("role")
         .and_then(Value::as_str)
@@ -249,7 +248,7 @@ fn append_openai_messages(messages: &mut Vec<Value>, message: &Value) {
 
     match role {
         "assistant" => {
-            let (text, tool_calls) = assistant_content_to_openai(content);
+            let (text, tool_calls) = assistant_content_to_openai(content, profile);
             let mut out = Map::new();
             out.insert("role".to_string(), Value::String("assistant".to_string()));
             out.insert(
@@ -265,13 +264,13 @@ fn append_openai_messages(messages: &mut Vec<Value>, message: &Value) {
             }
             messages.push(Value::Object(out));
         }
-        _ => append_user_content(messages, content),
+        _ => append_user_content(messages, content, profile),
     }
 }
 
-fn append_user_content(messages: &mut Vec<Value>, content: &Value) {
+fn append_user_content(messages: &mut Vec<Value>, content: &Value, profile: &LlmProfile) {
     if !content.is_array() {
-        let text = content_to_text(content);
+        let text = content_to_text(content, profile.token_generic_value_text_budget());
         if !text.trim().is_empty() {
             messages.push(json!({ "role": "user", "content": text }));
         }
@@ -290,10 +289,18 @@ fn append_user_content(messages: &mut Vec<Value>, content: &Value) {
                     .get("tool_use_id")
                     .and_then(Value::as_str)
                     .unwrap_or("tool_call");
+                let tool_result_text = trim_tool_result_content(
+                    content_to_text(
+                        block.get("content").unwrap_or(&Value::Null),
+                        profile.token_generic_value_text_budget(),
+                    ),
+                    profile.token_tool_result_char_budget(),
+                    profile.token_tool_result_head_chars(),
+                );
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
-                    "content": content_to_text(block.get("content").unwrap_or(&Value::Null))
+                    "content": tool_result_text
                 }));
             }
             Some("text") => {
@@ -303,7 +310,7 @@ fn append_user_content(messages: &mut Vec<Value>, content: &Value) {
             }
             Some("image") => text_parts.push("[image omitted by claudie OpenAI proxy]".to_string()),
             _ => {
-                let text = content_to_text(block);
+                let text = content_to_text(block, profile.token_generic_value_text_budget());
                 if !text.trim().is_empty() {
                     text_parts.push(text);
                 }
@@ -315,9 +322,12 @@ fn append_user_content(messages: &mut Vec<Value>, content: &Value) {
     }
 }
 
-fn assistant_content_to_openai(content: &Value) -> (String, Vec<Value>) {
+fn assistant_content_to_openai(content: &Value, profile: &LlmProfile) -> (String, Vec<Value>) {
     if !content.is_array() {
-        return (content_to_text(content), Vec::new());
+        return (
+            content_to_text(content, profile.token_generic_value_text_budget()),
+            Vec::new(),
+        );
     }
 
     let mut text_parts = Vec::new();
@@ -352,7 +362,7 @@ fn assistant_content_to_openai(content: &Value) -> (String, Vec<Value>) {
                 }
             }
             _ => {
-                let text = content_to_text(block);
+                let text = content_to_text(block, profile.token_generic_value_text_budget());
                 if !text.trim().is_empty() {
                     text_parts.push(text);
                 }
@@ -460,7 +470,7 @@ fn anthropic_tool_use_from_openai(tool_call: &Value) -> Option<Value> {
     }))
 }
 
-fn content_to_text(content: &Value) -> String {
+fn content_to_text(content: &Value, generic_value_text_budget: usize) -> String {
     match content {
         Value::String(text) => text.clone(),
         Value::Array(blocks) => blocks
@@ -472,6 +482,7 @@ fn content_to_text(content: &Value) -> String {
                     .map(str::to_string),
                 Some("tool_result") => Some(content_to_text(
                     block.get("content").unwrap_or(&Value::Null),
+                    generic_value_text_budget,
                 )),
                 Some("image") => Some("[image omitted by claudie OpenAI proxy]".to_string()),
                 _ => block.as_str().map(str::to_string),
@@ -480,7 +491,44 @@ fn content_to_text(content: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         Value::Null => String::new(),
-        other => other.to_string(),
+        other => stringify_value_with_budget(other, generic_value_text_budget),
+    }
+}
+
+fn stringify_value_with_budget(value: &Value, budget: usize) -> String {
+    let text = value.to_string();
+    if text.chars().count() <= budget {
+        return text;
+    }
+    let trimmed = text.chars().take(budget).collect::<String>();
+    format!("{trimmed}...[value truncated by claudie proxy]")
+}
+
+fn trim_tool_result_content(content: String, total_budget: usize, head_budget: usize) -> String {
+    if content.chars().count() <= total_budget {
+        return content;
+    }
+    let chars = content.chars().collect::<Vec<_>>();
+    let total = chars.len();
+    let head_len = head_budget.min(total_budget).min(total);
+    let tail_len = total_budget.saturating_sub(head_len).min(total - head_len);
+    let omitted = total.saturating_sub(head_len + tail_len);
+
+    let head = chars[..head_len].iter().collect::<String>();
+    let tail = if tail_len > 0 {
+        chars[total - tail_len..].iter().collect::<String>()
+    } else {
+        String::new()
+    };
+
+    if tail.is_empty() {
+        format!(
+            "{head}\n\n[tool_result truncated by claudie proxy: omitted {omitted} chars out of {total}]"
+        )
+    } else {
+        format!(
+            "{head}\n\n[... omitted {omitted} chars out of {total} by claudie proxy to reduce token usage ...]\n\n{tail}"
+        )
     }
 }
 
@@ -775,5 +823,44 @@ mod tests {
         assert_eq!(converted["stop_reason"], "tool_use");
         assert_eq!(converted["content"][0]["type"], "tool_use");
         assert_eq!(converted["content"][0]["input"]["file_path"], "a.txt");
+    }
+
+    #[test]
+    fn truncates_large_tool_result_payloads() {
+        let profile = LlmProfile {
+            model: "gpt-test".to_string(),
+            ..LlmProfile::default()
+        };
+        let budget = profile.token_tool_result_char_budget();
+        let large = "x".repeat(budget + 1_000);
+        let request = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "call_1",
+                    "content": large
+                }]
+            }]
+        });
+
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        let tool_content = converted["messages"][0]["content"]
+            .as_str()
+            .expect("tool content is text");
+        assert!(tool_content.contains("omitted"));
+        assert!(tool_content.contains("reduce token usage"));
+        assert!(tool_content.starts_with(&"x".repeat(128)));
+        assert!(tool_content.ends_with(&"x".repeat(128)));
+        assert!(tool_content.chars().count() > budget);
+    }
+
+    #[test]
+    fn caps_generic_non_string_content_to_limit_token_bloat() {
+        let profile = LlmProfile::default();
+        let budget = profile.token_generic_value_text_budget();
+        let payload = json!({ "blob": "x".repeat(budget + 500) });
+        let text = content_to_text(&payload, budget);
+        assert!(text.contains("[value truncated by claudie proxy]"));
     }
 }
