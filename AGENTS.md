@@ -39,11 +39,12 @@ cargo run --release -- --port 17387
 - `src/hooks/server.rs`: minimal local HTTP server accepting `POST /hook`.
 - `src/proxy.rs`: local Anthropic Messages to OpenAI Chat Completions proxy on `127.0.0.1:17388`.
 - `src/settings/`: user settings, LLM profiles, Claude env integration, and config file persistence.
-- `src/settings/mod.rs`: persisted user settings, GIF resource mapping, LLM profile database, Claude env merge logic, and path normalization.
+- `src/settings/mod.rs`: persisted user settings, window position, GIF resource mapping, LLM profile database, Claude env merge logic, OpenAI extra body parsing, and path normalization.
 - `src/settings/storage.rs`: shared JSON persistence helpers for BOM-tolerant reads and pretty writes.
 - `src/ui/gif_animation.rs`: GDI+ GIF loading, frame delay sampling, mood transitions, and drawing.
-- `src/ui/window/mod.rs`: main transparent always-on-top pet window, hotkeys, context menu, clicks, and scaling.
-- `src/ui/window/render.rs`: main window render snapshot, HUD, pet drawing, permission/choice detail, and drawing helpers.
+- `src/ui/theme.rs`: shared colors, radii, and typography tokens for the settings panel and overlay popups.
+- `src/ui/window/mod.rs`: main transparent always-on-top pet window, hotkeys, context menu, clicks, scaling, and position persistence.
+- `src/ui/window/render.rs`: main window render snapshot, HUD, pet drawing, permission/choice overlay detail, and drawing helpers.
 - `src/ui/settings_panel/mod.rs`: Settings window lifecycle, tab switching, save/apply actions, and AppState synchronization.
 - `src/ui/settings_panel/controls.rs`: Win32 control creation, fonts, text helpers, message boxes, and shared drawing helpers.
 - `src/ui/settings_panel/paint.rs`: Settings panel background, tabs, field chrome, and control color handling.
@@ -57,8 +58,8 @@ cargo run --release -- --port 17387
 
 ## Runtime Files
 
-- `%USERPROFILE%\.claudie\settings.json`: pet asset directory, GIF directory, animation mapping, scale, sleep timeout, and pomodoro settings.
-- `%USERPROFILE%\.claudie\llm_profiles.json`: saved LLM provider/profile definitions.
+- `%USERPROFILE%\.claudie\settings.json`: pet asset directory, GIF directory, animation mapping, scale, sleep timeout, window position, and pomodoro settings.
+- `%USERPROFILE%\.claudie\llm_profiles.json`: saved LLM provider/profile definitions, including OpenAI proxy extra request body fields.
 - `%USERPROFILE%\.claude\settings.json`: Claude Code hook settings and managed LLM env values.
 - `%USERPROFILE%\.claude\settings.json.claudie.bak`: one-time backup created before modifying Claude settings.
 
@@ -70,9 +71,10 @@ cargo run --release -- --port 17387
 - Permission requests are represented by `PendingPermission` and completed through `decide_current_permission`.
 - Choice-style requests are represented by `PendingChoice`; keep response mapping in `src/hooks/events.rs`.
 - The hook server should stay small and synchronous. Put Claude-event semantics in `src/hooks/events.rs`, not in the HTTP parser.
-- The OpenAI proxy should remain a small local compatibility layer. Keep request/response format conversion in `src/proxy.rs`, and keep profile persistence/env behavior in `src/settings/mod.rs`.
+- The OpenAI proxy should remain a small local compatibility layer. Keep request/response format conversion in `src/proxy.rs`, and keep profile persistence/env behavior and OpenAI extra body validation in `src/settings/mod.rs`.
 - UI code uses raw Win32 handles and unsafe calls. Keep unsafe usage close to Win32 boundaries and prefer small helper functions for repeated patterns.
-- Main pet window behavior belongs in `src/ui/window/mod.rs`; main pet drawing belongs in `src/ui/window/render.rs`.
+- Main pet window behavior belongs in `src/ui/window/mod.rs`; main pet drawing and permission/choice overlays belong in `src/ui/window/render.rs`.
+- Shared visual tokens for Settings and overlay chrome belong in `src/ui/theme.rs`; keep color, radius, and font changes centralized there.
 - Settings panel lifecycle, commands, and save logic belong in `src/ui/settings_panel/mod.rs`; controls and painting belong in sibling files.
 - The Settings panel draws its own tab backgrounds and uses real Win32 controls on top; tab buttons should not use default push-button styling because that leaves the default outline on the wrong tab.
 - Use `util::wide` for strings passed to Win32 APIs.
@@ -87,8 +89,9 @@ cargo run --release -- --port 17387
   - Hook settings merge/install/uninstall belongs in `src/hooks/claude_settings.rs`.
   - Quota and token field compatibility logic belongs in `src/hooks/quota.rs`.
   - OpenAI proxy transport and Anthropic/OpenAI conversion belong in `src/proxy.rs`.
-  - LLM profile serialization and Claude env merging belong in `src/settings/mod.rs`.
-  - Main pet rendering belongs in `src/ui/window/render.rs`; main window events and menu commands belong in `src/ui/window/mod.rs`.
+  - LLM profile serialization, OpenAI extra body parsing, and Claude env merging belong in `src/settings/mod.rs`.
+  - Main pet rendering and permission/choice overlays belong in `src/ui/window/render.rs`; main window events, menu commands, and position persistence belong in `src/ui/window/mod.rs`.
+  - Shared visual tokens belong in `src/ui/theme.rs`.
   - Settings UI commands belong in `src/ui/settings_panel/mod.rs`; native controls belong in `src/ui/settings_panel/controls.rs`; panel chrome belongs in `src/ui/settings_panel/paint.rs`.
   - Persistent config and JSON file read/write mechanics belong in `src/settings/`.
   - Shared domain state belongs in `src/app/mod.rs`; pomodoro domain rules belong in sibling files under `src/app/`.
@@ -116,11 +119,11 @@ cargo run --release
 
 Then verify:
 
-- The pet window opens without a console in release builds.
+- The pet window opens without a console in release builds and restores its last saved position.
 - Right-click menu opens Settings, Pomodoro actions, and Exit.
 - Settings tabs switch cleanly between Basic, Pomodoro, and LLM Profiles without leaving the tab outline on Basic.
 - GIF resources load from settings or bundled assets.
 - `POST /hook` updates mood/events.
 - Permission requests show Allow, Always, and Deny controls.
 - Choice requests show selectable options plus Submit and Cancel controls.
-- LLM Profiles can save/use/import profiles, and OpenAI-format profiles route Claude Code through `http://127.0.0.1:17388`.
+- LLM Profiles can save/use/import profiles, OpenAI-format profiles route Claude Code through `http://127.0.0.1:17388`, and OpenAI extra body fields are forwarded to upstream chat completions requests.
