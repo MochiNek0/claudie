@@ -214,6 +214,32 @@ impl LlmProfileDb {
 }
 
 impl LlmProfile {
+    pub(crate) fn token_tool_result_char_budget(&self) -> usize {
+        self.extra_env_usize("CLAUDIE_TOOL_RESULT_CHAR_BUDGET", 12_000, 1_000, 200_000)
+    }
+
+    pub(crate) fn token_tool_result_head_chars(&self) -> usize {
+        let total = self.token_tool_result_char_budget();
+        self.extra_env_usize("CLAUDIE_TOOL_RESULT_HEAD_CHARS", 8_000, 500, total)
+    }
+
+    pub(crate) fn token_generic_value_text_budget(&self) -> usize {
+        self.extra_env_usize("CLAUDIE_GENERIC_VALUE_TEXT_BUDGET", 2_000, 200, 20_000)
+    }
+
+    fn extra_env_usize(&self, key: &str, default: usize, min: usize, max: usize) -> usize {
+        self.extra_env
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .find_map(|(k, v)| {
+                (k.trim() == key)
+                    .then(|| v.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(default)
+            .clamp(min, max)
+    }
+
     pub(crate) fn display_label(&self) -> String {
         match (self.name.trim().is_empty(), self.model.trim().is_empty()) {
             (false, false) => format!("{} {}", self.name.trim(), self.model.trim()),
@@ -861,5 +887,16 @@ mod tests {
         let body = profile.openai_extra_body_fields().unwrap();
         assert_eq!(body["reasoning_effort"], "xhigh");
         assert_eq!(body["service_tier"], "flex");
+    }
+
+    #[test]
+    fn token_budgets_can_be_overridden_from_extra_env() {
+        let profile = LlmProfile {
+            extra_env: "CLAUDIE_TOOL_RESULT_CHAR_BUDGET=16000\nCLAUDIE_TOOL_RESULT_HEAD_CHARS=9000\nCLAUDIE_GENERIC_VALUE_TEXT_BUDGET=3000".to_string(),
+            ..LlmProfile::default()
+        };
+        assert_eq!(profile.token_tool_result_char_budget(), 16_000);
+        assert_eq!(profile.token_tool_result_head_chars(), 9_000);
+        assert_eq!(profile.token_generic_value_text_budget(), 3_000);
     }
 }
