@@ -7,6 +7,7 @@ mod globals;
 mod hooks;
 mod notifier;
 mod proxy;
+mod proxy_optimizer;
 mod settings;
 #[cfg(windows)]
 mod ui;

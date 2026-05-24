@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use crate::app::{AppState, PetMood};
 use crate::config::DEFAULT_PROXY_PORT;
+use crate::proxy_optimizer;
 use crate::settings::LlmProfile;
 
 const MAX_PROXY_REQUEST_BYTES: usize = 10 * 1024 * 1024;
@@ -124,6 +125,48 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
             let _ = write_json_response(&mut stream, 400, json!({ "error": err }));
             return;
         }
+    };
+    let optimized = proxy_optimizer::optimize_openai_request(openai_request, &profile);
+    if optimized.cache_hit {
+        record_proxy_event(&state, "summary cache hit".to_string());
+    } else if optimized.local_summary {
+        record_proxy_event(&state, "local context summary applied".to_string());
+    } else if optimized.compressed {
+        record_proxy_event(&state, "compressed OpenAI proxy context".to_string());
+    }
+    let openai_request = if let Some(pending) = optimized.pending_summary {
+        match call_openai(&agent, &profile, &pending.summary_request) {
+            Ok(summary_response) => {
+                match proxy_optimizer::summary_text_from_openai_response(&summary_response) {
+                    Some(summary) => {
+                        if let Err(err) =
+                            proxy_optimizer::save_summary(&pending.cache_key, &summary)
+                        {
+                            record_proxy_event(&state, format!("summary cache save failed: {err}"));
+                        } else {
+                            record_proxy_event(&state, "summary cache saved".to_string());
+                        }
+                        pending.request_with_summary(&summary)
+                    }
+                    None => {
+                        record_proxy_event(
+                            &state,
+                            "summary response had no text; using compressed fallback".to_string(),
+                        );
+                        pending.fallback_request
+                    }
+                }
+            }
+            Err(err) => {
+                record_proxy_event(
+                    &state,
+                    format!("summary request failed; using compressed fallback: {err}"),
+                );
+                pending.fallback_request
+            }
+        }
+    } else {
+        optimized.request
     };
 
     let upstream = match call_openai(&agent, &profile, &openai_request) {
@@ -722,6 +765,11 @@ fn record_proxy_error(state: &Arc<Mutex<AppState>>, err: String) {
     state.last_error = err.clone();
     state.set_mood(PetMood::Error);
     state.push_event("proxy", err);
+}
+
+fn record_proxy_event(state: &Arc<Mutex<AppState>>, event: String) {
+    let mut state = state.lock().expect("state poisoned");
+    state.push_event("proxy optimizer", event);
 }
 
 #[cfg(test)]

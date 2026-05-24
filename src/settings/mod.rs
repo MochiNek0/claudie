@@ -266,6 +266,14 @@ impl LlmProfile {
         parse_openai_extra_body(&self.openai_extra_body)
     }
 
+    pub(crate) fn extra_env_value(&self, key: &str) -> Option<String> {
+        parse_extra_env(&self.extra_env)
+            .ok()?
+            .into_iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value)
+    }
+
     fn env_pairs(&self) -> Vec<(&'static str, String)> {
         let proxy_base_url = format!("http://127.0.0.1:{DEFAULT_PROXY_PORT}");
         let proxy_auth_token = self
