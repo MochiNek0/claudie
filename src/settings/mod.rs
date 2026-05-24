@@ -211,6 +211,21 @@ impl LlmProfileDb {
             self.profiles.push(profile);
         }
     }
+
+    pub(crate) fn remove_profile(&mut self, id: &str) -> Option<LlmProfile> {
+        let id = id.trim();
+        let index = self.profiles.iter().position(|profile| profile.id == id)?;
+        let removed = self.profiles.remove(index);
+        if self.active_profile_id == removed.id {
+            self.active_profile_id = self
+                .profiles
+                .get(index)
+                .or_else(|| self.profiles.last())
+                .map(|profile| profile.id.clone())
+                .unwrap_or_default();
+        }
+        Some(removed)
+    }
 }
 
 impl LlmProfile {
@@ -384,6 +399,10 @@ pub(crate) fn save_llm_profile_db(db: &LlmProfileDb) -> Result<(), String> {
 
 pub(crate) fn save_user_settings(settings: &UserSettings) -> Result<(), String> {
     save_pretty_json(&settings_path(), settings)
+}
+
+pub(crate) fn ensure_claude_onboarding_complete() -> Result<(), String> {
+    ensure_claude_onboarding_complete_at(&claude_onboarding_path())
 }
 
 pub(crate) fn apply_llm_profile_to_claude(profile: &LlmProfile) -> Result<(), String> {
@@ -576,6 +595,183 @@ pub(crate) fn default_profile_id(name: &str) -> String {
 
 fn claude_settings_path() -> PathBuf {
     home_dir().join(".claude").join("settings.json")
+}
+
+fn claude_onboarding_path() -> PathBuf {
+    home_dir().join(".claude.json")
+}
+
+fn ensure_claude_onboarding_complete_at(path: &Path) -> Result<(), String> {
+    const KEY: &str = "hasCompletedOnboarding";
+    const FIELD: &str = "\"hasCompletedOnboarding\": true";
+
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        return fs::write(path, format!("{{\n  {FIELD}\n}}\n")).map_err(|err| err.to_string());
+    }
+
+    let text = fs::read_to_string(path).map_err(|err| err.to_string())?;
+    let text = json_without_bom(&text);
+    let value = serde_json::from_str::<Value>(text)
+        .map_err(|err| format!("~/.claude.json is not valid JSON: {err}"))?;
+    let root = value
+        .as_object()
+        .ok_or_else(|| "~/.claude.json root must be a JSON object".to_string())?;
+
+    if root.get(KEY).and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+
+    let updated = if root.contains_key(KEY) {
+        replace_root_field_value(text, KEY, "true").unwrap_or_else(|| {
+            let mut value = value;
+            if let Some(root) = value.as_object_mut() {
+                root.insert(KEY.to_string(), Value::Bool(true));
+            }
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&value).expect("valid JSON")
+            )
+        })
+    } else {
+        append_root_bool_field(text, FIELD)
+    };
+
+    fs::write(path, updated).map_err(|err| err.to_string())
+}
+
+fn append_root_bool_field(text: &str, field: &str) -> String {
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let closing = text
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !ch.is_whitespace())
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+    let prefix = text[..closing].trim_end();
+    let mut updated = String::with_capacity(text.len() + field.len() + 8);
+    updated.push_str(prefix);
+    if !prefix.ends_with('{') {
+        updated.push(',');
+    }
+    updated.push_str(newline);
+    updated.push_str("  ");
+    updated.push_str(field);
+    updated.push_str(newline);
+    updated.push('}');
+    updated.push_str(newline);
+    updated
+}
+
+fn replace_root_field_value(text: &str, key: &str, value: &str) -> Option<String> {
+    let (start, end) = root_field_value_span(text, key)?;
+    let mut updated = String::with_capacity(text.len() + value.len());
+    updated.push_str(&text[..start]);
+    updated.push_str(value);
+    updated.push_str(&text[end..]);
+    Some(updated)
+}
+
+fn root_field_value_span(text: &str, key: &str) -> Option<(usize, usize)> {
+    let mut index = text.find('{')? + 1;
+    let mut depth = 1_u32;
+    while index < text.len() {
+        index = skip_ws(text, index);
+        let ch = text[index..].chars().next()?;
+        match ch {
+            '}' => return None,
+            ',' => {
+                index += 1;
+            }
+            '"' if depth == 1 => {
+                let (field, after_key) = parse_json_string_at(text, index)?;
+                let colon = skip_ws(text, after_key);
+                if text[colon..].chars().next()? != ':' {
+                    return None;
+                }
+                let value_start = skip_ws(text, colon + 1);
+                let value_end = json_value_end(text, value_start)?;
+                if field == key {
+                    return Some((value_start, value_end));
+                }
+                index = value_end;
+            }
+            _ => {
+                if ch == '{' || ch == '[' {
+                    depth += 1;
+                }
+                index += ch.len_utf8();
+            }
+        }
+    }
+    None
+}
+
+fn parse_json_string_at(text: &str, start: usize) -> Option<(String, usize)> {
+    let mut escaped = false;
+    for (offset, ch) in text[start + 1..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            let end = start + 1 + offset + 1;
+            let parsed = serde_json::from_str::<String>(&text[start..end]).ok()?;
+            return Some((parsed, end));
+        }
+    }
+    None
+}
+
+fn json_value_end(text: &str, start: usize) -> Option<usize> {
+    let mut index = start;
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    while index < text.len() {
+        let ch = text[index..].chars().next()?;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            index += ch.len_utf8();
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' | '[' => depth += 1,
+            '}' if depth == 0 => return Some(index),
+            ']' | '}' => depth -= 1,
+            ',' if depth == 0 => return Some(index),
+            _ => {}
+        }
+        index += ch.len_utf8();
+    }
+    Some(text.len())
+}
+
+fn skip_ws(text: &str, mut index: usize) -> usize {
+    while index < text.len() {
+        let Some(ch) = text[index..].chars().next() else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        index += ch.len_utf8();
+    }
+    index
 }
 
 fn parse_extra_env(value: &str) -> Result<Vec<(String, String)>, String> {
@@ -869,5 +1065,114 @@ mod tests {
         let body = profile.openai_extra_body_fields().unwrap();
         assert_eq!(body["reasoning_effort"], "xhigh");
         assert_eq!(body["service_tier"], "flex");
+    }
+
+    #[test]
+    fn removing_active_profile_selects_neighbor() {
+        let mut db = LlmProfileDb {
+            profiles: vec![
+                LlmProfile {
+                    id: "first".to_string(),
+                    ..LlmProfile::default()
+                },
+                LlmProfile {
+                    id: "second".to_string(),
+                    ..LlmProfile::default()
+                },
+                LlmProfile {
+                    id: "third".to_string(),
+                    ..LlmProfile::default()
+                },
+            ],
+            active_profile_id: "second".to_string(),
+        };
+
+        let removed = db.remove_profile("second").unwrap();
+
+        assert_eq!(removed.id, "second");
+        assert_eq!(db.active_profile_id, "third");
+        assert_eq!(
+            db.profiles
+                .iter()
+                .map(|profile| profile.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "third"]
+        );
+    }
+
+    #[test]
+    fn removing_last_active_profile_clears_active_id() {
+        let mut db = LlmProfileDb {
+            profiles: vec![LlmProfile {
+                id: "only".to_string(),
+                ..LlmProfile::default()
+            }],
+            active_profile_id: "only".to_string(),
+        };
+
+        db.remove_profile("only");
+
+        assert!(db.profiles.is_empty());
+        assert!(db.active_profile_id.is_empty());
+    }
+
+    #[test]
+    fn onboarding_file_is_created_when_missing() {
+        let path = test_claude_json_path("missing");
+
+        ensure_claude_onboarding_complete_at(&path).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "{\n  \"hasCompletedOnboarding\": true\n}\n");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn onboarding_field_is_appended_to_existing_object() {
+        let path = test_claude_json_path("append");
+        fs::write(&path, "{\n  \"projects\": {}\n}\n").unwrap();
+
+        ensure_claude_onboarding_complete_at(&path).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            "{\n  \"projects\": {},\n  \"hasCompletedOnboarding\": true\n}\n"
+        );
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            value.get("hasCompletedOnboarding").and_then(Value::as_bool),
+            Some(true)
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn onboarding_field_is_set_true_when_present() {
+        let path = test_claude_json_path("present-false");
+        fs::write(
+            &path,
+            "{\n  \"hasCompletedOnboarding\": false,\n  \"projects\": {}\n}\n",
+        )
+        .unwrap();
+
+        ensure_claude_onboarding_complete_at(&path).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            "{\n  \"hasCompletedOnboarding\": true,\n  \"projects\": {}\n}\n"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    fn test_claude_json_path(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!(
+            "claudie-settings-{name}-{}-{}",
+            std::process::id(),
+            timestamp_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir.join(".claude.json")
     }
 }
