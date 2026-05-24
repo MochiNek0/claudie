@@ -7,8 +7,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_OWNERDRAW, CBS_DROPDOWNLIST, CreateWindowExW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE,
-    GetWindowTextLengthW, GetWindowTextW, MB_ICONERROR, MB_OK, MessageBoxW, SendMessageW,
-    SetWindowTextW, WM_SETFONT, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
+    GetWindowTextLengthW, GetWindowTextW, IDYES, MB_ICONERROR, MB_ICONWARNING, MB_OK, MB_YESNO,
+    MessageBoxW, SendMessageW, SetWindowTextW, WM_SETFONT, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::ui::theme;
@@ -617,4 +617,15 @@ pub(super) unsafe fn message(hwnd: HWND, title: &str, body: &str) {
     let title = wide(title);
     let body = wide(body);
     MessageBoxW(hwnd, body.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR);
+}
+
+pub(super) unsafe fn confirm(hwnd: HWND, title: &str, body: &str) -> bool {
+    let title = wide(title);
+    let body = wide(body);
+    MessageBoxW(
+        hwnd,
+        body.as_ptr(),
+        title.as_ptr(),
+        MB_YESNO | MB_ICONWARNING,
+    ) == IDYES
 }
