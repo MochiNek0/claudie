@@ -15,13 +15,12 @@ use windows_sys::Win32::UI::Controls::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     FindWindowW, GWLP_USERDATA, GetDlgCtrlID, GetSystemMetrics, GetWindowLongPtrW, HTCAPTION,
-    HTCLIENT, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOPMOST, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_HAND,
-    LoadCursorW, LoadIconW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetCursor, SetForegroundWindow, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DRAWITEM, WM_ERASEBKGND, WM_HSCROLL, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SETICON,
-    WM_TIMER, WNDCLASSW, WS_POPUP, WS_VISIBLE,
+    HTCLIENT, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_HAND, LoadCursorW, LoadIconW, RegisterClassW,
+    SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SendMessageW, SetCursor, SetForegroundWindow,
+    SetTimer, SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
+    WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND,
+    WM_HSCROLL, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SETICON, WM_TIMER, WNDCLASSW, WS_POPUP,
+    WS_VISIBLE,
 };
 
 use crate::app::pomodoro::{PomodoroMode, PomodoroStatus, format_remaining};
@@ -32,8 +31,8 @@ use crate::config::{
 use crate::globals::APP_STATE;
 use crate::settings::{
     AnimationSettings, LlmProfile, LlmProfileDb, UserSettings, apply_llm_profile_to_claude,
-    current_claude_llm_profile, default_profile_id, load_llm_profile_db, load_user_settings,
-    mood_rows, save_llm_profile_db, save_user_settings,
+    current_claude_llm_profile, default_profile_id, ensure_claude_onboarding_complete,
+    load_llm_profile_db, load_user_settings, mood_rows, save_llm_profile_db, save_user_settings,
 };
 use crate::ui::gif_animation::reload_animation_store;
 use crate::ui::theme;
@@ -70,6 +69,7 @@ const ID_PROFILE_USE: usize = 3003;
 const ID_PROFILE_IMPORT: usize = 3004;
 const ID_SAVE_PET: usize = 3005;
 const ID_RESET_PET: usize = 3006;
+const ID_PROFILE_DELETE: usize = 3007;
 const ID_SAVE_POMODORO: usize = 3020;
 const ID_START_POMODORO: usize = 3021;
 const ID_PAUSE_RESUME_POMODORO: usize = 3022;
@@ -96,6 +96,7 @@ const SETTINGS_PANEL_RADIUS: i32 = theme::RADIUS_WINDOW;
 const SETTINGS_HEADER_HEIGHT: i32 = 118;
 const SETTINGS_TAB_HEIGHT: i32 = 34;
 const SETTINGS_TAB_TOP: i32 = 76;
+const SETTINGS_DYNAMIC_TIMER_ID: usize = 1;
 
 const COLOR_BG: u32 = theme::BG;
 const COLOR_HEADER: u32 = theme::SURFACE_ALT;
@@ -127,11 +128,11 @@ pub(super) fn button_kind(id: usize) -> ButtonKind {
     }
 }
 
-pub(crate) unsafe fn show_settings_panel(parent: HWND) {
-    show_settings_panel_tab(parent, SettingsTab::Basic);
+pub(crate) unsafe fn show_settings_panel(_parent: HWND) {
+    show_settings_panel_tab(SettingsTab::Basic);
 }
 
-unsafe fn show_settings_panel_tab(parent: HWND, tab: SettingsTab) {
+unsafe fn show_settings_panel_tab(tab: SettingsTab) {
     register_class();
     init_common_controls();
 
@@ -139,10 +140,8 @@ unsafe fn show_settings_panel_tab(parent: HWND, tab: SettingsTab) {
     let existing = FindWindowW(class_name.as_ptr(), std::ptr::null());
     if !existing.is_null() {
         switch_tab(existing, tab);
-        set_settings_selected_layer(existing, true);
         ShowWindow(existing, SW_SHOW);
         SetForegroundWindow(existing);
-        keep_pet_above(parent);
         return;
     }
 
@@ -168,10 +167,8 @@ unsafe fn show_settings_panel_tab(parent: HWND, tab: SettingsTab) {
     if !hwnd.is_null() {
         apply_settings_window_chrome(hwnd);
         switch_tab(hwnd, tab);
-        set_settings_selected_layer(hwnd, true);
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
-        keep_pet_above(parent);
     }
 }
 
@@ -229,54 +226,6 @@ unsafe fn apply_settings_window_chrome(hwnd: HWND) {
     }
 }
 
-unsafe fn set_settings_selected_layer(hwnd: HWND, selected: bool) {
-    if selected {
-        SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
-    } else {
-        SetWindowPos(
-            hwnd,
-            HWND_NOTOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
-        SetWindowPos(
-            hwnd,
-            HWND_BOTTOM,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
-    }
-}
-
-unsafe fn keep_pet_above(hwnd: HWND) {
-    if hwnd.is_null() {
-        return;
-    }
-    SetWindowPos(
-        hwnd,
-        HWND_TOPMOST,
-        0,
-        0,
-        0,
-        0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-    );
-}
-
 unsafe fn is_pointer_control(hwnd: HWND) -> bool {
     let id = GetDlgCtrlID(hwnd);
     matches!(
@@ -292,6 +241,7 @@ unsafe fn is_pointer_control(hwnd: HWND) -> bool {
             | ID_PROFILE_SAVE
             | ID_PROFILE_USE
             | ID_PROFILE_IMPORT
+            | ID_PROFILE_DELETE
             | ID_SAVE_PET
             | ID_RESET_PET
             | ID_SAVE_POMODORO
@@ -338,11 +288,7 @@ unsafe extern "system" fn settings_proc(
             refresh_pomodoro_tab(&panel);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(panel) as isize);
             apply_settings_window_chrome(hwnd);
-            SetTimer(hwnd, 1, 1000, None);
-            0
-        }
-        WM_ACTIVATE => {
-            set_settings_selected_layer(hwnd, loword(wparam) != 0);
+            SetTimer(hwnd, SETTINGS_DYNAMIC_TIMER_ID, 1000, None);
             0
         }
         WM_PAINT => {
@@ -413,9 +359,11 @@ unsafe extern "system" fn settings_proc(
             hit
         }
         WM_TIMER => {
-            if let Some(panel) = panel(hwnd) {
-                if panel.active_tab == SettingsTab::Pomodoro {
-                    refresh_pomodoro_tab(panel);
+            if wparam == SETTINGS_DYNAMIC_TIMER_ID {
+                if let Some(panel) = panel(hwnd) {
+                    if panel.active_tab == SettingsTab::Pomodoro {
+                        refresh_pomodoro_tab(panel);
+                    }
                 }
             }
             0
@@ -459,6 +407,10 @@ unsafe extern "system" fn settings_proc(
             }
             if command == ID_PROFILE_IMPORT as u16 {
                 import_current_profile(hwnd);
+                return 0;
+            }
+            if command == ID_PROFILE_DELETE as u16 {
+                delete_profile(hwnd);
                 return 0;
             }
             if command == ID_SAVE_PET as u16 {
@@ -689,6 +641,17 @@ unsafe fn create_controls(hwnd: HWND, panel: &mut SettingsPanel) {
         132,
         29,
         "Import Current",
+        false,
+    );
+    add_llm_button(
+        panel,
+        hwnd,
+        ID_PROFILE_DELETE,
+        576,
+        217,
+        84,
+        29,
+        "Delete",
         false,
     );
 
@@ -1098,6 +1061,9 @@ unsafe fn save_profile(hwnd: HWND, activate_profile: bool) -> Option<SavedProfil
         message(hwnd, "Failed to save profile", &err);
         return None;
     }
+    if let Err(err) = ensure_claude_onboarding_complete() {
+        message(hwnd, "Failed to update Claude onboarding", &err);
+    }
     sync_app_llm_profiles(&panel.llm_db, "saved LLM profile");
     refresh_profile_combo(panel);
     select_profile_by_id(panel, &profile.id);
@@ -1138,6 +1104,72 @@ unsafe fn import_current_profile(hwnd: HWND) {
         return;
     };
     set_profile_fields(panel, &profile);
+}
+
+unsafe fn delete_profile(hwnd: HWND) {
+    let Some(panel) = panel(hwnd) else {
+        return;
+    };
+    let Some(index) = selected_profile_index(panel) else {
+        message(
+            hwnd,
+            "No profile selected",
+            "Select a saved LLM profile before deleting.",
+        );
+        return;
+    };
+    let Some(profile) = panel.llm_db.profiles.get(index).cloned() else {
+        message(
+            hwnd,
+            "Profile not found",
+            "The selected LLM profile could not be found.",
+        );
+        return;
+    };
+
+    let label = profile_label_for_message(&profile);
+    if !confirm(
+        hwnd,
+        "Delete profile",
+        &format!("Delete \"{}\" from saved LLM profiles?", label),
+    ) {
+        return;
+    }
+
+    let mut next_db = panel.llm_db.clone();
+    if next_db.remove_profile(&profile.id).is_none() {
+        message(
+            hwnd,
+            "Profile not found",
+            "The selected LLM profile could not be found.",
+        );
+        return;
+    }
+    let next_selection_id = next_db
+        .profiles
+        .get(index)
+        .or_else(|| {
+            index
+                .checked_sub(1)
+                .and_then(|index| next_db.profiles.get(index))
+        })
+        .map(|profile| profile.id.clone());
+
+    if let Err(err) = save_llm_profile_db(&next_db) {
+        message(hwnd, "Failed to delete profile", &err);
+        return;
+    }
+
+    panel.llm_db = next_db;
+    sync_app_llm_profiles(&panel.llm_db, "deleted LLM profile");
+    refresh_profile_combo(panel);
+    if let Some(next_selection_id) = next_selection_id {
+        select_profile_by_id(panel, &next_selection_id);
+        load_selected_profile(panel);
+    } else {
+        SendMessageW(panel.profile_combo, CB_SETCURSEL, usize::MAX, 0);
+        clear_profile_fields(panel);
+    }
 }
 
 unsafe fn save_basic_settings(hwnd: HWND) {
@@ -1399,6 +1431,15 @@ unsafe fn current_profile_from_fields(panel: &SettingsPanel) -> LlmProfile {
         haiku_model: text_value(panel.haiku_model),
         openai_extra_body: text_value(panel.openai_extra_body),
         extra_env: text_value(panel.extra_env),
+    }
+}
+
+fn profile_label_for_message(profile: &LlmProfile) -> String {
+    let label = profile.display_label();
+    if label.trim().is_empty() {
+        profile.id.clone()
+    } else {
+        label
     }
 }
 
