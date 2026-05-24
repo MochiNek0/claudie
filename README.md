@@ -86,6 +86,24 @@ CLAUDIE_API_FORMAT=openai
 
 代理当前实现了 Claude Code 常用的 `POST /v1/messages`、`POST /v1/messages/count_tokens` 和 `GET /v1/models`，并支持把工具调用在 Anthropic/OpenAI 格式之间转换。`OpenAI body` 会合并进转发到上游的 chat completions 请求，但不能覆盖 claudie 管理的 `messages` 和 `stream` 字段。
 
+OpenAI 代理默认启用上下文优化。claudie 会在转发请求前压缩超长工具结果和普通文本；当估算输入超过默认阈值时，会保留最近消息并总结更早的对话历史。总结缓存保存在 `%USERPROFILE%\.claudie\proxy_summaries.json`，重复请求相同的较早历史时可复用缓存总结，避免再次发起总结请求。缓存只保存总结文本，不保存 API key 或完整原始请求体。
+
+可在 profile 的 `Extra env` 中调整或关闭此行为：
+
+```text
+CLAUDIE_PROXY_OPTIMIZE=0
+CLAUDIE_PROXY_SUMMARY_MODE=local
+CLAUDIE_PROXY_SUMMARY_THRESHOLD=12000
+CLAUDIE_PROXY_KEEP_RECENT_MESSAGES=8
+CLAUDIE_PROXY_KEEP_RECENT_TOKENS=6000
+CLAUDIE_PROXY_TOOL_RESULT_LIMIT=2000
+CLAUDIE_PROXY_TEXT_LIMIT=4000
+CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=4096
+CLAUDIE_PROXY_LOCAL_SUMMARY_TOKENS=2000
+```
+
+默认使用本地抽取式总结，不会为了总结再调用昂贵的上游模型。若希望使用模型生成总结，可设置 `CLAUDIE_PROXY_SUMMARY_MODE=model`；如果模型总结失败，claudie 仍会转发只经过长内容压缩的请求。设置 `CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=0` 可关闭输出 token 上限。
+
 ## 项目结构
 
 ```text
@@ -98,6 +116,7 @@ src/
   app/                     AppState、权限请求、选择请求、番茄钟等领域规则
   hooks/                   Claude Code hook server、事件语义、配额提取、settings 合并
   proxy.rs                 本地 Anthropic Messages -> OpenAI Chat Completions 代理
+  proxy_optimizer.rs       OpenAI 代理长上下文压缩、历史总结和总结缓存
   settings/                用户设置、LLM profiles、Claude env 集成、JSON 存储 helper
   ui/
     gif_animation.rs       GIF 加载、帧延迟读取和 GDI+ 绘制
@@ -121,6 +140,7 @@ src/
 
 - `%USERPROFILE%\.claudie\settings.json`：宠物资源路径、GIF 目录、动画映射、缩放、睡眠时间、窗口位置和番茄钟设置。
 - `%USERPROFILE%\.claudie\llm_profiles.json`：LLM provider/profile 定义，包括 OpenAI 代理额外请求体字段。
+- `%USERPROFILE%\.claudie\proxy_summaries.json`：OpenAI 代理为较早对话历史生成的本地总结缓存。
 - `%USERPROFILE%\.claude\settings.json`：Claude Code hook settings 和由 claudie 管理的 LLM env。
 - `%USERPROFILE%\.claude\settings.json.claudie.bak`：首次修改 Claude settings 前创建的一次性备份。
 
@@ -150,6 +170,7 @@ Settings 面板可以调整 GIF 目录和每个 mood 对应的文件名。替换
 - 配额字段兼容逻辑集中在 `src/hooks/quota.rs`。
 - 修改 Claude settings 时只合并 claudie 管理的 hook/env 字段，保留用户其它配置。
 - 新增 JSON 状态文件时复用 `src/settings/storage.rs`。
+- OpenAI 代理上下文优化、长文本压缩和总结缓存逻辑集中在 `src/proxy_optimizer.rs`。
 - UI 线程不要做可能卡顿的网络或文件工作。
 - 主窗口新增可视元素优先改 `src/ui/window/render.rs`；新增菜单、热键或鼠标交互优先改 `src/ui/window/mod.rs`。
 - Settings 面板和权限/选择弹层的颜色、圆角、字体等共享视觉 token 放在 `src/ui/theme.rs`。
