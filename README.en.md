@@ -12,16 +12,39 @@ claudie is inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerz
 
 ## Features
 
-- Receives Claude Code HTTP hooks and switches pet state for events such as `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, and `SubagentStart/Stop`.
-- Handles `PermissionRequest` hooks and shows Allow, Always, and Deny controls in the pet window.
-- Supports hotkeys: `Ctrl+Shift+Y` allows the current permission request, and `Ctrl+Shift+N` denies it.
-- Supports interactive `PreToolUse` choice cards for `AskUserQuestion` and `ExitPlanMode`.
-- Supports a Pomodoro timer, idle sleep state, pet scaling, window position memory, and mood-to-GIF mapping.
-- Right-click menu includes Settings, Start/Stop/Pause/Resume/Skip Pomodoro, and Exit.
-- Settings panel includes Basic, Pomodoro, and LLM Profiles tabs with a unified native theme.
-- Saves LLM providers/profiles, writes the active profile into Claude Code settings, and configures extra request body fields for the OpenAI proxy.
-- Includes a local OpenAI Chat Completions proxy that converts Claude Code Anthropic Messages requests to OpenAI-compatible APIs.
-- Windows has the full desktop UI; macOS/Linux currently run only headless hook/proxy servers without the desktop interaction UI.
+- **Hook-driven pet states**: Receives Claude Code HTTP hooks and switches pet states for the following events:
+
+  | Event | Behavior |
+  |-------|----------|
+  | `SessionStart` / `SessionResume` | Return to idle |
+  | `UserPromptSubmit` | Thinking |
+  | `PreToolUse` | Start tool (e.g. Write→typing, Bash→building) |
+  | `PostToolUse` | Finish tool |
+  | `PostToolBatch` | Batch complete, trigger quota snapshot |
+  | `PostToolUseFailure` / `StopFailure` / `PermissionDenied` | Error state |
+  | `SubagentStart` / `TaskCreated` | Subagent working |
+  | `SubagentStop` / `TaskCompleted` | Subagent done |
+  | `PreCompact` | Context compressing (thinking state) |
+  | `PostCompact` | Compression done |
+  | `Notification` / `Elicitation` | Notification prompt |
+  | `WorktreeCreate` | Creating worktree (building state) |
+  | `Stop` | Task complete |
+  | `SessionEnd` | Session ended, clear all pending interactions |
+
+- **Permission requests**: Intercepts `PermissionRequest` hooks and shows Allow, Always Allow, and Deny controls in the pet window.
+- **Choice cards**: Supports interactive `PreToolUse` choices for `AskUserQuestion` and `ExitPlanMode`, showing selectable options with Submit / Cancel buttons.
+- **Hotkeys**:
+  - `Ctrl+Shift+Y`: Allow current permission request / Submit current choice
+  - `Ctrl+Shift+N`: Deny current permission request / Cancel current choice
+- **Pomodoro timer**: Built-in pomodoro with Start / Stop / Pause / Resume / Skip and notification on completion.
+- **Idle sleep**: Pet auto-sleeps after inactivity, wakes on new activity.
+- **Pet scaling**: Adjustable pet window size.
+- **Window position memory**: Saves and restores window position across sessions.
+- **Mood-to-GIF mapping**: Configurable GIF file for each mood state.
+- **Settings panel**: Basic, Pomodoro, and LLM Profiles tabs with a unified native theme.
+- **LLM Profiles**: Save LLM providers/profiles, writes the active profile into Claude Code settings, and configures extra request body fields for the OpenAI proxy.
+- **OpenAI-compatible proxy**: Converts Claude Code Anthropic Messages requests to OpenAI Chat Completions API, with tool call format conversion, parallel tool control, context compression, and history summarization.
+- **Cross-platform**: Windows has the full desktop UI; macOS / Linux currently run only headless hook and proxy servers without the desktop interaction UI.
 
 ## Quick Start
 
@@ -84,27 +107,36 @@ After clicking `Use`, claudie writes Claude Code's `ANTHROPIC_BASE_URL` to the l
 CLAUDIE_API_FORMAT=openai
 ```
 
-The proxy currently implements the Claude Code endpoints `POST /v1/messages`, `POST /v1/messages/count_tokens`, and `GET /v1/models`, and it converts tool calls between Anthropic and OpenAI formats. `OpenAI body` is merged into the upstream chat completions request, but it cannot override claudie-managed `messages` or `stream` fields.
+The proxy currently implements `POST /v1/messages`, `POST /v1/messages/count_tokens`, and `GET /v1/models`, and it converts tool calls between Anthropic and OpenAI formats. `OpenAI body` is merged into the upstream chat completions request, but it cannot override claudie-managed `messages` or `stream` fields.
 
 When tools are present, the proxy sends `parallel_tool_calls=false` upstream by default so file reads, edits, and shell commands run sequentially. This reduces edit failures caused by multiple tool calls using stale file content. If you really want parallel tool calls, set `{"parallel_tool_calls": true}` explicitly in `OpenAI body`.
 
-OpenAI proxy context optimization is enabled by default. claudie compresses very long tool results before forwarding requests, caps oversized completion budgets, and when the estimated input grows beyond the default threshold it summarizes older conversation history while keeping recent messages intact. By default summaries are generated locally with extractive compaction so expensive models are not called just to summarize. Summaries are cached locally in `%USERPROFILE%\.claudie\proxy_summaries.json`; the cache stores summary text only, not API keys or full original request bodies.
+OpenAI proxy context optimization is enabled by default. claudie compresses very long tool results and text before forwarding requests, and when the estimated input grows beyond the default threshold it keeps recent messages and summarizes older history in chunks. Each chunk is independently summarized and cached under `%USERPROFILE%\.claudie\proxy_cache\` in `summaries/` and `chunks/` directories. The cache stores summary text only, not API keys or full original request bodies.
 
 You can tune or disable this behavior from a profile's `Extra env`:
 
 ```text
 CLAUDIE_PROXY_OPTIMIZE=0
 CLAUDIE_PROXY_SUMMARY_MODE=local
-CLAUDIE_PROXY_SUMMARY_THRESHOLD=12000
-CLAUDIE_PROXY_KEEP_RECENT_MESSAGES=8
-CLAUDIE_PROXY_KEEP_RECENT_TOKENS=6000
-CLAUDIE_PROXY_TOOL_RESULT_LIMIT=2000
-CLAUDIE_PROXY_TEXT_LIMIT=4000
+CLAUDIE_PROXY_SUMMARY_THRESHOLD=24000
+CLAUDIE_PROXY_KEEP_RECENT_MESSAGES=12
+CLAUDIE_PROXY_KEEP_RECENT_TOKENS=10000
+CLAUDIE_PROXY_TOOL_RESULT_LIMIT=3000
+CLAUDIE_PROXY_TEXT_LIMIT=6000
 CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=4096
 CLAUDIE_PROXY_LOCAL_SUMMARY_TOKENS=2000
+CLAUDIE_PROXY_CACHE_MAX_MB=10
+CLAUDIE_PROXY_SUMMARY_CACHE_TTL_HOURS=168
+CLAUDIE_PROXY_SUMMARY_CACHE_MAX_ENTRIES=200
+CLAUDIE_PROXY_CHUNK_SUMMARY=1
+CLAUDIE_PROXY_CHUNK_SIZE_MESSAGES=8
+CLAUDIE_PROXY_CHUNK_CACHE_TTL_HOURS=168
+CLAUDIE_PROXY_CHUNK_CACHE_MAX_ENTRIES=200
 ```
 
-Set `CLAUDIE_PROXY_SUMMARY_MODE=model` if you prefer an upstream model-generated summary. If that summary request fails, claudie still forwards the request with long-content compression applied. Set `CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=0` to disable the completion budget cap.
+By default summaries are generated locally with extractive compaction (`CLAUDIE_PROXY_SUMMARY_MODE=local`) so expensive models are not called just to summarize. Set `CLAUDIE_PROXY_SUMMARY_MODE=model` if you prefer an upstream model-generated summary. If that summary request fails, claudie still forwards the request with long-content compression applied. Set `CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=0` to disable the completion budget cap.
+
+Chunked summarization (enabled by default) partitions older messages into groups of `CLAUDIE_PROXY_CHUNK_SIZE_MESSAGES`, generates a digest per chunk, and appends them to the compressed result. Set `CLAUDIE_PROXY_CHUNK_SUMMARY=0` to disable chunking and fall back to a single monolithic summary. Both the `proxy_cache/` directory files and the legacy `proxy_summaries.json` can be safely deleted; claudie regenerates them on demand.
 
 ## Project Structure
 
@@ -118,7 +150,7 @@ src/
   app/                     AppState, permission requests, choice requests, Pomodoro domain rules
   hooks/                   Claude Code hook server, event semantics, quota extraction, settings merge
   proxy.rs                 Local Anthropic Messages -> OpenAI Chat Completions proxy
-  proxy_optimizer.rs       OpenAI proxy long-context compression, history summaries, and summary cache
+  proxy_optimizer.rs       OpenAI proxy long-context compression, chunked history summaries, and summary cache
   settings/                User settings, LLM profiles, Claude env integration, JSON storage helpers
   ui/
     gif_animation.rs       GIF loading, frame delay reading, and GDI+ drawing
@@ -142,7 +174,10 @@ Other directories:
 
 - `%USERPROFILE%\.claudie\settings.json`: pet asset path, GIF directory, animation mapping, scale, sleep timeout, window position, and Pomodoro settings.
 - `%USERPROFILE%\.claudie\llm_profiles.json`: LLM provider/profile definitions, including OpenAI proxy extra request body fields.
-- `%USERPROFILE%\.claudie\proxy_summaries.json`: local summary cache generated by the OpenAI proxy for older conversation history.
+- `%USERPROFILE%\.claudie\proxy_summaries.json`: legacy (single-block) OpenAI proxy summary cache.
+- `%USERPROFILE%\.claudie\proxy_cache\`: OpenAI proxy cache directory, containing:
+  - `summaries/`: single-block summary cache JSON files.
+  - `chunks/`: chunked summary cache JSON files, each chunk independently cached.
 - `%USERPROFILE%\.claude\settings.json`: Claude Code hook settings and claudie-managed LLM env values.
 - `%USERPROFILE%\.claude\settings.json.claudie.bak`: one-time backup created before the first Claude settings modification.
 
@@ -172,7 +207,7 @@ The Settings panel can adjust the GIF directory and the file name mapped to each
 - Keep quota field compatibility logic centralized in `src/hooks/quota.rs`.
 - When editing Claude settings, merge only claudie-managed hook/env fields and preserve unrelated user configuration.
 - Reuse `src/settings/storage.rs` when adding new JSON state files.
-- Keep OpenAI proxy context optimization, long-text compression, and summary cache logic centralized in `src/proxy_optimizer.rs`.
+- Keep OpenAI proxy context optimization, long-text compression, chunked history summaries, and summary cache logic centralized in `src/proxy_optimizer.rs`.
 - Do not do potentially slow network or filesystem work on the UI thread.
 - Add main-window visual elements in `src/ui/window/render.rs`; add menus, hotkeys, and mouse interactions in `src/ui/window/mod.rs`.
 - Keep shared visual tokens for the Settings panel and permission/choice overlays in `src/ui/theme.rs`.
