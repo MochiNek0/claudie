@@ -1,21 +1,30 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::settings::storage::{read_json_or_default, save_pretty_json};
 use crate::settings::{LlmProfile, claudie_home};
 
-const OPTIMIZER_VERSION: &str = "v2";
-const DEFAULT_SUMMARY_THRESHOLD_TOKENS: usize = 12_000;
-const DEFAULT_KEEP_RECENT_MESSAGES: usize = 8;
-const DEFAULT_KEEP_RECENT_TOKENS: usize = 6_000;
-const DEFAULT_TOOL_RESULT_LIMIT_TOKENS: usize = 2_000;
-const DEFAULT_TEXT_LIMIT_TOKENS: usize = 4_000;
+const OPTIMIZER_VERSION: &str = "v4";
+const DEFAULT_SUMMARY_THRESHOLD_TOKENS: usize = 24_000;
+const DEFAULT_KEEP_RECENT_MESSAGES: usize = 12;
+const DEFAULT_KEEP_RECENT_TOKENS: usize = 10_000;
+const DEFAULT_TOOL_RESULT_LIMIT_TOKENS: usize = 3_000;
+const DEFAULT_TEXT_LIMIT_TOKENS: usize = 6_000;
 const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 4_096;
 const DEFAULT_LOCAL_SUMMARY_TOKENS: usize = 2_000;
+const DEFAULT_CACHE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const DEFAULT_SUMMARY_CACHE_TTL_HOURS: u64 = 168;
+const DEFAULT_SUMMARY_CACHE_MAX_ENTRIES: usize = 200;
+const DEFAULT_CHUNK_SIZE_MESSAGES: usize = 8;
+const DEFAULT_CHUNK_CACHE_TTL_HOURS: u64 = 168;
+const DEFAULT_CHUNK_CACHE_MAX_ENTRIES: usize = 200;
 const SUMMARY_MAX_TOKENS: u64 = 800;
 const CHARS_PER_TOKEN: usize = 4;
+const MILLIS_PER_HOUR: u128 = 60 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SummaryMode {
@@ -34,6 +43,13 @@ pub(crate) struct ProxyOptimizationConfig {
     pub(crate) max_output_tokens: u64,
     pub(crate) local_summary_tokens: usize,
     pub(crate) summary_mode: SummaryMode,
+    pub(crate) cache_max_bytes: u64,
+    pub(crate) summary_cache_ttl_hours: u64,
+    pub(crate) summary_cache_max_entries: usize,
+    pub(crate) chunk_summary_enabled: bool,
+    pub(crate) chunk_size_messages: usize,
+    pub(crate) chunk_cache_ttl_hours: u64,
+    pub(crate) chunk_cache_max_entries: usize,
 }
 
 impl ProxyOptimizationConfig {
@@ -80,6 +96,42 @@ impl ProxyOptimizationConfig {
             "CLAUDIE_PROXY_LOCAL_SUMMARY_TOKENS",
             config.local_summary_tokens,
         );
+        config.cache_max_bytes = env_u64(
+            profile,
+            "CLAUDIE_PROXY_CACHE_MAX_MB",
+            config.cache_max_bytes / (1024 * 1024),
+        )
+        .saturating_mul(1024 * 1024);
+        config.summary_cache_ttl_hours = env_u64(
+            profile,
+            "CLAUDIE_PROXY_SUMMARY_CACHE_TTL_HOURS",
+            config.summary_cache_ttl_hours,
+        );
+        config.summary_cache_max_entries = env_usize(
+            profile,
+            "CLAUDIE_PROXY_SUMMARY_CACHE_MAX_ENTRIES",
+            config.summary_cache_max_entries,
+        );
+        config.chunk_summary_enabled = env_bool(
+            profile,
+            "CLAUDIE_PROXY_CHUNK_SUMMARY",
+            config.chunk_summary_enabled,
+        );
+        config.chunk_size_messages = env_usize(
+            profile,
+            "CLAUDIE_PROXY_CHUNK_SIZE_MESSAGES",
+            config.chunk_size_messages,
+        );
+        config.chunk_cache_ttl_hours = env_u64(
+            profile,
+            "CLAUDIE_PROXY_CHUNK_CACHE_TTL_HOURS",
+            config.chunk_cache_ttl_hours,
+        );
+        config.chunk_cache_max_entries = env_usize(
+            profile,
+            "CLAUDIE_PROXY_CHUNK_CACHE_MAX_ENTRIES",
+            config.chunk_cache_max_entries,
+        );
         if let Some(value) = profile.extra_env_value("CLAUDIE_PROXY_SUMMARY_MODE") {
             config.summary_mode = match value.trim().to_ascii_lowercase().as_str() {
                 "model" | "remote" | "llm" => SummaryMode::Model,
@@ -91,7 +143,7 @@ impl ProxyOptimizationConfig {
 
     fn signature(&self) -> String {
         format!(
-            "{OPTIMIZER_VERSION}:{}:{}:{}:{}:{}:{}:{}:{:?}",
+            "{OPTIMIZER_VERSION}:{}:{}:{}:{}:{}:{}:{}:{:?}:{}:{}",
             self.summary_threshold_tokens,
             self.keep_recent_messages,
             self.keep_recent_tokens,
@@ -99,7 +151,9 @@ impl ProxyOptimizationConfig {
             self.text_limit_tokens,
             self.max_output_tokens,
             self.local_summary_tokens,
-            self.summary_mode
+            self.summary_mode,
+            self.chunk_summary_enabled,
+            self.chunk_size_messages
         )
     }
 }
@@ -116,6 +170,13 @@ impl Default for ProxyOptimizationConfig {
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             local_summary_tokens: DEFAULT_LOCAL_SUMMARY_TOKENS,
             summary_mode: SummaryMode::Local,
+            cache_max_bytes: DEFAULT_CACHE_MAX_BYTES,
+            summary_cache_ttl_hours: DEFAULT_SUMMARY_CACHE_TTL_HOURS,
+            summary_cache_max_entries: DEFAULT_SUMMARY_CACHE_MAX_ENTRIES,
+            chunk_summary_enabled: true,
+            chunk_size_messages: DEFAULT_CHUNK_SIZE_MESSAGES,
+            chunk_cache_ttl_hours: DEFAULT_CHUNK_CACHE_TTL_HOURS,
+            chunk_cache_max_entries: DEFAULT_CHUNK_CACHE_MAX_ENTRIES,
         }
     }
 }
@@ -165,6 +226,20 @@ struct SummaryCache {
 struct CachedSummary {
     summary: String,
     created_at_ms: u128,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct SummaryCacheFile {
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    created_at_ms: u128,
+    #[serde(default)]
+    last_used_at_ms: u128,
 }
 
 pub(crate) fn optimize_openai_request(request: Value, profile: &LlmProfile) -> OptimizedRequest {
@@ -221,7 +296,7 @@ pub(crate) fn optimize_openai_request(request: Value, profile: &LlmProfile) -> O
     let recent_messages = messages[recent_start..].to_vec();
     let cache_key = summary_cache_key(profile, &request, &old_messages, &config);
 
-    if let Some(summary) = load_summary(&cache_key) {
+    if let Some(summary) = load_summary(&cache_key, &config) {
         let mut request_with_summary = request;
         set_messages(
             &mut request_with_summary,
@@ -237,8 +312,8 @@ pub(crate) fn optimize_openai_request(request: Value, profile: &LlmProfile) -> O
     }
 
     if config.summary_mode == SummaryMode::Local {
-        let summary = local_summary_from_messages(&old_messages, config.local_summary_tokens);
-        if let Err(_err) = save_summary(&cache_key, &summary) {}
+        let summary = local_summary_for_request(profile, &request, &old_messages, &config);
+        if let Err(_err) = save_summary(&cache_key, &summary, profile) {}
         let mut request_with_summary = request;
         set_messages(
             &mut request_with_summary,
@@ -278,20 +353,52 @@ pub(crate) fn summary_text_from_openai_response(response: &Value) -> Option<Stri
         .map(ToString::to_string)
 }
 
-pub(crate) fn save_summary(cache_key: &str, summary: &str) -> Result<(), String> {
-    let mut cache: SummaryCache = read_json_or_default(&summary_cache_path());
-    cache.version = OPTIMIZER_VERSION.to_string();
-    cache.entries.insert(
-        cache_key.to_string(),
-        CachedSummary {
-            summary: summary.to_string(),
-            created_at_ms: now_millis(),
-        },
-    );
-    save_pretty_json(&summary_cache_path(), &cache)
+pub(crate) fn save_summary(
+    cache_key: &str,
+    summary: &str,
+    profile: &LlmProfile,
+) -> Result<(), String> {
+    let config = ProxyOptimizationConfig::from_profile(profile);
+    save_summary_with_config(cache_key, summary, &config)
 }
 
-fn load_summary(cache_key: &str) -> Option<String> {
+fn save_summary_with_config(
+    cache_key: &str,
+    summary: &str,
+    config: &ProxyOptimizationConfig,
+) -> Result<(), String> {
+    let now = now_millis();
+    let entry = SummaryCacheFile {
+        version: OPTIMIZER_VERSION.to_string(),
+        kind: "summary".to_string(),
+        summary: summary.to_string(),
+        created_at_ms: now,
+        last_used_at_ms: now,
+    };
+    let path = summary_cache_file_path(cache_key);
+    save_pretty_json(&path, &entry)?;
+    prune_summary_cache(config)
+}
+
+fn load_summary(cache_key: &str, config: &ProxyOptimizationConfig) -> Option<String> {
+    let path = summary_cache_file_path(cache_key);
+    let mut entry: SummaryCacheFile = read_json_or_default(&path);
+    if entry.version == OPTIMIZER_VERSION && !entry.summary.trim().is_empty() {
+        entry.last_used_at_ms = now_millis();
+        let _ = save_pretty_json(&path, &entry);
+        return Some(entry.summary);
+    }
+
+    let summary = load_legacy_summary(cache_key)?;
+    let _ = save_summary_with_config(cache_key, &summary, config);
+    Some(summary)
+}
+
+fn summary_cache_path() -> std::path::PathBuf {
+    claudie_home().join("proxy_summaries.json")
+}
+
+fn load_legacy_summary(cache_key: &str) -> Option<String> {
     let cache: SummaryCache = read_json_or_default(&summary_cache_path());
     if cache.version != OPTIMIZER_VERSION && !cache.version.is_empty() {
         return None;
@@ -303,8 +410,103 @@ fn load_summary(cache_key: &str) -> Option<String> {
         .filter(|summary| !summary.trim().is_empty())
 }
 
-fn summary_cache_path() -> std::path::PathBuf {
-    claudie_home().join("proxy_summaries.json")
+pub(crate) fn proxy_cache_dir() -> PathBuf {
+    claudie_home().join("proxy_cache")
+}
+
+fn summary_cache_dir() -> PathBuf {
+    proxy_cache_dir().join("summaries")
+}
+
+fn summary_cache_file_path(cache_key: &str) -> PathBuf {
+    summary_cache_dir().join(format!("{cache_key}.json"))
+}
+
+fn chunk_cache_dir() -> PathBuf {
+    proxy_cache_dir().join("chunks")
+}
+
+fn prune_summary_cache(config: &ProxyOptimizationConfig) -> Result<(), String> {
+    prune_cache_dir(
+        &summary_cache_dir(),
+        config.summary_cache_ttl_hours,
+        config.summary_cache_max_entries,
+        config.cache_max_bytes,
+    )
+}
+
+fn prune_chunk_cache(config: &ProxyOptimizationConfig) -> Result<(), String> {
+    prune_cache_dir(
+        &chunk_cache_dir(),
+        config.chunk_cache_ttl_hours,
+        config.chunk_cache_max_entries,
+        config.cache_max_bytes,
+    )
+}
+
+pub(crate) fn prune_cache_dir(
+    dir: &Path,
+    ttl_hours: u64,
+    max_entries: usize,
+    max_bytes: u64,
+) -> Result<(), String> {
+    let now = now_millis();
+    let ttl_ms = u128::from(ttl_hours).saturating_mul(MILLIS_PER_HOUR);
+    let mut entries = cache_dir_entries(dir)?;
+
+    for entry in entries.iter().filter(|entry| {
+        ttl_ms > 0
+            && entry.last_used_at_ms > 0
+            && now.saturating_sub(entry.last_used_at_ms) > ttl_ms
+    }) {
+        let _ = fs::remove_file(&entry.path);
+    }
+
+    entries = cache_dir_entries(dir)?;
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.last_used_at_ms));
+    let mut kept_bytes = 0_u64;
+    for (index, entry) in entries.iter().enumerate() {
+        kept_bytes = kept_bytes.saturating_add(entry.size_bytes);
+        let too_many = max_entries > 0 && index >= max_entries;
+        let too_large = max_bytes > 0 && kept_bytes > max_bytes;
+        if too_many || too_large {
+            let _ = fs::remove_file(&entry.path);
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct CacheDirEntry {
+    path: PathBuf,
+    last_used_at_ms: u128,
+    size_bytes: u64,
+}
+
+fn cache_dir_entries(dir: &Path) -> Result<Vec<CacheDirEntry>, String> {
+    let Ok(read_dir) = fs::read_dir(dir) else {
+        return Ok(Vec::new());
+    };
+    let mut entries = Vec::new();
+    for item in read_dir {
+        let item = item.map_err(|err| err.to_string())?;
+        let path = item.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let metadata = item.metadata().map_err(|err| err.to_string())?;
+        if !metadata.is_file() {
+            continue;
+        }
+        let entry: SummaryCacheFile = read_json_or_default(&path);
+        entries.push(CacheDirEntry {
+            path,
+            last_used_at_ms: entry.last_used_at_ms.max(entry.created_at_ms),
+            size_bytes: metadata.len(),
+        });
+    }
+    Ok(entries)
 }
 
 fn env_usize(profile: &LlmProfile, key: &str, default: usize) -> usize {
@@ -312,6 +514,26 @@ fn env_usize(profile: &LlmProfile, key: &str, default: usize) -> usize {
         .extra_env_value(key)
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn env_u64(profile: &LlmProfile, key: &str, default: u64) -> u64 {
+    profile
+        .extra_env_value(key)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn env_bool(profile: &LlmProfile, key: &str, default: bool) -> bool {
+    profile
+        .extra_env_value(key)
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
         .unwrap_or(default)
 }
 
@@ -488,6 +710,99 @@ fn build_summary_request(request: &Value, old_messages: &[Value]) -> Value {
     })
 }
 
+fn local_summary_for_request(
+    profile: &LlmProfile,
+    request: &Value,
+    messages: &[Value],
+    config: &ProxyOptimizationConfig,
+) -> String {
+    if !config.chunk_summary_enabled || messages.len() <= config.chunk_size_messages {
+        return local_summary_from_messages(messages, config.local_summary_tokens);
+    }
+    local_summary_with_chunk_cache_at(profile, request, messages, config, &chunk_cache_dir())
+}
+
+fn local_summary_with_chunk_cache_at(
+    profile: &LlmProfile,
+    request: &Value,
+    messages: &[Value],
+    config: &ProxyOptimizationConfig,
+    chunk_dir: &Path,
+) -> String {
+    let chunk_size = config.chunk_size_messages.max(1);
+    let chunk_count = messages.len().div_ceil(chunk_size);
+    if chunk_count <= 1 {
+        return local_summary_from_messages(messages, config.local_summary_tokens);
+    }
+
+    let per_chunk_tokens = (config.local_summary_tokens / chunk_count)
+        .clamp(120, 500)
+        .min(config.local_summary_tokens.max(120));
+    let mut chunk_summaries = Vec::new();
+    for (chunk_index, chunk) in messages.chunks(chunk_size).enumerate() {
+        let start = chunk_index * chunk_size;
+        let end = start + chunk.len();
+        let cache_key = chunk_summary_cache_key(profile, request, chunk, config);
+        let path = chunk_dir.join(format!("{cache_key}.json"));
+        let summary = load_chunk_summary(&path).unwrap_or_else(|| {
+            let summary = local_summary_from_messages(chunk, per_chunk_tokens);
+            let _ = save_chunk_summary(&path, &summary, config);
+            summary
+        });
+        chunk_summaries.push(format!(
+            "Chunk {} (older messages {}-{}):\n{}",
+            chunk_index + 1,
+            start + 1,
+            end,
+            summary.trim()
+        ));
+    }
+
+    let mut summary = format!(
+        "Chunked local summary of {} older messages across {} cached chunks. Full text was compacted to reduce OpenAI proxy cost; recent messages remain verbatim.\n{}",
+        messages.len(),
+        chunk_count,
+        chunk_summaries.join("\n\n")
+    );
+    let budget_chars = config.local_summary_tokens.saturating_mul(CHARS_PER_TOKEN);
+    if summary.chars().count() > budget_chars {
+        summary =
+            head_tail_compress(&summary, config.local_summary_tokens, false).unwrap_or(summary);
+    }
+    let _ = prune_chunk_cache(config);
+    summary
+}
+
+fn load_chunk_summary(path: &Path) -> Option<String> {
+    let mut entry: SummaryCacheFile = read_json_or_default(path);
+    if entry.version != OPTIMIZER_VERSION
+        || entry.kind != "chunk_summary"
+        || entry.summary.trim().is_empty()
+    {
+        return None;
+    }
+    entry.last_used_at_ms = now_millis();
+    let _ = save_pretty_json(path, &entry);
+    Some(entry.summary)
+}
+
+fn save_chunk_summary(
+    path: &Path,
+    summary: &str,
+    config: &ProxyOptimizationConfig,
+) -> Result<(), String> {
+    let now = now_millis();
+    let entry = SummaryCacheFile {
+        version: OPTIMIZER_VERSION.to_string(),
+        kind: "chunk_summary".to_string(),
+        summary: summary.to_string(),
+        created_at_ms: now,
+        last_used_at_ms: now,
+    };
+    save_pretty_json(path, &entry)?;
+    prune_chunk_cache(config)
+}
+
 fn local_summary_from_messages(messages: &[Value], budget_tokens: usize) -> String {
     let budget_chars = budget_tokens.saturating_mul(CHARS_PER_TOKEN).max(1_000);
     let mut lines = Vec::new();
@@ -496,34 +811,70 @@ fn local_summary_from_messages(messages: &[Value], budget_tokens: usize) -> Stri
         messages.len()
     ));
     let mut used_chars = lines[0].chars().count();
+    let original_user_index = messages.iter().position(|message| {
+        message_role(message) == "user" && !message_summary_detail(message).trim().is_empty()
+    });
+
+    if let Some(index) = original_user_index {
+        if let Some(line) = summary_line_for_message(
+            index,
+            &messages[index],
+            budget_chars.saturating_sub(used_chars),
+            Some("original user request"),
+        ) {
+            used_chars = used_chars.saturating_add(line.chars().count() + 1);
+            lines.push(line);
+        }
+    }
+
+    let mut recent_lines = Vec::new();
     for (index, message) in messages.iter().enumerate().rev() {
+        if Some(index) == original_user_index {
+            continue;
+        }
         if used_chars >= budget_chars {
             break;
         }
-        let role = message_role(message);
-        let mut detail = message_content_text(message);
-        if detail.trim().is_empty() && message.get("tool_calls").is_some() {
-            detail = format!("assistant tool calls: {}", message["tool_calls"]);
-        }
-        if detail.trim().is_empty() {
-            continue;
-        }
-        let compressed = detail
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
         let remaining_chars = budget_chars.saturating_sub(used_chars);
-        let per_message_tokens = (remaining_chars / CHARS_PER_TOKEN).min(350).max(80);
-        let excerpt = head_tail_compress(&compressed, per_message_tokens, role == "tool")
-            .unwrap_or(compressed);
-        let line = format!("{}. {role}: {excerpt}", index + 1);
+        let Some(line) = summary_line_for_message(index, message, remaining_chars, None) else {
+            continue;
+        };
         used_chars = used_chars.saturating_add(line.chars().count() + 1);
-        lines.push(line);
+        recent_lines.push(line);
     }
-    lines[1..].reverse();
+    recent_lines.reverse();
+    lines.extend(recent_lines);
     lines.join("\n")
+}
+
+fn summary_line_for_message(
+    index: usize,
+    message: &Value,
+    remaining_chars: usize,
+    label_override: Option<&str>,
+) -> Option<String> {
+    let detail = message_summary_detail(message);
+    if detail.trim().is_empty() {
+        return None;
+    }
+    let role = label_override.unwrap_or_else(|| message_role(message));
+    let per_message_tokens = (remaining_chars / CHARS_PER_TOKEN).min(350).max(80);
+    let excerpt = head_tail_compress(&detail, per_message_tokens, message_role(message) == "tool")
+        .unwrap_or(detail);
+    Some(format!("{}. {role}: {excerpt}", index + 1))
+}
+
+fn message_summary_detail(message: &Value) -> String {
+    let mut detail = message_content_text(message);
+    if detail.trim().is_empty() && message.get("tool_calls").is_some() {
+        detail = format!("assistant tool calls: {}", message["tool_calls"]);
+    }
+    detail
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn message_content_text(message: &Value) -> String {
@@ -578,6 +929,30 @@ fn summary_cache_key(
         config.signature().as_str(),
         &Value::Array(old_messages.to_vec()).to_string(),
         &tools.to_string(),
+    ])
+}
+
+fn chunk_summary_cache_key(
+    profile: &LlmProfile,
+    request: &Value,
+    chunk_messages: &[Value],
+    config: &ProxyOptimizationConfig,
+) -> String {
+    let tools = request.get("tools").cloned().unwrap_or(Value::Null);
+    let config_signature = config.signature();
+    let messages_json = Value::Array(chunk_messages.to_vec()).to_string();
+    let tools_json = tools.to_string();
+    stable_hash(&[
+        OPTIMIZER_VERSION,
+        "chunk",
+        profile.id.as_str(),
+        request
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        config_signature.as_str(),
+        messages_json.as_str(),
+        tools_json.as_str(),
     ])
 }
 
@@ -770,6 +1145,26 @@ mod tests {
     }
 
     #[test]
+    fn local_summary_preserves_original_user_goal() {
+        let mut messages = vec![json!({
+            "role": "user",
+            "content": "Please optimize README and AGENTS, fill missing parts, and fix inaccurate parts."
+        })];
+        messages.extend((0..30).map(|index| {
+            json!({
+                "role": "tool",
+                "tool_call_id": format!("call_{index}"),
+                "content": format!("tool-result-{index}-{}", "x".repeat(20_000))
+            })
+        }));
+
+        let summary = local_summary_from_messages(&messages, 250);
+
+        assert!(summary.contains("original user request"));
+        assert!(summary.contains("optimize README and AGENTS"));
+    }
+
+    #[test]
     fn output_token_budget_is_capped_by_default() {
         let request = json!({
             "model": "gpt-test",
@@ -823,6 +1218,88 @@ mod tests {
 
         assert_eq!(key_a1, key_a2);
         assert_ne!(key_a1, key_b);
+    }
+
+    #[test]
+    fn cache_dir_prune_removes_expired_and_over_limit_files() {
+        let dir = std::env::temp_dir().join(format!("claudie-cache-prune-{}", now_millis()));
+        let old = SummaryCacheFile {
+            version: OPTIMIZER_VERSION.to_string(),
+            kind: "summary".to_string(),
+            summary: "old".to_string(),
+            created_at_ms: 1,
+            last_used_at_ms: 1,
+        };
+        let fresh_a = SummaryCacheFile {
+            version: OPTIMIZER_VERSION.to_string(),
+            kind: "summary".to_string(),
+            summary: "fresh a".to_string(),
+            created_at_ms: now_millis(),
+            last_used_at_ms: now_millis(),
+        };
+        let fresh_b = SummaryCacheFile {
+            version: OPTIMIZER_VERSION.to_string(),
+            kind: "summary".to_string(),
+            summary: "fresh b".to_string(),
+            created_at_ms: now_millis() + 1,
+            last_used_at_ms: now_millis() + 1,
+        };
+        let old_path = dir.join("old.json");
+        let fresh_a_path = dir.join("fresh-a.json");
+        let fresh_b_path = dir.join("fresh-b.json");
+        save_pretty_json(&old_path, &old).unwrap();
+        save_pretty_json(&fresh_a_path, &fresh_a).unwrap();
+        save_pretty_json(&fresh_b_path, &fresh_b).unwrap();
+
+        prune_cache_dir(&dir, 1, 1, 1024 * 1024).unwrap();
+
+        assert!(!old_path.exists());
+        assert!(!fresh_a_path.exists());
+        assert!(fresh_b_path.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn chunk_summary_cache_reuses_existing_chunk_file() {
+        let dir = std::env::temp_dir().join(format!("claudie-chunk-cache-{}", now_millis()));
+        let config = ProxyOptimizationConfig {
+            chunk_size_messages: 2,
+            local_summary_tokens: 2_000,
+            ..ProxyOptimizationConfig::default()
+        };
+        let request = json!({
+            "model": "gpt-test",
+            "tools": [{ "type": "function", "function": { "name": "Read" } }]
+        });
+        let messages = vec![
+            json!({ "role": "user", "content": "original user request: optimize proxy cache" }),
+            json!({ "role": "assistant", "content": "I will inspect the cache" }),
+            json!({ "role": "tool", "content": "cache file contents" }),
+            json!({ "role": "assistant", "content": "I found a large JSON file" }),
+            json!({ "role": "user", "content": "continue" }),
+        ];
+        let first_chunk_key =
+            chunk_summary_cache_key(&profile(), &request, &messages[..2], &config);
+        let first_chunk_path = dir.join(format!("{first_chunk_key}.json"));
+        save_chunk_summary(&first_chunk_path, "cached first chunk marker", &config).unwrap();
+
+        let summary =
+            local_summary_with_chunk_cache_at(&profile(), &request, &messages, &config, &dir);
+
+        assert!(summary.contains("Chunked local summary"));
+        assert!(summary.contains("cached first chunk marker"));
+        assert!(dir.read_dir().unwrap().count() >= 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn chunk_summary_can_be_disabled_from_profile_env() {
+        let mut profile = profile();
+        profile.extra_env = "CLAUDIE_PROXY_CHUNK_SUMMARY=0".to_string();
+
+        let config = ProxyOptimizationConfig::from_profile(&profile);
+
+        assert!(!config.chunk_summary_enabled);
     }
 
     #[test]

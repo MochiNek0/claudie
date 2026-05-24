@@ -86,6 +86,8 @@ CLAUDIE_API_FORMAT=openai
 
 代理当前实现了 Claude Code 常用的 `POST /v1/messages`、`POST /v1/messages/count_tokens` 和 `GET /v1/models`，并支持把工具调用在 Anthropic/OpenAI 格式之间转换。`OpenAI body` 会合并进转发到上游的 chat completions 请求，但不能覆盖 claudie 管理的 `messages` 和 `stream` 字段。
 
+当请求包含工具时，代理默认向上游设置 `parallel_tool_calls=false`，让文件读取、编辑和命令调用按顺序执行，减少多个编辑工具基于过期文件内容并发失败的概率。若确实需要并行工具调用，可在 `OpenAI body` 中显式设置 `{"parallel_tool_calls": true}` 覆盖默认值。
+
 OpenAI 代理默认启用上下文优化。claudie 会在转发请求前压缩超长工具结果和普通文本；当估算输入超过默认阈值时，会保留最近消息并总结更早的对话历史。总结缓存保存在 `%USERPROFILE%\.claudie\proxy_summaries.json`，重复请求相同的较早历史时可复用缓存总结，避免再次发起总结请求。缓存只保存总结文本，不保存 API key 或完整原始请求体。
 
 可在 profile 的 `Extra env` 中调整或关闭此行为：

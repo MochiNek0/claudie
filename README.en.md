@@ -86,6 +86,8 @@ CLAUDIE_API_FORMAT=openai
 
 The proxy currently implements the Claude Code endpoints `POST /v1/messages`, `POST /v1/messages/count_tokens`, and `GET /v1/models`, and it converts tool calls between Anthropic and OpenAI formats. `OpenAI body` is merged into the upstream chat completions request, but it cannot override claudie-managed `messages` or `stream` fields.
 
+When tools are present, the proxy sends `parallel_tool_calls=false` upstream by default so file reads, edits, and shell commands run sequentially. This reduces edit failures caused by multiple tool calls using stale file content. If you really want parallel tool calls, set `{"parallel_tool_calls": true}` explicitly in `OpenAI body`.
+
 OpenAI proxy context optimization is enabled by default. claudie compresses very long tool results before forwarding requests, caps oversized completion budgets, and when the estimated input grows beyond the default threshold it summarizes older conversation history while keeping recent messages intact. By default summaries are generated locally with extractive compaction so expensive models are not called just to summarize. Summaries are cached locally in `%USERPROFILE%\.claudie\proxy_summaries.json`; the cache stores summary text only, not API keys or full original request bodies.
 
 You can tune or disable this behavior from a profile's `Extra env`:

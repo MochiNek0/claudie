@@ -74,6 +74,7 @@ cargo run --release -- --port 17387
 - Choice-style requests are represented by `PendingChoice`; keep response mapping in `src/hooks/events.rs`.
 - The hook server should stay small and synchronous. Put Claude-event semantics in `src/hooks/events.rs`, not in the HTTP parser.
 - The OpenAI proxy should remain a small local compatibility layer. Keep request/response format conversion in `src/proxy.rs`, keep context optimization and summary caching in `src/proxy_optimizer.rs`, and keep profile persistence/env behavior and OpenAI extra body validation in `src/settings/mod.rs`.
+- Keep OpenAI `parallel_tool_calls` disabled by default when tools are present. Sequential tool calls are safer for file edits; users can still override this through `OpenAI body`.
 - UI code uses raw Win32 handles and unsafe calls. Keep unsafe usage close to Win32 boundaries and prefer small helper functions for repeated patterns.
 - Main pet window behavior belongs in `src/ui/window/mod.rs`; main pet drawing and permission/choice overlays belong in `src/ui/window/render.rs`.
 - Shared visual tokens for Settings and overlay chrome belong in `src/ui/theme.rs`; keep color, radius, and font changes centralized there.

@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -9,8 +11,23 @@ use crate::app::{AppState, PetMood};
 use crate::config::DEFAULT_PROXY_PORT;
 use crate::proxy_optimizer;
 use crate::settings::LlmProfile;
+use crate::settings::storage::{read_json_or_default, save_pretty_json};
 
 const MAX_PROXY_REQUEST_BYTES: usize = 10 * 1024 * 1024;
+const CAPABILITY_CACHE_VERSION: &str = "v1";
+const DEFAULT_CAPABILITY_CACHE_TTL_HOURS: u64 = 720;
+const DEFAULT_CAPABILITY_CACHE_MAX_ENTRIES: usize = 200;
+const DEFAULT_PROXY_CACHE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const OPENAI_PROXY_COMPAT_PROMPT: &str = "\
+You are responding to Claude Code through claudie, an OpenAI-compatible proxy. \
+Continue the original user task across tool results. Use the provided function \
+tools for file reads, edits, shell commands, and other actions. Treat tool-result \
+messages as observations from your previous tool calls. Do not ask the user what \
+tool to create unless that is the user's task. Use file-edit tools sequentially, \
+with exact current text from the latest read. If an edit/update tool fails, re-read \
+the relevant file section before retrying instead of guessing. Keep working until \
+the requested coding or documentation task is complete, then summarize the actual \
+changes.";
 
 pub(crate) fn start_openai_proxy_server(state: Arc<Mutex<AppState>>) -> Result<(), String> {
     let listener = TcpListener::bind(("127.0.0.1", DEFAULT_PROXY_PORT))
@@ -140,7 +157,7 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
                 match proxy_optimizer::summary_text_from_openai_response(&summary_response) {
                     Some(summary) => {
                         if let Err(err) =
-                            proxy_optimizer::save_summary(&pending.cache_key, &summary)
+                            proxy_optimizer::save_summary(&pending.cache_key, &summary, &profile)
                         {
                             record_proxy_event(&state, format!("summary cache save failed: {err}"));
                         } else {
@@ -169,11 +186,52 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
         optimized.request
     };
 
-    let upstream = match call_openai(&agent, &profile, &openai_request) {
+    let use_tool_transcript = cached_tool_history_needs_transcript(&profile, &openai_request);
+    let outbound_request = if use_tool_transcript {
+        record_proxy_event(
+            &state,
+            "using cached OpenAI tool transcript compatibility mode".to_string(),
+        );
+        tool_history_as_text_transcript(&openai_request)
+    } else {
+        openai_request.clone()
+    };
+
+    let upstream = match call_openai(&agent, &profile, &outbound_request) {
         Ok(value) => value,
+        Err(err)
+            if !use_tool_transcript && should_retry_with_tool_transcript(&err, &openai_request) =>
+        {
+            record_proxy_event(
+                &state,
+                "retrying OpenAI request with text tool transcript".to_string(),
+            );
+            if let Err(cache_err) = save_tool_history_capability(&profile, &openai_request, false) {
+                record_proxy_event(&state, format!("capability cache save failed: {cache_err}"));
+            }
+            let fallback_request = tool_history_as_text_transcript(&openai_request);
+            match call_openai(&agent, &profile, &fallback_request) {
+                Ok(value) => value,
+                Err(retry_err) => {
+                    let combined = format!("{err}; text tool transcript retry failed: {retry_err}");
+                    record_proxy_error(&state, combined.clone());
+                    let _ = write_json_response(
+                        &mut stream,
+                        proxy_status_for_upstream_error(&retry_err),
+                        json!({ "error": combined }),
+                    );
+                    return;
+                }
+            }
+        }
         Err(err) => {
-            record_proxy_error(&state, err.clone());
-            let _ = write_json_response(&mut stream, 502, json!({ "error": err }));
+            let message = err.to_string();
+            record_proxy_error(&state, message.clone());
+            let _ = write_json_response(
+                &mut stream,
+                proxy_status_for_upstream_error(&err),
+                json!({ "error": message }),
+            );
             return;
         }
     };
@@ -195,7 +253,23 @@ fn active_openai_profile(state: &Arc<Mutex<AppState>>) -> Option<LlmProfile> {
         .cloned()
 }
 
-fn call_openai(agent: &ureq::Agent, profile: &LlmProfile, body: &Value) -> Result<Value, String> {
+#[derive(Clone, Debug)]
+struct UpstreamError {
+    status: Option<u16>,
+    message: String,
+}
+
+impl std::fmt::Display for UpstreamError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+fn call_openai(
+    agent: &ureq::Agent,
+    profile: &LlmProfile,
+    body: &Value,
+) -> Result<Value, UpstreamError> {
     let auth = format!("Bearer {}", profile.openai_upstream_api_key());
     let response = agent
         .post(&profile.openai_chat_completions_url())
@@ -204,30 +278,70 @@ fn call_openai(agent: &ureq::Agent, profile: &LlmProfile, body: &Value) -> Resul
         .send_string(&body.to_string());
 
     let text = match response {
-        Ok(response) => response
-            .into_string()
-            .map_err(|err| format!("OpenAI proxy upstream response failed: {err}"))?,
+        Ok(response) => response.into_string().map_err(|err| UpstreamError {
+            status: None,
+            message: format!("OpenAI proxy upstream response failed: {err}"),
+        })?,
         Err(ureq::Error::Status(status, response)) => {
             let text = response.into_string().unwrap_or_default();
-            return Err(format!(
-                "OpenAI proxy upstream returned HTTP {status}: {}",
-                shorten_for_error(&text)
-            ));
+            return Err(UpstreamError {
+                status: Some(status),
+                message: format!(
+                    "OpenAI proxy upstream returned HTTP {status}: {}",
+                    shorten_for_error(&text)
+                ),
+            });
         }
-        Err(err) => return Err(format!("OpenAI proxy upstream request failed: {err}")),
+        Err(err) => {
+            return Err(UpstreamError {
+                status: None,
+                message: format!("OpenAI proxy upstream request failed: {err}"),
+            });
+        }
     };
 
-    serde_json::from_str(&text)
-        .map_err(|err| format!("OpenAI proxy upstream returned invalid JSON: {err}"))
+    serde_json::from_str(&text).map_err(|err| UpstreamError {
+        status: None,
+        message: format!("OpenAI proxy upstream returned invalid JSON: {err}"),
+    })
+}
+
+fn proxy_status_for_upstream_error(err: &UpstreamError) -> u16 {
+    if upstream_error_is_temporarily_unavailable(err) {
+        return 503;
+    }
+    match err.status {
+        Some(400..=499) => err.status.unwrap_or(502),
+        Some(500..=599) | None => 502,
+        Some(_) => 502,
+    }
+}
+
+fn upstream_error_is_temporarily_unavailable(err: &UpstreamError) -> bool {
+    let message = err.message.to_ascii_lowercase();
+    let temporary_wording = message.contains("temporarily")
+        || message.contains("temporary")
+        || message.contains("try again later")
+        || message.contains("engine is not available");
+    let known_transient_code = message.contains("failed_precondition_error")
+        && (message.contains("\"code\":\"9\"") || message.contains("\"code\": \"9\""));
+    matches!(err.status, Some(400..=499)) && (temporary_wording || known_transient_code)
 }
 
 fn anthropic_to_openai_request(request: &Value, profile: &LlmProfile) -> Result<Value, String> {
     let mut messages = Vec::new();
-    if let Some(system) = request.get("system") {
-        let text = content_to_text(system);
-        if !text.trim().is_empty() {
-            messages.push(json!({ "role": "system", "content": text }));
+    let mut system_text = request
+        .get("system")
+        .map(content_to_text)
+        .unwrap_or_default();
+    if openai_proxy_compat_prompt_enabled(profile) {
+        if !system_text.trim().is_empty() {
+            system_text.push_str("\n\n");
         }
+        system_text.push_str(OPENAI_PROXY_COMPAT_PROMPT);
+    }
+    if !system_text.trim().is_empty() {
+        messages.push(json!({ "role": "system", "content": system_text }));
     }
 
     let Some(input_messages) = request.get("messages").and_then(Value::as_array) else {
@@ -238,16 +352,11 @@ fn anthropic_to_openai_request(request: &Value, profile: &LlmProfile) -> Result<
     }
 
     let mut out = Map::new();
-    let model = profile
-        .model
-        .trim()
-        .is_empty()
-        .then(|| {
-            request
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-        })
+    let model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
         .unwrap_or_else(|| profile.model.trim());
     out.insert("model".to_string(), Value::String(model.to_string()));
     out.insert("messages".to_string(), Value::Array(messages));
@@ -267,6 +376,7 @@ fn anthropic_to_openai_request(request: &Value, profile: &LlmProfile) -> Result<
             .collect::<Vec<_>>();
         if !converted.is_empty() {
             out.insert("tools".to_string(), Value::Array(converted));
+            out.insert("parallel_tool_calls".to_string(), Value::Bool(false));
         }
     }
 
@@ -283,6 +393,18 @@ fn anthropic_to_openai_request(request: &Value, profile: &LlmProfile) -> Result<
     Ok(Value::Object(out))
 }
 
+fn openai_proxy_compat_prompt_enabled(profile: &LlmProfile) -> bool {
+    profile
+        .extra_env_value("CLAUDIE_PROXY_COMPAT_PROMPT")
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true)
+}
+
 fn append_openai_messages(messages: &mut Vec<Value>, message: &Value) {
     let role = message
         .get("role")
@@ -295,14 +417,7 @@ fn append_openai_messages(messages: &mut Vec<Value>, message: &Value) {
             let (text, tool_calls) = assistant_content_to_openai(content);
             let mut out = Map::new();
             out.insert("role".to_string(), Value::String("assistant".to_string()));
-            out.insert(
-                "content".to_string(),
-                if text.trim().is_empty() {
-                    Value::Null
-                } else {
-                    Value::String(text)
-                },
-            );
+            out.insert("content".to_string(), Value::String(text));
             if !tool_calls.is_empty() {
                 out.insert("tool_calls".to_string(), Value::Array(tool_calls));
             }
@@ -442,10 +557,13 @@ fn openai_to_anthropic_response(openai: &Value, request: &Value, profile: &LlmPr
     let message = choice.get("message").cloned().unwrap_or_else(|| json!({}));
     let mut content = Vec::new();
 
-    if let Some(text) = message.get("content").and_then(Value::as_str)
-        && !text.is_empty()
-    {
+    let text = openai_message_content_to_text(message.get("content").unwrap_or(&Value::Null));
+    if !text.is_empty() {
         content.push(json!({ "type": "text", "text": text }));
+    }
+
+    if let Some(block) = anthropic_tool_use_from_openai_function_call(&message) {
+        content.push(block);
     }
 
     if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
@@ -475,7 +593,7 @@ fn openai_to_anthropic_response(openai: &Value, request: &Value, profile: &LlmPr
         "id": openai.get("id").and_then(Value::as_str).unwrap_or("msg_claudie_proxy"),
         "type": "message",
         "role": "assistant",
-        "model": profile.model.trim().is_empty().then(|| request.get("model").and_then(Value::as_str).unwrap_or("claudie-openai-proxy")).unwrap_or_else(|| profile.model.trim()),
+        "model": response_model(openai, request, profile),
         "content": content,
         "stop_reason": stop_reason,
         "stop_sequence": Value::Null,
@@ -489,18 +607,347 @@ fn openai_to_anthropic_response(openai: &Value, request: &Value, profile: &LlmPr
 fn anthropic_tool_use_from_openai(tool_call: &Value) -> Option<Value> {
     let function = tool_call.get("function")?;
     let name = function.get("name").and_then(Value::as_str)?;
-    let arguments = function
-        .get("arguments")
-        .and_then(Value::as_str)
-        .unwrap_or("{}");
-    let input =
-        serde_json::from_str(arguments).unwrap_or_else(|_| json!({ "arguments": arguments }));
+    let input = openai_function_arguments_to_value(function.get("arguments"));
     Some(json!({
         "type": "tool_use",
         "id": tool_call.get("id").and_then(Value::as_str).unwrap_or("tool_call"),
         "name": name,
         "input": input
     }))
+}
+
+fn anthropic_tool_use_from_openai_function_call(message: &Value) -> Option<Value> {
+    let function = message.get("function_call")?;
+    let name = function.get("name").and_then(Value::as_str)?;
+    Some(json!({
+        "type": "tool_use",
+        "id": "function_call",
+        "name": name,
+        "input": openai_function_arguments_to_value(function.get("arguments"))
+    }))
+}
+
+fn openai_function_arguments_to_value(arguments: Option<&Value>) -> Value {
+    match arguments {
+        Some(Value::String(text)) => {
+            serde_json::from_str(text).unwrap_or_else(|_| json!({ "arguments": text }))
+        }
+        Some(Value::Object(_)) => arguments.cloned().unwrap_or_else(|| json!({})),
+        Some(Value::Null) | None => json!({}),
+        Some(other) => json!({ "arguments": other }),
+    }
+}
+
+fn response_model(openai: &Value, request: &Value, profile: &LlmProfile) -> String {
+    openai
+        .get("model")
+        .and_then(Value::as_str)
+        .or_else(|| request.get("model").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .or_else(|| {
+            let model = profile.model.trim();
+            (!model.is_empty()).then_some(model)
+        })
+        .unwrap_or("claudie-openai-proxy")
+        .to_string()
+}
+
+fn should_retry_with_tool_transcript(err: &UpstreamError, request: &Value) -> bool {
+    if !request_has_tool_history(request) {
+        return false;
+    }
+    let err = err.message.to_ascii_lowercase();
+    let status_matches = err.contains("http 400") || err.contains("http 422");
+    let shape_matches = ["tool", "tool_call", "messages", "role"]
+        .iter()
+        .any(|needle| err.contains(needle));
+    status_matches && shape_matches
+}
+
+fn request_has_tool_history(request: &Value) -> bool {
+    request
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message.get("role").and_then(Value::as_str) == Some("tool")
+                    || message.get("tool_calls").is_some()
+                    || message.get("function_call").is_some()
+            })
+        })
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct CapabilityCacheFile {
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    model: String,
+    supports_native_tool_history: Option<bool>,
+    #[serde(default)]
+    created_at_ms: u128,
+    #[serde(default)]
+    last_used_at_ms: u128,
+}
+
+fn cached_tool_history_needs_transcript(profile: &LlmProfile, request: &Value) -> bool {
+    if !request_has_tool_history(request) {
+        return false;
+    }
+    let path = capability_cache_file_path(profile, request);
+    cached_tool_history_needs_transcript_at(profile, &path)
+}
+
+fn cached_tool_history_needs_transcript_at(profile: &LlmProfile, path: &Path) -> bool {
+    let mut cache: CapabilityCacheFile = read_json_or_default(path);
+    if cache.version != CAPABILITY_CACHE_VERSION {
+        return false;
+    }
+    if capability_cache_expired(&cache, profile) {
+        return false;
+    }
+    cache.last_used_at_ms = now_millis();
+    let _ = save_pretty_json(path, &cache);
+    cache.supports_native_tool_history == Some(false)
+}
+
+fn save_tool_history_capability(
+    profile: &LlmProfile,
+    request: &Value,
+    supports_native_tool_history: bool,
+) -> Result<(), String> {
+    let path = capability_cache_file_path(profile, request);
+    save_tool_history_capability_at(profile, request, supports_native_tool_history, &path)?;
+    proxy_optimizer::prune_cache_dir(
+        &capability_cache_dir(),
+        capability_cache_ttl_hours(profile),
+        capability_cache_max_entries(profile),
+        proxy_cache_max_bytes(profile),
+    )
+}
+
+fn save_tool_history_capability_at(
+    profile: &LlmProfile,
+    request: &Value,
+    supports_native_tool_history: bool,
+    path: &Path,
+) -> Result<(), String> {
+    let now = now_millis();
+    let cache = CapabilityCacheFile {
+        version: CAPABILITY_CACHE_VERSION.to_string(),
+        kind: "capability".to_string(),
+        base_url: profile.openai_chat_completions_url(),
+        model: request_model_for_capability(profile, request),
+        supports_native_tool_history: Some(supports_native_tool_history),
+        created_at_ms: now,
+        last_used_at_ms: now,
+    };
+    save_pretty_json(path, &cache)
+}
+
+fn capability_cache_expired(cache: &CapabilityCacheFile, profile: &LlmProfile) -> bool {
+    let ttl_ms = u128::from(capability_cache_ttl_hours(profile)).saturating_mul(60 * 60 * 1000);
+    ttl_ms > 0
+        && cache.last_used_at_ms > 0
+        && now_millis().saturating_sub(cache.last_used_at_ms) > ttl_ms
+}
+
+fn capability_cache_file_path(profile: &LlmProfile, request: &Value) -> PathBuf {
+    capability_cache_dir().join(format!("{}.json", capability_cache_key(profile, request)))
+}
+
+fn capability_cache_dir() -> PathBuf {
+    proxy_optimizer::proxy_cache_dir().join("capabilities")
+}
+
+fn capability_cache_key(profile: &LlmProfile, request: &Value) -> String {
+    stable_hash(&[
+        CAPABILITY_CACHE_VERSION,
+        &profile.openai_chat_completions_url(),
+        &request_model_for_capability(profile, request),
+        "tool-history",
+    ])
+}
+
+fn request_model_for_capability(profile: &LlmProfile, request: &Value) -> String {
+    request
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| profile.model.trim())
+        .to_string()
+}
+
+fn capability_cache_ttl_hours(profile: &LlmProfile) -> u64 {
+    env_u64(
+        profile,
+        "CLAUDIE_PROXY_CAPABILITY_CACHE_TTL_HOURS",
+        DEFAULT_CAPABILITY_CACHE_TTL_HOURS,
+    )
+}
+
+fn capability_cache_max_entries(profile: &LlmProfile) -> usize {
+    env_usize(
+        profile,
+        "CLAUDIE_PROXY_CAPABILITY_CACHE_MAX_ENTRIES",
+        DEFAULT_CAPABILITY_CACHE_MAX_ENTRIES,
+    )
+}
+
+fn proxy_cache_max_bytes(profile: &LlmProfile) -> u64 {
+    env_u64(
+        profile,
+        "CLAUDIE_PROXY_CACHE_MAX_MB",
+        DEFAULT_PROXY_CACHE_MAX_BYTES / (1024 * 1024),
+    )
+    .saturating_mul(1024 * 1024)
+}
+
+fn env_usize(profile: &LlmProfile, key: &str, default: usize) -> usize {
+    profile
+        .extra_env_value(key)
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn env_u64(profile: &LlmProfile, key: &str, default: u64) -> u64 {
+    profile
+        .extra_env_value(key)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn stable_hash(parts: &[&str]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for part in parts {
+        for byte in part.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+fn tool_history_as_text_transcript(request: &Value) -> Value {
+    let mut request = request.clone();
+    let Some(object) = request.as_object_mut() else {
+        return request;
+    };
+    let Some(messages) = object.get("messages").and_then(Value::as_array) else {
+        return request;
+    };
+    let converted = messages
+        .iter()
+        .map(tool_message_as_text_transcript)
+        .collect::<Vec<_>>();
+    object.insert("messages".to_string(), Value::Array(converted));
+    request
+}
+
+fn tool_message_as_text_transcript(message: &Value) -> Value {
+    let role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("user");
+    if role == "tool" {
+        let tool_call_id = message
+            .get("tool_call_id")
+            .and_then(Value::as_str)
+            .unwrap_or("tool_call");
+        return json!({
+            "role": "user",
+            "content": format!(
+                "[Claude Code tool result for {tool_call_id}]\n{}",
+                openai_message_content_to_text(message.get("content").unwrap_or(&Value::Null))
+            )
+        });
+    }
+
+    let mut converted = message.clone();
+    let Some(object) = converted.as_object_mut() else {
+        return converted;
+    };
+    if role == "assistant"
+        && (object.get("tool_calls").is_some() || object.get("function_call").is_some())
+    {
+        let mut parts = Vec::new();
+        let existing =
+            openai_message_content_to_text(object.get("content").unwrap_or(&Value::Null));
+        if !existing.trim().is_empty() {
+            parts.push(existing);
+        }
+        if let Some(function_call) = object.get("function_call") {
+            parts.push(format_openai_function_call("function_call", function_call));
+        }
+        if let Some(tool_calls) = object.get("tool_calls").and_then(Value::as_array) {
+            for tool_call in tool_calls {
+                let id = tool_call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool_call");
+                if let Some(function_call) = tool_call.get("function") {
+                    parts.push(format_openai_function_call(id, function_call));
+                }
+            }
+        }
+        object.insert("content".to_string(), Value::String(parts.join("\n")));
+        object.remove("tool_calls");
+        object.remove("function_call");
+    }
+    converted
+}
+
+fn format_openai_function_call(id: &str, function_call: &Value) -> String {
+    let name = function_call
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("tool");
+    let arguments = openai_function_arguments_to_value(function_call.get("arguments")).to_string();
+    format!("[Claude Code tool call {id}: {name}]\n{arguments}")
+}
+
+fn openai_message_content_to_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| match part {
+                Value::String(text) => Some(text.clone()),
+                Value::Object(object) => object
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        object
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    }),
+                _ => None,
+            })
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
 }
 
 fn content_to_text(content: &Value) -> String {
@@ -794,8 +1241,121 @@ mod tests {
         assert_eq!(converted["model"], "gpt-test");
         assert_eq!(converted["stream"], false);
         assert_eq!(converted["messages"][0]["role"], "system");
+        assert!(
+            converted["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("be brief")
+        );
+        assert!(
+            converted["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Claude Code")
+        );
         assert_eq!(converted["messages"][1]["content"], "hello");
         assert_eq!(converted["reasoning_effort"], "xhigh");
+    }
+
+    #[test]
+    fn openai_proxy_compat_prompt_can_be_disabled() {
+        let profile = LlmProfile {
+            model: "gpt-test".to_string(),
+            extra_env: "CLAUDIE_PROXY_COMPAT_PROMPT=0".to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "system": "be brief",
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
+
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        assert_eq!(converted["messages"][0]["content"], "be brief");
+        assert_eq!(converted["messages"][1]["content"], "hello");
+    }
+
+    #[test]
+    fn request_model_overrides_profile_model() {
+        let profile = LlmProfile {
+            model: "profile-model".to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "model": "session-model",
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
+
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        assert_eq!(converted["model"], "session-model");
+    }
+
+    #[test]
+    fn disables_parallel_tool_calls_by_default_when_tools_are_present() {
+        let profile = LlmProfile {
+            model: "gpt-test".to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "messages": [{ "role": "user", "content": "edit README" }],
+            "tools": [{
+                "name": "Update",
+                "description": "Edit a file",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": { "type": "string" },
+                        "old_string": { "type": "string" },
+                        "new_string": { "type": "string" }
+                    },
+                    "required": ["file_path", "old_string", "new_string"]
+                }
+            }]
+        });
+
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        assert_eq!(converted["parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn openai_extra_body_can_override_parallel_tool_call_default() {
+        let profile = LlmProfile {
+            model: "gpt-test".to_string(),
+            openai_extra_body: r#"{"parallel_tool_calls":true}"#.to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "messages": [{ "role": "user", "content": "inspect files" }],
+            "tools": [{ "name": "Read", "input_schema": { "type": "object" } }]
+        });
+
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        assert_eq!(converted["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn upstream_4xx_status_is_preserved_for_client() {
+        let err = UpstreamError {
+            status: Some(400),
+            message: "bad request".to_string(),
+        };
+        assert_eq!(proxy_status_for_upstream_error(&err), 400);
+
+        let err = UpstreamError {
+            status: Some(503),
+            message: "unavailable".to_string(),
+        };
+        assert_eq!(proxy_status_for_upstream_error(&err), 502);
+    }
+
+    #[test]
+    fn temporary_engine_4xx_maps_to_retryable_503() {
+        let err = UpstreamError {
+            status: Some(400),
+            message: r#"OpenAI proxy upstream returned HTTP 400: {"error":{"message":"engine is not available temporarily","type":"failed_precondition_error","code":"9"}}"#
+                .to_string(),
+        };
+
+        assert_eq!(proxy_status_for_upstream_error(&err), 503);
     }
 
     #[test]
@@ -823,5 +1383,121 @@ mod tests {
         assert_eq!(converted["stop_reason"], "tool_use");
         assert_eq!(converted["content"][0]["type"], "tool_use");
         assert_eq!(converted["content"][0]["input"]["file_path"], "a.txt");
+    }
+
+    #[test]
+    fn converts_legacy_openai_function_call_response() {
+        let profile = LlmProfile {
+            model: "gpt-test".to_string(),
+            ..LlmProfile::default()
+        };
+        let response = json!({
+            "id": "chatcmpl-1",
+            "choices": [{
+                "finish_reason": "function_call",
+                "message": {
+                    "function_call": {
+                        "name": "Read",
+                        "arguments": "{\"file_path\":\"README.md\"}"
+                    }
+                }
+            }]
+        });
+
+        let converted = openai_to_anthropic_response(&response, &json!({}), &profile);
+        assert_eq!(converted["stop_reason"], "tool_use");
+        assert_eq!(converted["content"][0]["type"], "tool_use");
+        assert_eq!(converted["content"][0]["id"], "function_call");
+        assert_eq!(converted["content"][0]["input"]["file_path"], "README.md");
+    }
+
+    #[test]
+    fn accepts_object_tool_call_arguments() {
+        let block = anthropic_tool_use_from_openai(&json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "Read",
+                "arguments": { "file_path": "AGENTS.md" }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(block["input"]["file_path"], "AGENTS.md");
+    }
+
+    #[test]
+    fn rewrites_tool_history_as_text_transcript_for_compat_retry() {
+        let request = json!({
+            "model": "gpt-test",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "Read",
+                            "arguments": "{\"file_path\":\"README.md\"}"
+                        }
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "README contents"
+                }
+            ]
+        });
+
+        assert!(should_retry_with_tool_transcript(
+            &UpstreamError {
+                status: Some(400),
+                message: "OpenAI proxy upstream returned HTTP 400: invalid role tool".to_string(),
+            },
+            &request
+        ));
+        let converted = tool_history_as_text_transcript(&request);
+        let messages = converted["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "assistant");
+        assert!(messages[0].get("tool_calls").is_none());
+        assert!(messages[0]["content"].as_str().unwrap().contains("Read"));
+        assert_eq!(messages[1]["role"], "user");
+        assert!(
+            messages[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("README contents")
+        );
+    }
+
+    #[test]
+    fn tool_history_capability_cache_forces_transcript_mode() {
+        let profile = LlmProfile {
+            base_url: format!(
+                "https://example.invalid/{}/v1/chat/completions",
+                now_millis()
+            ),
+            model: "gpt-test".to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "model": "gpt-test",
+            "messages": [{
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "tool result"
+            }]
+        });
+        let dir = std::env::temp_dir().join(format!("claudie-capability-cache-{}", now_millis()));
+        let path = dir.join("capability.json");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(!cached_tool_history_needs_transcript_at(&profile, &path));
+        save_tool_history_capability_at(&profile, &request, false, &path).unwrap();
+        assert!(cached_tool_history_needs_transcript_at(&profile, &path));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
