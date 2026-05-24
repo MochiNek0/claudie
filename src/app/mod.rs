@@ -9,7 +9,12 @@ use self::pomodoro::{PomodoroState, PomodoroStatus, PomodoroTick};
 use crate::config::MAX_EVENTS;
 #[cfg(windows)]
 use crate::globals::PET_RENDERER;
-use crate::settings::{LlmProfileDb, UserSettings, load_llm_profile_db, load_user_settings};
+use crate::settings::{load_llm_profile_db, load_user_settings, LlmProfileDb, UserSettings};
+
+const THINKING_MIN_VISIBLE: Duration = Duration::from_millis(2_500);
+const WORK_MIN_VISIBLE: Duration = Duration::from_millis(3_000);
+const HAPPY_MIN_VISIBLE: Duration = Duration::from_millis(2_000);
+const SUBAGENT_MIN_VISIBLE: Duration = Duration::from_millis(2_500);
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum PetMood {
@@ -56,8 +61,8 @@ impl PetMood {
         match self {
             Self::Permission => 100,
             Self::Error => 90,
-            Self::Subagent => 80,
-            Self::Building | Self::Typing => 70,
+            Self::Building | Self::Typing => 80,
+            Self::Subagent => 65,
             Self::Thinking => 60,
             Self::Happy => 40,
             Self::Sleeping => 20,
@@ -173,9 +178,17 @@ pub(crate) struct SessionInfo {
     pub(crate) updated_at: Instant,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ActiveTool {
+    pub(crate) tool_name: String,
+    pub(crate) mood: PetMood,
+}
+
 pub(crate) struct AppState {
     pub(crate) mood: PetMood,
-    pub(crate) pending_mood: Option<PetMood>,
+    pub(crate) mood_started_at: Instant,
+    pub(crate) resting_mood: PetMood,
+    pub(crate) resting_interrupts_visual: bool,
     pub(crate) last_non_idle_mood: PetMood,
     pub(crate) last_activity: Instant,
     pub(crate) last_user_input_tick: Option<u32>,
@@ -184,6 +197,8 @@ pub(crate) struct AppState {
     pub(crate) next_choice_id: u64,
     pub(crate) active_tools: usize,
     pub(crate) active_tool_moods: HashMap<PetMood, usize>,
+    pub(crate) active_tool_keys: HashMap<String, ActiveTool>,
+    pub(crate) active_tool_names: HashMap<String, VecDeque<String>>,
     pub(crate) active_subagents: usize,
     pub(crate) sessions: HashMap<String, SessionInfo>,
     pub(crate) events: VecDeque<EventRecord>,
@@ -200,7 +215,9 @@ impl AppState {
     pub(crate) fn new() -> Self {
         Self {
             mood: PetMood::Idle,
-            pending_mood: None,
+            mood_started_at: Instant::now(),
+            resting_mood: PetMood::Idle,
+            resting_interrupts_visual: false,
             last_non_idle_mood: PetMood::Idle,
             last_activity: Instant::now(),
             last_user_input_tick: None,
@@ -209,6 +226,8 @@ impl AppState {
             next_choice_id: 1,
             active_tools: 0,
             active_tool_moods: HashMap::new(),
+            active_tool_keys: HashMap::new(),
+            active_tool_names: HashMap::new(),
             active_subagents: 0,
             sessions: HashMap::new(),
             events: VecDeque::new(),
@@ -235,53 +254,228 @@ impl AppState {
 
     pub(crate) fn set_mood(&mut self, mood: PetMood) {
         self.last_activity = Instant::now();
+        self.resting_mood = mood;
+        self.resting_interrupts_visual = matches!(mood, PetMood::Permission | PetMood::Error);
+        if matches!(mood, PetMood::Permission | PetMood::Error) {
+            self.force_visual_mood(mood);
+            return;
+        }
+        self.refresh_visual_mood();
+    }
+
+    pub(crate) fn set_resting_mood(&mut self, mood: PetMood, interrupts_visual: bool) {
+        self.last_activity = Instant::now();
+        self.resting_mood = mood;
+        self.resting_interrupts_visual = interrupts_visual;
+        self.refresh_visual_mood();
+    }
+
+    fn force_visual_mood(&mut self, mood: PetMood) {
         if !matches!(mood, PetMood::Idle | PetMood::Sleeping) {
             self.last_non_idle_mood = mood;
         }
-        let accepted = request_renderer_mood(mood);
-        if accepted {
+        if request_renderer_mood(mood) {
             self.mood = mood;
-            self.pending_mood = None;
-        } else {
-            self.pending_mood = Some(mood);
+            self.mood_started_at = Instant::now();
         }
     }
 
-    pub(crate) fn start_tool_mood(&mut self, mood: PetMood) {
+    pub(crate) fn start_tool_activity(
+        &mut self,
+        mut key: String,
+        tool_name: String,
+        mood: PetMood,
+    ) {
+        if self.active_tool_keys.contains_key(&key) {
+            let base_key = key.clone();
+            let mut suffix = 2_u32;
+            while self.active_tool_keys.contains_key(&key) {
+                key = format!("{base_key}#{suffix}");
+                suffix = suffix.saturating_add(1);
+            }
+        }
         self.active_tools = self.active_tools.saturating_add(1);
         if mood.is_active_work() {
             *self.active_tool_moods.entry(mood).or_insert(0) += 1;
         }
-        self.set_mood(mood);
+        let name_key = normalize_tool_name_key(&tool_name);
+        self.active_tool_names
+            .entry(name_key)
+            .or_default()
+            .push_back(key.clone());
+        self.active_tool_keys
+            .insert(key, ActiveTool { tool_name, mood });
+        self.last_activity = Instant::now();
+        self.refresh_visual_mood();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_tool_mood(&mut self, mood: PetMood) {
+        let key = format!(
+            "legacy:{}:{}",
+            mood.key(),
+            self.active_tools.saturating_add(1)
+        );
+        self.start_tool_activity(key, "tool".to_string(), mood);
     }
 
     pub(crate) fn finish_tool_mood(&mut self, mood: PetMood) {
+        if let Some(key) = self
+            .active_tool_keys
+            .iter()
+            .find(|(_, tool)| tool.mood == mood)
+            .map(|(key, _)| key.clone())
+        {
+            if let Some(tool) = self.active_tool_keys.remove(&key) {
+                self.remove_tool_name_key(&tool.tool_name, &key);
+            }
+        }
         self.active_tools = self.active_tools.saturating_sub(1);
         self.decrement_active_tool_mood(mood);
+        self.refresh_visual_mood();
+    }
+
+    pub(crate) fn finish_tool_activity(
+        &mut self,
+        keys: &[String],
+        tool_name: &str,
+        fallback_mood: PetMood,
+    ) -> PetMood {
+        let key = keys
+            .iter()
+            .find(|key| self.active_tool_keys.contains_key(*key))
+            .cloned()
+            .or_else(|| self.pop_named_tool_key(tool_name));
+
+        let Some(key) = key else {
+            self.finish_tool_mood(fallback_mood);
+            return fallback_mood;
+        };
+
+        let Some(tool) = self.active_tool_keys.remove(&key) else {
+            self.finish_tool_mood(fallback_mood);
+            return fallback_mood;
+        };
+        self.remove_tool_name_key(&tool.tool_name, &key);
+        self.active_tools = self.active_tools.saturating_sub(1);
+        self.decrement_active_tool_mood(tool.mood);
+        self.last_activity = Instant::now();
+        self.refresh_visual_mood();
+        tool.mood
     }
 
     pub(crate) fn finish_all_tools(&mut self) {
         self.active_tools = 0;
         self.active_tool_moods.clear();
+        self.active_tool_keys.clear();
+        self.active_tool_names.clear();
+        self.refresh_visual_mood();
     }
 
     pub(crate) fn clear_activity(&mut self) {
         self.finish_all_tools();
         self.active_subagents = 0;
+        self.refresh_visual_mood();
     }
 
     pub(crate) fn activity_mood(&self) -> Option<PetMood> {
-        if !self.pending_permissions.is_empty() || !self.pending_choices.is_empty() {
-            return Some(PetMood::Permission);
+        let direct_tool_mood = self
+            .active_tool_moods
+            .iter()
+            .filter(|(mood, count)| **count > 0 && !matches!(mood, PetMood::Subagent))
+            .map(|(mood, _)| *mood)
+            .max_by_key(|mood| mood.priority());
+        if direct_tool_mood.is_some() {
+            return direct_tool_mood;
         }
-        if self.active_subagents > 0 {
+        let subagent_tools = self
+            .active_tool_moods
+            .get(&PetMood::Subagent)
+            .copied()
+            .unwrap_or(0);
+        if self.active_subagents > 0 || subagent_tools > 0 {
             return Some(PetMood::Subagent);
         }
-        self.active_tool_moods
-            .iter()
-            .filter(|(_, count)| **count > 0)
-            .map(|(mood, _)| *mood)
-            .max_by_key(|mood| mood.priority())
+        None
+    }
+
+    pub(crate) fn start_subagent(&mut self) {
+        self.active_subagents = self.active_subagents.saturating_add(1);
+        self.last_activity = Instant::now();
+        self.refresh_visual_mood();
+    }
+
+    pub(crate) fn finish_subagent(&mut self) {
+        self.active_subagents = self.active_subagents.saturating_sub(1);
+        self.last_activity = Instant::now();
+        self.refresh_visual_mood();
+    }
+
+    pub(crate) fn refresh_visual_mood(&mut self) {
+        self.refresh_visual_mood_at(Instant::now());
+    }
+
+    pub(crate) fn refresh_visual_mood_at(&mut self, now: Instant) {
+        let target = self.projected_mood();
+        if self.can_switch_visual_to(target, now) {
+            self.transition_visual_mood(target, now);
+        }
+    }
+
+    fn projected_mood(&self) -> PetMood {
+        self.activity_mood().unwrap_or(self.resting_mood)
+    }
+
+    fn can_switch_visual_to(&self, target: PetMood, now: Instant) -> bool {
+        if target == self.mood {
+            return true;
+        }
+        if matches!(target, PetMood::Permission | PetMood::Error) {
+            return true;
+        }
+        if self.resting_interrupts_visual && target == self.resting_mood {
+            return true;
+        }
+        if target.priority() > self.mood.priority() {
+            return true;
+        }
+        now.duration_since(self.mood_started_at) >= min_visible_for(self.mood)
+    }
+
+    fn transition_visual_mood(&mut self, mood: PetMood, now: Instant) {
+        if !matches!(mood, PetMood::Idle | PetMood::Sleeping) {
+            self.last_non_idle_mood = mood;
+        }
+        if request_renderer_mood(mood) {
+            if self.mood != mood {
+                self.mood_started_at = now;
+            }
+            self.mood = mood;
+            if mood == self.resting_mood {
+                self.resting_interrupts_visual = false;
+            }
+        }
+    }
+
+    fn pop_named_tool_key(&mut self, tool_name: &str) -> Option<String> {
+        let name_key = normalize_tool_name_key(tool_name);
+        let queue = self.active_tool_names.get_mut(&name_key)?;
+        let key = queue.pop_front();
+        if queue.is_empty() {
+            self.active_tool_names.remove(&name_key);
+        }
+        key
+    }
+
+    fn remove_tool_name_key(&mut self, tool_name: &str, key: &str) {
+        let name_key = normalize_tool_name_key(tool_name);
+        let Some(queue) = self.active_tool_names.get_mut(&name_key) else {
+            return;
+        };
+        queue.retain(|item| item != key);
+        if queue.is_empty() {
+            self.active_tool_names.remove(&name_key);
+        }
     }
 
     fn decrement_active_tool_mood(&mut self, mood: PetMood) {
@@ -448,27 +642,6 @@ impl AppState {
             self.speech = None;
         }
 
-        if let Some(next) = drain_renderer_pending() {
-            self.mood = next;
-            if !matches!(next, PetMood::Idle | PetMood::Sleeping) {
-                self.last_non_idle_mood = next;
-            }
-            self.pending_mood = None;
-        } else if let Some(pending) = self.pending_mood {
-            if request_renderer_mood(pending) {
-                self.mood = pending;
-                self.pending_mood = None;
-            }
-        }
-
-        if !self.pending_permissions.is_empty() || !self.pending_choices.is_empty() {
-            if request_renderer_mood(PetMood::Permission) {
-                self.mood = PetMood::Permission;
-                self.pending_mood = None;
-            }
-            return;
-        }
-
         let user_input_changed = user_input_tick.is_some_and(|tick| {
             let changed = self
                 .last_user_input_tick
@@ -478,33 +651,41 @@ impl AppState {
         });
 
         if matches!(self.mood, PetMood::Sleeping) && user_input_changed {
-            self.set_mood(PetMood::Idle);
+            self.set_resting_mood(PetMood::Idle, true);
             return;
         }
 
         let idle_for = self.last_activity.elapsed();
         let sleep_after = Duration::from_secs(self.settings.sleep_after_secs() as u64);
-        if user_idle_for.is_some_and(|idle| idle > sleep_after)
+        if self.pending_permissions.is_empty()
+            && self.pending_choices.is_empty()
+            && user_idle_for.is_some_and(|idle| idle > sleep_after)
             && self.active_tools == 0
             && self.active_subagents == 0
-            && !matches!(self.mood, PetMood::Sleeping)
+            && !matches!(self.resting_mood, PetMood::Sleeping)
         {
-            self.set_mood(PetMood::Sleeping);
-        } else if matches!(self.mood, PetMood::Happy | PetMood::Error)
+            self.set_resting_mood(PetMood::Sleeping, false);
+        } else if matches!(self.resting_mood, PetMood::Happy | PetMood::Error)
             && idle_for > Duration::from_secs(7)
         {
-            self.set_mood(self.activity_mood().unwrap_or(PetMood::Idle));
-        } else if self.active_tools == 0
-            && self.active_subagents == 0
-            && matches!(
-                self.mood,
-                PetMood::Typing | PetMood::Building | PetMood::Subagent
-            )
-            && idle_for > Duration::from_secs(5)
-        {
-            self.set_mood(PetMood::Thinking);
+            self.set_resting_mood(PetMood::Idle, false);
         }
+        self.refresh_visual_mood();
     }
+}
+
+fn min_visible_for(mood: PetMood) -> Duration {
+    match mood {
+        PetMood::Typing | PetMood::Building => WORK_MIN_VISIBLE,
+        PetMood::Thinking => THINKING_MIN_VISIBLE,
+        PetMood::Subagent => SUBAGENT_MIN_VISIBLE,
+        PetMood::Happy => HAPPY_MIN_VISIBLE,
+        _ => Duration::ZERO,
+    }
+}
+
+fn normalize_tool_name_key(tool_name: &str) -> String {
+    tool_name.trim().to_ascii_lowercase()
 }
 
 #[cfg(windows)]
@@ -521,18 +702,4 @@ fn request_renderer_mood(mood: PetMood) -> bool {
 #[cfg(not(windows))]
 fn request_renderer_mood(_mood: PetMood) -> bool {
     true
-}
-
-#[cfg(windows)]
-fn drain_renderer_pending() -> Option<PetMood> {
-    PET_RENDERER
-        .get()?
-        .lock()
-        .expect("pet renderer poisoned")
-        .drain_pending()
-}
-
-#[cfg(not(windows))]
-fn drain_renderer_pending() -> Option<PetMood> {
-    None
 }

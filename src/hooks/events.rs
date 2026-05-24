@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -14,6 +14,21 @@ use crate::globals::APP_STATE;
 use crate::util::shorten;
 
 use super::quota::{scan_transcript_usage, update_quota_from_value};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HookActivity {
+    Idle,
+    Thinking,
+    StartTool(PetMood),
+    FinishTool(PetMood),
+    FinishToolBatch,
+    Error,
+    StartSubagent,
+    FinishSubagent,
+    Notification,
+    Done,
+    EndSession,
+}
 
 pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value {
     let event = string_field(&payload, "hook_event_name")
@@ -59,58 +74,8 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
             state.quota.transcript_path = path.to_string();
         }
 
-        match event.as_str() {
-            "UserPromptSubmit" | "SessionStart" | "SessionResume" => {
-                state.set_mood(PetMood::Thinking);
-                state.show_speech(
-                    "Claude is thinking",
-                    "New work session",
-                    Duration::from_secs(4),
-                    3,
-                );
-            }
-            "PreToolUse" => {
-                state.start_tool_mood(mood_for_tool(&tool_name));
-            }
-            "PostToolUse" => {
-                state.finish_tool_mood(mood_for_tool(&tool_name));
-                let next_mood = state.activity_mood().unwrap_or(PetMood::Happy);
-                state.set_mood(next_mood);
-            }
-            "PostToolBatch" => {
-                state.finish_all_tools();
-                let next_mood = state.activity_mood().unwrap_or(PetMood::Happy);
-                state.set_mood(next_mood);
-            }
-            "PostToolUseFailure" | "StopFailure" | "PermissionDenied" => {
-                state.finish_tool_mood(mood_for_tool(&tool_name));
-                state.last_error = summarize_payload(&payload);
-                state.set_mood(PetMood::Error);
-                let error = state.last_error.clone();
-                state.show_speech("Blocked", error, Duration::from_secs(5), 6);
-            }
-            "SubagentStart" | "TaskCreated" => {
-                state.active_subagents = state.active_subagents.saturating_add(1);
-                state.set_mood(PetMood::Subagent);
-                state.show_speech(
-                    "Subagent started",
-                    "Parallel work is running",
-                    Duration::from_secs(4),
-                    4,
-                );
-            }
-            "SubagentStop" | "TaskCompleted" => {
-                state.active_subagents = state.active_subagents.saturating_sub(1);
-                let next_mood = state.activity_mood().unwrap_or(PetMood::Happy);
-                state.set_mood(next_mood);
-            }
-            "Notification" => state.set_mood(PetMood::Thinking),
-            "Stop" | "SessionEnd" => {
-                state.clear_activity();
-                state.set_mood(PetMood::Happy);
-                state.show_speech("Done", "Claude Code finished", Duration::from_secs(4), 4);
-            }
-            _ => {}
+        if let Some(activity) = hook_activity(event.as_str(), &tool_name, &payload) {
+            apply_hook_activity(&mut state, activity, &payload);
         }
 
         let detail = if tool_name.is_empty() {
@@ -209,7 +174,10 @@ fn handle_permission_request(
             waiter: waiter.clone(),
         };
         state.pending_permissions.push_back(permission.clone());
-        state.set_mood(PetMood::Permission);
+        state.set_resting_mood(
+            permission_visual_mood(&payload, &permission.tool_name),
+            true,
+        );
         state.push_event("PermissionRequest", permission.tool_name.clone());
         state.show_speech(
             "Permission request",
@@ -264,11 +232,12 @@ fn handle_permission_request(
             .pending_permissions
             .retain(|pending| pending.id != permission.id);
         if state.pending_permissions.is_empty() {
-            state.set_mood(match decision {
+            let mood = match decision {
                 Some(PermissionDecision::Deny) | None => PetMood::Error,
-                Some(PermissionDecision::Ignore) => PetMood::Idle,
-                _ => PetMood::Happy,
-            });
+                Some(PermissionDecision::Ignore) => state.activity_mood().unwrap_or(PetMood::Idle),
+                _ => state.activity_mood().unwrap_or(PetMood::Happy),
+            };
+            state.set_resting_mood(mood, matches!(mood, PetMood::Error));
         }
         match decision {
             Some(PermissionDecision::AllowAlways) => {
@@ -413,7 +382,7 @@ fn handle_choice_request(
             waiter: waiter.clone(),
         };
         state.pending_choices.push_back(choice.clone());
-        state.set_mood(PetMood::Permission);
+        state.set_resting_mood(PetMood::Thinking, true);
         state.push_event(
             "PreToolUse",
             match kind {
@@ -440,11 +409,14 @@ fn handle_choice_request(
             .pending_choices
             .retain(|pending| pending.id != choice.id);
         if state.pending_permissions.is_empty() && state.pending_choices.is_empty() {
-            state.set_mood(match decision {
-                Some(ChoiceDecision::Submit(_)) => PetMood::Happy,
+            let mood = match decision {
+                Some(ChoiceDecision::Submit(_)) => state.activity_mood().unwrap_or(PetMood::Happy),
                 Some(ChoiceDecision::Deny) => PetMood::Thinking,
-                Some(ChoiceDecision::Ignore) | None => PetMood::Idle,
-            });
+                Some(ChoiceDecision::Ignore) | None => {
+                    state.activity_mood().unwrap_or(PetMood::Idle)
+                }
+            };
+            state.set_resting_mood(mood, matches!(mood, PetMood::Thinking));
         }
     }
 
@@ -787,28 +759,408 @@ fn clears_pending_interaction(event: &str) -> bool {
     matches!(event, "PreToolUse" | "PostToolUse" | "PostToolBatch")
 }
 
+fn hook_activity(event: &str, tool_name: &str, payload: &Value) -> Option<HookActivity> {
+    let tool_mood = mood_for_tool_use(tool_name, payload);
+    match event {
+        "SessionStart" | "SessionResume" => Some(HookActivity::Idle),
+        "UserPromptSubmit" => Some(HookActivity::Thinking),
+        "PreToolUse" => Some(HookActivity::StartTool(tool_mood)),
+        "PostToolUse" => Some(HookActivity::FinishTool(tool_mood)),
+        "PostToolBatch" => Some(HookActivity::FinishToolBatch),
+        "PostToolUseFailure" | "StopFailure" | "PermissionDenied" => Some(HookActivity::Error),
+        "SubagentStart" | "TaskCreated" => Some(HookActivity::StartSubagent),
+        "SubagentStop" | "TaskCompleted" => Some(HookActivity::FinishSubagent),
+        "PreCompact" => Some(HookActivity::Thinking),
+        "PostCompact" => Some(HookActivity::Done),
+        "Notification" | "Elicitation" => Some(HookActivity::Notification),
+        "WorktreeCreate" => Some(HookActivity::StartTool(PetMood::Building)),
+        "Stop" => Some(HookActivity::Done),
+        "SessionEnd" => Some(HookActivity::EndSession),
+        _ => None,
+    }
+}
+
+fn apply_hook_activity(state: &mut AppState, activity: HookActivity, payload: &Value) {
+    match activity {
+        HookActivity::Idle => {
+            state.set_resting_mood(PetMood::Idle, false);
+        }
+        HookActivity::Thinking => {
+            state.set_resting_mood(PetMood::Thinking, true);
+            state.show_speech(
+                "Claude is thinking",
+                "New work session",
+                Duration::from_secs(4),
+                3,
+            );
+        }
+        HookActivity::StartTool(mood) => {
+            state.start_tool_activity(tool_key(payload), tool_name_from_payload(payload), mood);
+        }
+        HookActivity::FinishTool(mood) => {
+            state.finish_tool_activity(
+                &candidate_tool_keys(payload),
+                &tool_name_from_payload(payload),
+                mood,
+            );
+        }
+        HookActivity::FinishToolBatch => {
+            state.finish_all_tools();
+        }
+        HookActivity::Error => {
+            state.clear_activity();
+            state.last_error = summarize_payload(payload);
+            state.set_resting_mood(PetMood::Error, true);
+            let error = state.last_error.clone();
+            state.show_speech("Blocked", error, Duration::from_secs(5), 6);
+        }
+        HookActivity::StartSubagent => {
+            state.start_subagent();
+            state.show_speech(
+                "Subagent started",
+                "Parallel work is running",
+                Duration::from_secs(4),
+                4,
+            );
+        }
+        HookActivity::FinishSubagent => {
+            state.finish_subagent();
+        }
+        HookActivity::Notification => {
+            state.set_resting_mood(PetMood::Thinking, true);
+        }
+        HookActivity::Done => {
+            state.clear_activity();
+            state.set_resting_mood(PetMood::Happy, false);
+            state.show_speech("Done", "Claude Code finished", Duration::from_secs(4), 4);
+        }
+        HookActivity::EndSession => {
+            state.clear_activity();
+            state.set_resting_mood(PetMood::Idle, false);
+        }
+    }
+}
+
 fn mood_for_tool(tool_name: &str) -> PetMood {
-    match tool_name {
-        "Task" => PetMood::Subagent,
-        "Bash" | "Shell" => PetMood::Building,
-        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => PetMood::Typing,
-        "Read" | "Grep" | "Glob" | "LS" | "WebFetch" | "WebSearch" | "TodoRead" | "TodoWrite"
-        | "AskUserQuestion" | "ExitPlanMode" => PetMood::Thinking,
+    let normalized = tool_name.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "task" => PetMood::Thinking,
+        "bash" | "shell" => PetMood::Building,
+        "edit" | "multiedit" | "write" | "notebookedit" => PetMood::Typing,
+        "read" | "grep" | "glob" | "ls" | "webfetch" | "websearch" | "todoread" | "todowrite"
+        | "askuserquestion" | "exitplanmode" => PetMood::Thinking,
+        _ if normalized.contains("edit")
+            || normalized.contains("write")
+            || normalized.contains("patch")
+            || normalized.contains("replace") =>
+        {
+            PetMood::Typing
+        }
+        _ if normalized.contains("bash")
+            || normalized.contains("shell")
+            || normalized.contains("terminal")
+            || normalized.contains("command") =>
+        {
+            PetMood::Building
+        }
         _ => PetMood::Thinking,
     }
+}
+
+fn mood_for_tool_use(tool_name: &str, payload: &Value) -> PetMood {
+    if !tool_name.trim().eq_ignore_ascii_case("Task") {
+        return mood_for_tool(tool_name);
+    }
+
+    let task_text = task_tool_text(payload);
+    if looks_like_building_task(&task_text) {
+        return PetMood::Building;
+    }
+    if looks_like_typing_task(&task_text) {
+        return PetMood::Typing;
+    }
+    if looks_like_subagent_task(&task_text) {
+        return PetMood::Subagent;
+    }
+    PetMood::Thinking
+}
+
+fn permission_visual_mood(payload: &Value, fallback_tool_name: &str) -> PetMood {
+    let tool_name = string_field(payload, "tool_name")
+        .or_else(|| string_field(payload, "toolName"))
+        .unwrap_or_else(|| fallback_tool_name.to_string());
+    let mood = mood_for_tool_use(&tool_name, payload);
+    match mood {
+        PetMood::Typing | PetMood::Building => mood,
+        _ => PetMood::Thinking,
+    }
+}
+
+fn task_tool_text(payload: &Value) -> String {
+    let Some(input) = payload
+        .get("tool_input")
+        .or_else(|| payload.get("toolInput"))
+        .and_then(Value::as_object)
+    else {
+        return String::new();
+    };
+
+    ["description", "prompt", "task", "instructions"]
+        .into_iter()
+        .filter_map(|key| input.get(key).and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase()
+}
+
+fn tool_key(payload: &Value) -> String {
+    let session_id = string_field(payload, "session_id").unwrap_or_else(|| "default".to_string());
+    let tool_name = tool_name_from_payload(payload);
+    if let Some(id) = string_field(payload, "tool_use_id")
+        .or_else(|| string_field(payload, "toolUseId"))
+        .or_else(|| string_field(payload, "toolUseID"))
+        .filter(|key| !key.trim().is_empty())
+    {
+        return format!("{session_id}:id:{id}");
+    }
+    let fingerprint = tool_input_fingerprint(payload).unwrap_or_default();
+    format!("{session_id}:tool:{tool_name}:{fingerprint}")
+}
+
+fn candidate_tool_keys(payload: &Value) -> Vec<String> {
+    vec![tool_key(payload)]
+}
+
+fn tool_input_fingerprint(payload: &Value) -> Option<String> {
+    let input = payload
+        .get("tool_input")
+        .or_else(|| payload.get("toolInput"))?;
+    Some(shorten(&input.to_string(), 96))
+}
+
+fn tool_name_from_payload(payload: &Value) -> String {
+    string_field(payload, "tool_name")
+        .or_else(|| string_field(payload, "toolName"))
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "tool".to_string())
+}
+
+fn looks_like_typing_task(text: &str) -> bool {
+    [
+        "\u{4fee}\u{6539}",
+        "\u{7f16}\u{8f91}",
+        "\u{5199}\u{5165}",
+        "\u{66f4}\u{65b0}",
+        "\u{5b9e}\u{73b0}",
+        "\u{4fee}\u{590d}",
+        "\u{91cd}\u{6784}",
+        "\u{521b}\u{5efa}",
+        "\u{5220}\u{9664}",
+        "\u{91cd}\u{547d}\u{540d}",
+        "create",
+        "delete",
+        "rename",
+        "edit",
+        "write",
+        "modify",
+        "update",
+        "patch",
+        "replace",
+        "refactor",
+        "implement",
+        "change",
+        "fix",
+    ]
+    .into_iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn looks_like_building_task(text: &str) -> bool {
+    [
+        "\u{6784}\u{5efa}",
+        "\u{7f16}\u{8bd1}",
+        "\u{6d4b}\u{8bd5}",
+        "\u{8fd0}\u{884c}",
+        "cargo",
+        "npm",
+        "powershell",
+        "build",
+        "compile",
+        "test",
+        "run",
+        "command",
+        "shell",
+        "bash",
+    ]
+    .into_iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn looks_like_subagent_task(text: &str) -> bool {
+    [
+        "\u{5b50}\u{4ee3}\u{7406}",
+        "\u{4ee3}\u{7406}",
+        "\u{59d4}\u{6d3e}",
+        "\u{5e76}\u{884c}",
+        "\u{7814}\u{7a76}",
+        "\u{5206}\u{6790}",
+        "\u{641c}\u{7d22}",
+        "\u{8c03}\u{67e5}",
+        "\u{89c4}\u{5212}",
+        "subagent",
+        "agent",
+        "delegate",
+        "parallel",
+        "research",
+        "analyze",
+        "analyse",
+        "search",
+        "investigate",
+        "planning",
+    ]
+    .into_iter()
+    .any(|needle| text.contains(needle))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Condvar, Mutex};
 
     #[test]
     fn tool_names_map_to_work_moods() {
-        assert_eq!(mood_for_tool("Task"), PetMood::Subagent);
+        assert_eq!(mood_for_tool("Task"), PetMood::Thinking);
         assert_eq!(mood_for_tool("Bash"), PetMood::Building);
         assert_eq!(mood_for_tool("Edit"), PetMood::Typing);
+        assert_eq!(
+            mood_for_tool("mcp__filesystem__write_file"),
+            PetMood::Typing
+        );
+        assert_eq!(mood_for_tool("shell_command"), PetMood::Building);
+        assert_eq!(mood_for_tool("agent_worker"), PetMood::Thinking);
         assert_eq!(mood_for_tool("Read"), PetMood::Thinking);
         assert_eq!(mood_for_tool("AskUserQuestion"), PetMood::Thinking);
+    }
+
+    #[test]
+    fn hook_events_map_to_expected_activity() {
+        assert_eq!(
+            hook_activity("UserPromptSubmit", "", &json!({})),
+            Some(HookActivity::Thinking)
+        );
+        assert_eq!(
+            hook_activity("PreToolUse", "Write", &json!({})),
+            Some(HookActivity::StartTool(PetMood::Typing))
+        );
+        assert_eq!(
+            hook_activity("PreToolUse", "Task", &json!({})),
+            Some(HookActivity::StartTool(PetMood::Thinking))
+        );
+        assert_eq!(
+            hook_activity(
+                "PreToolUse",
+                "Task",
+                &json!({
+                    "tool_input": {
+                        "description": "Update the Rust hook state mapping",
+                        "prompt": "\u{4fee}\u{6539} hooks \u{903b}\u{8f91}"
+                    }
+                })
+            ),
+            Some(HookActivity::StartTool(PetMood::Typing))
+        );
+        assert_eq!(
+            hook_activity(
+                "PreToolUse",
+                "Task",
+                &json!({
+                    "tool_input": {
+                        "description": "Delegate research to a subagent"
+                    }
+                })
+            ),
+            Some(HookActivity::StartTool(PetMood::Subagent))
+        );
+        assert_eq!(
+            hook_activity("PostToolUse", "Task", &json!({})),
+            Some(HookActivity::FinishTool(PetMood::Thinking))
+        );
+        assert_eq!(
+            hook_activity("SessionEnd", "", &json!({ "reason": "clear" })),
+            Some(HookActivity::EndSession)
+        );
+        assert_eq!(
+            hook_activity("SessionEnd", "", &json!({})),
+            Some(HookActivity::EndSession)
+        );
+    }
+
+    #[test]
+    fn permission_visual_moods_follow_tool_semantics() {
+        assert_eq!(
+            permission_visual_mood(&json!({ "tool_name": "Edit" }), ""),
+            PetMood::Typing
+        );
+        assert_eq!(
+            permission_visual_mood(&json!({ "tool_name": "Bash" }), ""),
+            PetMood::Building
+        );
+        assert_eq!(
+            permission_visual_mood(&json!({ "tool_name": "Read" }), ""),
+            PetMood::Thinking
+        );
+        assert_eq!(
+            permission_visual_mood(&json!({ "tool_name": "UnknownTool" }), ""),
+            PetMood::Thinking
+        );
+    }
+
+    #[test]
+    fn pending_permission_does_not_force_permission_gif() {
+        let mut state = AppState::new();
+        state.pending_permissions.push_back(PendingPermission {
+            id: 1,
+            session_id: "s1".to_string(),
+            tool_name: "Edit".to_string(),
+            summary: "edit file".to_string(),
+            cwd: String::new(),
+            suggestions: Vec::new(),
+            waiter: Arc::new(PermissionWaiter {
+                decision: Mutex::new(None),
+                ready: Condvar::new(),
+            }),
+        });
+
+        state.set_resting_mood(PetMood::Typing, true);
+
+        assert_eq!(state.activity_mood(), None);
+        assert_eq!(state.mood, PetMood::Typing);
+    }
+
+    #[test]
+    fn session_end_clears_activity_and_returns_idle() {
+        let mut state = AppState::new();
+        state.start_tool_mood(PetMood::Typing);
+        state.start_subagent();
+        assert_eq!(state.active_tools, 1);
+        assert_eq!(state.active_subagents, 1);
+
+        apply_hook_activity(&mut state, HookActivity::EndSession, &json!({}));
+
+        assert_eq!(state.active_tools, 0);
+        assert_eq!(state.active_subagents, 0);
+        assert_eq!(state.resting_mood, PetMood::Idle);
+        assert_ne!(state.mood, PetMood::Sleeping);
+    }
+
+    #[test]
+    fn stop_still_sets_happy() {
+        let mut state = AppState::new();
+
+        apply_hook_activity(&mut state, HookActivity::Done, &json!({}));
+
+        assert_eq!(state.resting_mood, PetMood::Happy);
+        assert_eq!(state.mood, PetMood::Happy);
     }
 
     #[test]
@@ -822,17 +1174,188 @@ mod tests {
         state.set_mood(next_mood);
 
         assert_eq!(state.active_tools, 1);
+        assert_eq!(state.mood, PetMood::Building);
+    }
+
+    #[test]
+    fn post_tool_reuses_started_task_mood_when_payload_is_sparse() {
+        let mut state = AppState::new();
+        let start_payload = json!({
+            "tool_name": "Task",
+            "tool_input": {
+                "description": "Run cargo build and fix compile errors"
+            }
+        });
+
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PreToolUse", "Task", &start_payload).unwrap(),
+            &start_payload,
+        );
+        assert_eq!(state.mood, PetMood::Building);
+        assert_eq!(state.active_tools, 1);
+        assert_eq!(state.active_subagents, 0);
+
+        let finish_payload = json!({ "tool_name": "Task" });
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PostToolUse", "Task", &finish_payload).unwrap(),
+            &finish_payload,
+        );
+        assert_eq!(state.active_tools, 0);
+        assert_eq!(state.active_subagents, 0);
+    }
+
+    #[test]
+    fn short_write_holds_typing_after_post_tool() {
+        let mut state = AppState::new();
+        apply_hook_activity(
+            &mut state,
+            HookActivity::Thinking,
+            &json!({ "session_id": "s1" }),
+        );
+        let start_payload = json!({
+            "session_id": "s1",
+            "tool_name": "Write",
+            "tool_use_id": "write-1",
+        });
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PreToolUse", "Write", &start_payload).unwrap(),
+            &start_payload,
+        );
+        let typing_started_at = state.mood_started_at;
+        let finish_payload = json!({
+            "session_id": "s1",
+            "tool_name": "Write",
+            "tool_use_id": "write-1",
+        });
+
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PostToolUse", "Write", &finish_payload).unwrap(),
+            &finish_payload,
+        );
+        assert_eq!(state.mood, PetMood::Typing);
+        state.refresh_visual_mood_at(typing_started_at + Duration::from_millis(2_999));
+        assert_eq!(state.mood, PetMood::Typing);
+        state.refresh_visual_mood_at(typing_started_at + Duration::from_millis(3_001));
         assert_eq!(state.mood, PetMood::Thinking);
     }
 
     #[test]
-    fn subagent_has_priority_over_regular_tools() {
+    fn short_bash_holds_building_after_post_tool() {
+        let mut state = AppState::new();
+        apply_hook_activity(
+            &mut state,
+            HookActivity::Thinking,
+            &json!({ "session_id": "s1" }),
+        );
+        let start_payload = json!({
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_use_id": "bash-1",
+        });
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PreToolUse", "Bash", &start_payload).unwrap(),
+            &start_payload,
+        );
+        let building_started_at = state.mood_started_at;
+        let finish_payload = json!({
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_use_id": "bash-1",
+        });
+
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PostToolUse", "Bash", &finish_payload).unwrap(),
+            &finish_payload,
+        );
+        assert_eq!(state.mood, PetMood::Building);
+        state.refresh_visual_mood_at(building_started_at + Duration::from_millis(2_999));
+        assert_eq!(state.mood, PetMood::Building);
+        state.refresh_visual_mood_at(building_started_at + Duration::from_millis(3_001));
+        assert_eq!(state.mood, PetMood::Thinking);
+    }
+
+    #[test]
+    fn subagent_yields_to_direct_write_then_returns() {
+        let mut state = AppState::new();
+        apply_hook_activity(&mut state, HookActivity::StartSubagent, &json!({}));
+        assert_eq!(state.mood, PetMood::Subagent);
+
+        let start_payload = json!({
+            "session_id": "s1",
+            "tool_name": "Write",
+            "tool_use_id": "write-1",
+        });
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PreToolUse", "Write", &start_payload).unwrap(),
+            &start_payload,
+        );
+        assert_eq!(state.mood, PetMood::Typing);
+        let typing_started_at = state.mood_started_at;
+
+        let finish_payload = json!({
+            "session_id": "s1",
+            "tool_name": "Write",
+            "tool_use_id": "write-1",
+        });
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PostToolUse", "Write", &finish_payload).unwrap(),
+            &finish_payload,
+        );
+        assert_eq!(state.mood, PetMood::Typing);
+        state.refresh_visual_mood_at(typing_started_at + Duration::from_millis(3_001));
+        assert_eq!(state.mood, PetMood::Subagent);
+    }
+
+    #[test]
+    fn permission_interrupts_work_and_returns_to_active_tool() {
+        let mut state = AppState::new();
+        let start_payload = json!({
+            "session_id": "s1",
+            "tool_name": "Write",
+            "tool_use_id": "write-1",
+        });
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PreToolUse", "Write", &start_payload).unwrap(),
+            &start_payload,
+        );
+        assert_eq!(state.mood, PetMood::Typing);
+
+        state.set_mood(PetMood::Permission);
+        assert_eq!(state.mood, PetMood::Permission);
+        state.set_resting_mood(PetMood::Happy, false);
+        assert_eq!(state.mood, PetMood::Typing);
+    }
+
+    #[test]
+    fn happy_holds_against_idle_session_start() {
+        let mut state = AppState::new();
+        apply_hook_activity(&mut state, HookActivity::Done, &json!({}));
+        let happy_started_at = state.mood_started_at;
+        assert_eq!(state.mood, PetMood::Happy);
+
+        apply_hook_activity(&mut state, HookActivity::Idle, &json!({}));
+        assert_eq!(state.mood, PetMood::Happy);
+        state.refresh_visual_mood_at(happy_started_at + Duration::from_millis(2_001));
+        assert_eq!(state.mood, PetMood::Idle);
+    }
+
+    #[test]
+    fn direct_tools_have_priority_over_subagents() {
         let mut state = AppState::new();
 
         state.start_tool_mood(PetMood::Building);
         state.active_subagents = 1;
 
-        assert_eq!(state.activity_mood(), Some(PetMood::Subagent));
+        assert_eq!(state.activity_mood(), Some(PetMood::Building));
     }
 }
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use windows_sys::Win32::Graphics::Gdi::HDC;
 use windows_sys::Win32::Graphics::GdiPlus::{
@@ -15,7 +15,7 @@ use windows_sys::Win32::Graphics::GdiPlus::{
 
 use crate::app::PetMood;
 use crate::globals::{APP_STATE, PET_RENDERER};
-use crate::settings::{UserSettings, configured_gif_dir, load_user_settings};
+use crate::settings::{configured_gif_dir, load_user_settings, UserSettings};
 use crate::util::wide;
 
 const MOODS: &[PetMood] = &[
@@ -151,7 +151,6 @@ pub(crate) struct GifAnimation {
     clips: HashMap<PetMood, GifClip>,
     current: PetMood,
     clip_started_at: Instant,
-    pending: Option<PetMood>,
 }
 
 unsafe impl Send for GifAnimation {}
@@ -183,7 +182,6 @@ impl GifAnimation {
                 clips,
                 current: PetMood::Idle,
                 clip_started_at: Instant::now(),
-                pending: None,
             },
             summary,
         ))
@@ -191,46 +189,11 @@ impl GifAnimation {
 
     pub(crate) fn request_mood(&mut self, mood: PetMood) -> bool {
         if mood == self.current {
-            self.pending = None;
             return true;
         }
-        if self.can_accept_change_to(mood) {
-            self.current = mood;
-            self.clip_started_at = Instant::now();
-            self.pending = None;
-            true
-        } else {
-            self.pending = Some(mood);
-            false
-        }
-    }
-
-    pub(crate) fn drain_pending(&mut self) -> Option<PetMood> {
-        let next = self.pending?;
-        if self.can_accept_change_to(next) {
-            self.current = next;
-            self.clip_started_at = Instant::now();
-            self.pending = None;
-            Some(next)
-        } else {
-            None
-        }
-    }
-
-    fn can_accept_change_to(&self, next: PetMood) -> bool {
-        if matches!(next, PetMood::Permission) || next.priority() > self.current.priority() {
-            return true;
-        }
-
-        let hold = match self.current {
-            PetMood::Happy => Duration::from_millis(850),
-            PetMood::Error => Duration::from_millis(1_150),
-            _ => return true,
-        };
-        if Instant::now().duration_since(self.clip_started_at) >= hold {
-            return true;
-        }
-        false
+        self.current = mood;
+        self.clip_started_at = Instant::now();
+        true
     }
 
     pub(crate) unsafe fn draw(
@@ -364,10 +327,6 @@ impl AnimationStore {
 
     pub(crate) fn request_mood(&mut self, mood: PetMood) -> bool {
         self.animation.request_mood(mood)
-    }
-
-    pub(crate) fn drain_pending(&mut self) -> Option<PetMood> {
-        self.animation.drain_pending()
     }
 
     pub(crate) unsafe fn draw(

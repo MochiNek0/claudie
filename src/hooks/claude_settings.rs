@@ -1,4 +1,4 @@
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -43,10 +43,14 @@ fn hook_events() -> &'static [&'static str] {
         "PermissionRequest",
         "PermissionDenied",
         "Notification",
+        "Elicitation",
         "SubagentStart",
         "SubagentStop",
         "TaskCreated",
         "TaskCompleted",
+        "PreCompact",
+        "PostCompact",
+        "WorktreeCreate",
         "Stop",
         "StopFailure",
         "SessionEnd",
