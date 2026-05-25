@@ -30,7 +30,7 @@ cargo run --release -- --port 17387
 
 - `src/main.rs`: CLI flags, app bootstrap, shared `AppState`, hook/profile startup, and platform entrypoint.
 - `src/app/`: core application domain.
-- `src/app/mod.rs`: `AppState`, `PetMood`, sessions, quota stats, pending permissions/choices, speech timing, pomodoro integration, and mood decay.
+- `src/app/mod.rs`: `AppState`, `PetMood`, sessions, quota stats, pending permissions/choices, pomodoro integration, and mood decay.
 - `src/app/pomodoro.rs`: lightweight focus timer state and transitions.
 - `src/hooks/mod.rs`: hook subsystem facade and public re-exports.
 - `src/hooks/events.rs`: Claude Code event processing, mood transitions, permission/choice waiting, and hook responses.

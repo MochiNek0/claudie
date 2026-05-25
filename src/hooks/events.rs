@@ -179,12 +179,6 @@ fn handle_permission_request(
             true,
         );
         state.push_event("PermissionRequest", permission.tool_name.clone());
-        state.show_speech(
-            "Permission request",
-            format!("{} wants access", permission.tool_name),
-            Duration::from_secs(5),
-            9,
-        );
         update_quota_from_value(&mut state.quota, &payload);
         permission
     };
@@ -238,33 +232,6 @@ fn handle_permission_request(
                 _ => state.activity_mood().unwrap_or(PetMood::Happy),
             };
             state.set_resting_mood(mood, matches!(mood, PetMood::Error));
-        }
-        match decision {
-            Some(PermissionDecision::AllowAlways) => {
-                state.show_speech(
-                    "Always allowed",
-                    permission.tool_name.clone(),
-                    Duration::from_secs(4),
-                    6,
-                );
-            }
-            Some(PermissionDecision::AllowOnce) => {
-                state.show_speech(
-                    "Allowed",
-                    permission.tool_name.clone(),
-                    Duration::from_secs(3),
-                    5,
-                );
-            }
-            Some(PermissionDecision::Deny) | None => {
-                state.show_speech(
-                    "Denied",
-                    permission.tool_name.clone(),
-                    Duration::from_secs(4),
-                    6,
-                );
-            }
-            Some(PermissionDecision::Ignore) => {}
         }
     }
 
@@ -787,12 +754,6 @@ fn apply_hook_activity(state: &mut AppState, activity: HookActivity, payload: &V
         }
         HookActivity::Thinking => {
             state.set_resting_mood(PetMood::Thinking, true);
-            state.show_speech(
-                "Claude is thinking",
-                "New work session",
-                Duration::from_secs(4),
-                3,
-            );
         }
         HookActivity::StartTool(mood) => {
             state.start_tool_activity(tool_key(payload), tool_name_from_payload(payload), mood);
@@ -811,17 +772,9 @@ fn apply_hook_activity(state: &mut AppState, activity: HookActivity, payload: &V
             state.clear_activity();
             state.last_error = summarize_payload(payload);
             state.set_resting_mood(PetMood::Error, true);
-            let error = state.last_error.clone();
-            state.show_speech("Blocked", error, Duration::from_secs(5), 6);
         }
         HookActivity::StartSubagent => {
             state.start_subagent();
-            state.show_speech(
-                "Subagent started",
-                "Parallel work is running",
-                Duration::from_secs(4),
-                4,
-            );
         }
         HookActivity::FinishSubagent => {
             state.finish_subagent();
@@ -832,7 +785,6 @@ fn apply_hook_activity(state: &mut AppState, activity: HookActivity, payload: &V
         HookActivity::Done => {
             state.clear_activity();
             state.set_resting_mood(PetMood::Happy, false);
-            state.show_speech("Done", "Claude Code finished", Duration::from_secs(4), 4);
         }
         HookActivity::EndSession => {
             state.clear_activity();

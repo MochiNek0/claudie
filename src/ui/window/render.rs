@@ -17,7 +17,7 @@ pub(super) fn render_scene(hdc: HDC, rect: &RECT, state: &RenderState) {
     fill_rect(hdc, rect, TRANSPARENT_KEY);
     let (pet_x, pet_y, pet_w, pet_h) = scaled_pet_rect(state.settings.pet_scale_percent());
     draw_pet(hdc, state.mood, pet_x, pet_y, pet_w, pet_h);
-    draw_status_hud(hdc, state);
+    draw_status_hud(hdc, state, pet_x, pet_y, pet_w, pet_h);
 }
 
 pub(super) fn render_permission_overlay(hdc: HDC, rect: &RECT, state: &RenderState) {
@@ -246,20 +246,60 @@ fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
     );
 }
 
-fn draw_status_hud(hdc: HDC, state: &RenderState) {
+fn draw_status_hud(hdc: HDC, state: &RenderState, pet_x: i32, pet_y: i32, pet_w: i32, pet_h: i32) {
     if state.pomodoro.status != PomodoroStatus::Stopped {
-        let label = match state.pomodoro.mode {
-            PomodoroMode::Focus => "focus",
-            PomodoroMode::ShortBreak => "break",
-            PomodoroMode::LongBreak => "long break",
+        let tomato_color = match state.pomodoro.mode {
+            PomodoroMode::Focus => rgb(224, 73, 61),
+            PomodoroMode::ShortBreak => rgb(65, 154, 192),
+            PomodoroMode::LongBreak => rgb(134, 105, 196),
         };
-        let timer = format!(
-            "{} {}",
-            label,
-            format_remaining(state.pomodoro.remaining(&state.settings.pomodoro))
-        );
-        text_fit(hdc, BUBBLE_X + 14, 208, 180, &timer, theme::FOCUS_INDIGO);
+        let timer = format_remaining(state.pomodoro.remaining(&state.settings.pomodoro));
+        draw_pomodoro_badge(hdc, pet_x, pet_y, pet_w, pet_h, &timer, tomato_color);
     }
+}
+
+fn draw_pomodoro_badge(
+    hdc: HDC,
+    pet_x: i32,
+    pet_y: i32,
+    pet_w: i32,
+    pet_h: i32,
+    timer: &str,
+    body: u32,
+) {
+    const BADGE_W: i32 = 82;
+    const BADGE_H: i32 = 28;
+    const VISIBLE_HEAD_Y_PERCENT: i32 = 35;
+    const GAP_FROM_HEAD: i32 = 2;
+    const SCREEN_PAD: i32 = 8;
+
+    let x =
+        (pet_x + pet_w / 2 - BADGE_W / 2).clamp(SCREEN_PAD, WINDOW_WIDTH - BADGE_W - SCREEN_PAD);
+    let head_y = pet_y + pet_h * VISIBLE_HEAD_Y_PERCENT / 100;
+    let y =
+        (head_y - BADGE_H - GAP_FROM_HEAD).clamp(SCREEN_PAD, WINDOW_HEIGHT - BADGE_H - SCREEN_PAD);
+    filled_round_rect(
+        hdc,
+        x,
+        y,
+        BADGE_W,
+        BADGE_H,
+        theme::RADIUS_FIELD,
+        theme::SURFACE,
+        theme::HAIRLINE,
+    );
+
+    draw_tomato_icon(hdc, x + 6, y + 5, body);
+    text_fit(hdc, x + 32, y + 7, BADGE_W - 36, timer, theme::INK);
+}
+
+fn draw_tomato_icon(hdc: HDC, x: i32, y: i32, body: u32) {
+    filled_ellipse(hdc, x, y + 4, 20, 18, body);
+    filled_ellipse(hdc, x + 3, y + 3, 15, 16, body);
+    filled_ellipse(hdc, x + 5, y + 7, 4, 4, rgb(255, 178, 169));
+    filled_ellipse(hdc, x + 4, y, 8, 5, rgb(80, 154, 91));
+    filled_ellipse(hdc, x + 10, y, 8, 5, rgb(80, 154, 91));
+    line(hdc, x + 10, y + 5, x + 13, y + 1, rgb(67, 122, 73));
 }
 
 fn draw_pet(hdc: HDC, mood: PetMood, x: i32, y: i32, w: i32, h: i32) {

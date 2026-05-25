@@ -15,7 +15,6 @@ pub(crate) const PET_X: i32 = 14;
 pub(crate) const PET_Y: i32 = 95;
 pub(crate) const PET_W: i32 = 188;
 pub(crate) const PET_H: i32 = 170;
-pub(crate) const BUBBLE_X: i32 = 146;
 pub(crate) const PERMISSION_OVERLAY_WIDTH: i32 = 640;
 pub(crate) const PERMISSION_OVERLAY_HEIGHT: i32 = 740;
 pub(crate) const PERMISSION_BUBBLE_X: i32 = 129;

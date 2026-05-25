@@ -52,10 +52,6 @@ pub(crate) const ACCENT_SOFT: u32 = rgb(229, 240, 255);
 pub(crate) const DANGER: u32 = rgb(220, 53, 69);
 pub(crate) const DANGER_SOFT: u32 = rgb(254, 226, 232);
 
-// Status / mood-ish accents used by the HUD ------------------------------
-
-pub(crate) const FOCUS_INDIGO: u32 = rgb(62, 91, 150);
-
 // Radii -------------------------------------------------------------------
 
 pub(crate) const RADIUS_WINDOW: i32 = 18;

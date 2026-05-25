@@ -147,12 +147,6 @@ pub(crate) struct EventRecord {
     pub(crate) detail: String,
 }
 
-#[derive(Clone)]
-pub(crate) struct SpeechBubble {
-    pub(crate) expires_at: Instant,
-    pub(crate) priority: u8,
-}
-
 #[derive(Clone, Default)]
 pub(crate) struct QuotaStats {
     pub(crate) input_tokens: u64,
@@ -208,7 +202,6 @@ pub(crate) struct AppState {
     pub(crate) settings: UserSettings,
     pub(crate) llm_profiles: LlmProfileDb,
     pub(crate) pomodoro: PomodoroState,
-    pub(crate) speech: Option<SpeechBubble>,
 }
 
 impl AppState {
@@ -237,7 +230,6 @@ impl AppState {
             settings: load_user_settings(),
             llm_profiles: load_llm_profile_db(),
             pomodoro: PomodoroState::default(),
-            speech: None,
         }
     }
 
@@ -502,111 +494,38 @@ impl AppState {
         }
     }
 
-    pub(crate) fn show_speech(
-        &mut self,
-        _title: impl Into<String>,
-        _detail: impl Into<String>,
-        duration: Duration,
-        priority: u8,
-    ) {
-        if self
-            .speech
-            .as_ref()
-            .is_some_and(|speech| speech.expires_at > Instant::now() && speech.priority > priority)
-        {
-            return;
-        }
-        self.speech = Some(SpeechBubble {
-            expires_at: Instant::now() + duration,
-            priority,
-        });
-    }
-
     pub(crate) fn start_pomodoro(&mut self) {
         self.pomodoro.start_focus(&self.settings.pomodoro);
         self.set_mood(PetMood::Thinking);
-        self.show_speech(
-            "Pomodoro started",
-            format!(
-                "{}:00 focus session",
-                self.settings.pomodoro.focus_minutes()
-            ),
-            Duration::from_secs(4),
-            5,
-        );
     }
 
     pub(crate) fn stop_pomodoro(&mut self) {
         self.pomodoro.stop(&self.settings.pomodoro);
-        self.show_speech(
-            "Pomodoro stopped",
-            "Timer cleared",
-            Duration::from_secs(3),
-            5,
-        );
     }
 
     pub(crate) fn pause_pomodoro(&mut self) {
         if self.pomodoro.status != PomodoroStatus::Running {
-            self.show_speech(
-                "Pomodoro idle",
-                "Start a focus session first",
-                Duration::from_secs(3),
-                4,
-            );
             return;
         }
         self.pomodoro.pause(&self.settings.pomodoro);
-        self.show_speech(
-            "Pomodoro paused",
-            "Focus timer is waiting",
-            Duration::from_secs(3),
-            5,
-        );
     }
 
     pub(crate) fn resume_pomodoro(&mut self) {
         if self.pomodoro.status != PomodoroStatus::Paused {
-            self.show_speech(
-                "Pomodoro not paused",
-                "Nothing to resume yet",
-                Duration::from_secs(3),
-                4,
-            );
             return;
         }
         self.pomodoro.resume(&self.settings.pomodoro);
-        self.show_speech(
-            "Pomodoro resumed",
-            "Back to focus",
-            Duration::from_secs(3),
-            5,
-        );
     }
 
     pub(crate) fn skip_pomodoro(&mut self) {
         match self.pomodoro.skip(&self.settings.pomodoro) {
             PomodoroTick::FocusComplete => {
                 self.set_mood(PetMood::Happy);
-                self.show_speech("Focus skipped", "Moved to break", Duration::from_secs(5), 7);
             }
             PomodoroTick::BreakComplete => {
                 self.set_mood(PetMood::Idle);
-                self.show_speech(
-                    "Break skipped",
-                    "Ready for focus",
-                    Duration::from_secs(4),
-                    6,
-                );
             }
-            PomodoroTick::None => {
-                self.show_speech(
-                    "No pomodoro",
-                    "Start a focus session first",
-                    Duration::from_secs(3),
-                    4,
-                );
-            }
+            PomodoroTick::None => {}
         }
     }
 
@@ -614,16 +533,9 @@ impl AppState {
         match self.pomodoro.tick(&self.settings.pomodoro) {
             PomodoroTick::FocusComplete => {
                 self.set_mood(PetMood::Happy);
-                self.show_speech("Focus complete", "Break time", Duration::from_secs(6), 7);
             }
             PomodoroTick::BreakComplete => {
                 self.set_mood(PetMood::Idle);
-                self.show_speech(
-                    "Break complete",
-                    "Ready for the next focus session",
-                    Duration::from_secs(5),
-                    6,
-                );
             }
             PomodoroTick::None => {}
         }
@@ -634,14 +546,6 @@ impl AppState {
         user_idle_for: Option<Duration>,
         user_input_tick: Option<u32>,
     ) {
-        if self
-            .speech
-            .as_ref()
-            .is_some_and(|speech| speech.expires_at <= Instant::now())
-        {
-            self.speech = None;
-        }
-
         let user_input_changed = user_input_tick.is_some_and(|tick| {
             let changed = self
                 .last_user_input_tick
