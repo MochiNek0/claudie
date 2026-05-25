@@ -14,6 +14,8 @@ const DEFAULT_GIF_DIR: &str = "assets/claudie";
 const DEFAULT_SLEEP_AFTER_SECS: u32 = 75;
 const SLEEP_AFTER_MIN_SECS: u32 = 15;
 const SLEEP_AFTER_MAX_SECS: u32 = 1800;
+const OFFICIAL_LLM_PROFILE_ID: &str = "official";
+const OFFICIAL_LLM_PROFILE_NAME: &str = "Official";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -65,7 +67,7 @@ pub(crate) struct LlmProfile {
     pub(crate) extra_env: String,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct LlmProfileDb {
     pub(crate) profiles: Vec<LlmProfile>,
@@ -98,6 +100,15 @@ impl Default for AnimationSettings {
             error: "error".to_string(),
             sleeping: "sleeping".to_string(),
             subagent: "subagent".to_string(),
+        }
+    }
+}
+
+impl Default for LlmProfileDb {
+    fn default() -> Self {
+        Self {
+            profiles: vec![official_llm_profile()],
+            active_profile_id: OFFICIAL_LLM_PROFILE_ID.to_string(),
         }
     }
 }
@@ -161,6 +172,7 @@ fn default_sleep_after_secs() -> u32 {
 
 impl LlmProfileDb {
     pub(crate) fn normalize(&mut self) {
+        self.ensure_official_profile();
         self.profiles.retain(|profile| {
             !profile.id.trim().is_empty()
                 || !profile.name.trim().is_empty()
@@ -177,6 +189,20 @@ impl LlmProfileDb {
             if let Some(profile) = self.profiles.first() {
                 self.active_profile_id = profile.id.clone();
             }
+        }
+    }
+
+    fn ensure_official_profile(&mut self) {
+        if let Some(profile) = self
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id.trim() == OFFICIAL_LLM_PROFILE_ID)
+        {
+            if profile.name.trim().is_empty() {
+                profile.name = OFFICIAL_LLM_PROFILE_NAME.to_string();
+            }
+        } else {
+            self.profiles.insert(0, official_llm_profile());
         }
     }
 
@@ -323,6 +349,14 @@ impl LlmProfile {
             .filter(|(_, value)| !value.is_empty())
             .map(|(key, value)| (key, value.to_string()))
             .collect()
+    }
+}
+
+fn official_llm_profile() -> LlmProfile {
+    LlmProfile {
+        id: OFFICIAL_LLM_PROFILE_ID.to_string(),
+        name: OFFICIAL_LLM_PROFILE_NAME.to_string(),
+        ..LlmProfile::default()
     }
 }
 
@@ -1003,6 +1037,42 @@ fn default_bundled_pet_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_llm_profiles_include_empty_official_profile() {
+        let db = LlmProfileDb::default();
+        let profile = db.active_profile().unwrap();
+
+        assert_eq!(db.active_profile_id, OFFICIAL_LLM_PROFILE_ID);
+        assert_eq!(profile.id, OFFICIAL_LLM_PROFILE_ID);
+        assert_eq!(profile.name, OFFICIAL_LLM_PROFILE_NAME);
+        assert!(profile.env_pairs().is_empty());
+        assert!(profile.extra_env.is_empty());
+    }
+
+    #[test]
+    fn normalize_adds_official_profile_to_existing_databases() {
+        let mut db = LlmProfileDb {
+            profiles: vec![LlmProfile {
+                id: "custom".to_string(),
+                name: "Custom".to_string(),
+                model: "custom-model".to_string(),
+                ..LlmProfile::default()
+            }],
+            active_profile_id: "custom".to_string(),
+        };
+
+        db.normalize();
+
+        assert_eq!(db.active_profile_id, "custom");
+        assert_eq!(
+            db.profiles
+                .iter()
+                .map(|profile| profile.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![OFFICIAL_LLM_PROFILE_ID, "custom"]
+        );
+    }
 
     #[test]
     fn openai_proxy_profile_writes_auth_token_not_api_key_to_claude_env() {
