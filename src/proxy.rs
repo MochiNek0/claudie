@@ -19,15 +19,11 @@ const DEFAULT_CAPABILITY_CACHE_TTL_HOURS: u64 = 720;
 const DEFAULT_CAPABILITY_CACHE_MAX_ENTRIES: usize = 200;
 const DEFAULT_PROXY_CACHE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const OPENAI_PROXY_COMPAT_PROMPT: &str = "\
-You are responding to Claude Code through claudie, an OpenAI-compatible proxy. \
-Continue the original user task across tool results. Use the provided function \
-tools for file reads, edits, shell commands, and other actions. Treat tool-result \
-messages as observations from your previous tool calls. Do not ask the user what \
-tool to create unless that is the user's task. Use file-edit tools sequentially, \
-with exact current text from the latest read. If an edit/update tool fails, re-read \
-the relevant file section before retrying instead of guessing. Keep working until \
-the requested coding or documentation task is complete, then summarize the actual \
-changes.";
+Tool-result messages are observations from your prior tool calls; continue \
+the task across multiple tool calls without re-asking the user. Prefer parallel \
+tool calls when actions are independent (e.g. reading several files, staging \
+multiple paths in one git command). If an edit tool fails, re-read the relevant \
+file section before retrying.";
 
 pub(crate) fn start_openai_proxy_server(state: Arc<Mutex<AppState>>) -> Result<(), String> {
     let listener = TcpListener::bind(("127.0.0.1", DEFAULT_PROXY_PORT))
@@ -376,7 +372,7 @@ fn anthropic_to_openai_request(request: &Value, profile: &LlmProfile) -> Result<
             .collect::<Vec<_>>();
         if !converted.is_empty() {
             out.insert("tools".to_string(), Value::Array(converted));
-            out.insert("parallel_tool_calls".to_string(), Value::Bool(false));
+            out.insert("parallel_tool_calls".to_string(), Value::Bool(true));
         }
     }
 
@@ -1251,7 +1247,7 @@ mod tests {
             converted["messages"][0]["content"]
                 .as_str()
                 .unwrap()
-                .contains("Claude Code")
+                .contains("Tool-result messages")
         );
         assert_eq!(converted["messages"][1]["content"], "hello");
         assert_eq!(converted["reasoning_effort"], "xhigh");
@@ -1290,7 +1286,7 @@ mod tests {
     }
 
     #[test]
-    fn disables_parallel_tool_calls_by_default_when_tools_are_present() {
+    fn enables_parallel_tool_calls_by_default_when_tools_are_present() {
         let profile = LlmProfile {
             model: "gpt-test".to_string(),
             ..LlmProfile::default()
@@ -1313,14 +1309,14 @@ mod tests {
         });
 
         let converted = anthropic_to_openai_request(&request, &profile).unwrap();
-        assert_eq!(converted["parallel_tool_calls"], false);
+        assert_eq!(converted["parallel_tool_calls"], true);
     }
 
     #[test]
     fn openai_extra_body_can_override_parallel_tool_call_default() {
         let profile = LlmProfile {
             model: "gpt-test".to_string(),
-            openai_extra_body: r#"{"parallel_tool_calls":true}"#.to_string(),
+            openai_extra_body: r#"{"parallel_tool_calls":false}"#.to_string(),
             ..LlmProfile::default()
         };
         let request = json!({
@@ -1329,7 +1325,7 @@ mod tests {
         });
 
         let converted = anthropic_to_openai_request(&request, &profile).unwrap();
-        assert_eq!(converted["parallel_tool_calls"], true);
+        assert_eq!(converted["parallel_tool_calls"], false);
     }
 
     #[test]
