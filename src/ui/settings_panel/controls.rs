@@ -5,10 +5,13 @@ use windows_sys::Win32::Graphics::Gdi::{
     TRANSPARENT, TextOutW,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Controls::EM_GETLINECOUNT;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_OWNERDRAW, CBS_DROPDOWNLIST, CreateWindowExW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE,
-    GetWindowTextLengthW, GetWindowTextW, IDYES, MB_ICONERROR, MB_ICONWARNING, MB_OK, MB_YESNO,
-    MessageBoxW, SendMessageW, SetWindowTextW, WM_SETFONT, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
+    GWL_STYLE, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IDYES, MB_ICONERROR,
+    MB_ICONWARNING, MB_OK, MB_YESNO, MessageBoxW, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, WM_SETFONT,
+    WS_CHILD, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
 use crate::ui::theme;
@@ -396,7 +399,8 @@ pub(super) unsafe fn edit(
     h: i32,
     value: &str,
 ) -> HWND {
-    let inner_h = (h - 12).max(20);
+    let max_inner_h = (h - 8).max(theme::FONT_BODY_PX);
+    let inner_h = (theme::FONT_BODY_PX + 6).clamp(theme::FONT_BODY_PX, max_inner_h);
     let inner_y = y + (h - inner_h) / 2;
     create_control(
         parent,
@@ -433,6 +437,31 @@ pub(super) unsafe fn multiline_edit(
         value,
         id,
     )
+}
+
+pub(super) unsafe fn refresh_multiline_scrollbar(hwnd: HWND, visible_lines: i32) {
+    if hwnd.is_null() {
+        return;
+    }
+    let line_count = SendMessageW(hwnd, EM_GETLINECOUNT, 0, 0) as i32;
+    let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+    let next_style = if line_count > visible_lines {
+        style | WS_VSCROLL
+    } else {
+        style & !WS_VSCROLL
+    };
+    if next_style != style {
+        SetWindowLongPtrW(hwnd, GWL_STYLE, next_style as isize);
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        );
+    }
 }
 
 pub(super) unsafe fn button(

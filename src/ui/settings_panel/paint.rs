@@ -217,6 +217,10 @@ pub(super) unsafe fn color_static(parent: HWND, child: HWND, hdc: HDC) -> LRESUL
     if let Some(panel) = panel(parent) {
         SetBkMode(hdc, TRANSPARENT as i32);
         SetTextColor(hdc, static_text_color(child, panel.active_tab));
+        if child == panel.pomodoro_status {
+            SetBkColor(hdc, COLOR_FIELD);
+            return panel.brush_field as LRESULT;
+        }
         if child == panel.pet_scale_slider || child == panel.sleep_after_slider {
             SetBkColor(hdc, COLOR_FIELD);
             return panel.brush_field as LRESULT;

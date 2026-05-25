@@ -14,13 +14,13 @@ use windows_sys::Win32::UI::Controls::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    FindWindowW, GWLP_USERDATA, GetDlgCtrlID, GetSystemMetrics, GetWindowLongPtrW, HTCAPTION,
-    HTCLIENT, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_HAND, LoadCursorW, LoadIconW, RegisterClassW,
-    SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SendMessageW, SetCursor, SetForegroundWindow,
-    SetTimer, SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
-    WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND,
-    WM_HSCROLL, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SETICON, WM_TIMER, WNDCLASSW, WS_POPUP,
-    WS_VISIBLE,
+    EN_CHANGE, FindWindowW, GWLP_USERDATA, GetDlgCtrlID, GetSystemMetrics, GetWindowLongPtrW,
+    HTCAPTION, HTCLIENT, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_HAND, LoadCursorW, LoadIconW,
+    RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SendMessageW, SetCursor,
+    SetForegroundWindow, SetTimer, SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_HSCROLL, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SETICON,
+    WM_TIMER, WNDCLASSW, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::app::pomodoro::{PomodoroMode, PomodoroStatus, format_remaining};
@@ -97,6 +97,7 @@ const SETTINGS_HEADER_HEIGHT: i32 = 118;
 const SETTINGS_TAB_HEIGHT: i32 = 34;
 const SETTINGS_TAB_TOP: i32 = 76;
 const SETTINGS_DYNAMIC_TIMER_ID: usize = 1;
+const LLM_MULTILINE_VISIBLE_LINES: i32 = 3;
 
 const COLOR_BG: u32 = theme::BG;
 const COLOR_HEADER: u32 = theme::SURFACE_ALT;
@@ -374,6 +375,14 @@ unsafe extern "system" fn settings_proc(
             if command == ID_PROFILE_COMBO as u16 && notify == CBN_SELCHANGE {
                 if let Some(panel) = panel(hwnd) {
                     load_selected_profile(panel);
+                }
+                return 0;
+            }
+            if (command == ID_EXTRA_ENV as u16 || command == ID_OPENAI_EXTRA_BODY as u16)
+                && notify == EN_CHANGE as u16
+            {
+                if let Some(panel) = panel(hwnd) {
+                    refresh_llm_multiline_scrollbars(panel);
                 }
                 return 0;
             }
@@ -946,6 +955,11 @@ unsafe fn load_selected_profile(panel: &SettingsPanel) {
     set_profile_fields(panel, profile);
 }
 
+unsafe fn refresh_llm_multiline_scrollbars(panel: &SettingsPanel) {
+    refresh_multiline_scrollbar(panel.extra_env, LLM_MULTILINE_VISIBLE_LINES);
+    refresh_multiline_scrollbar(panel.openai_extra_body, LLM_MULTILINE_VISIBLE_LINES);
+}
+
 unsafe fn switch_tab(hwnd: HWND, tab: SettingsTab) {
     let Some(panel) = panel(hwnd) else {
         return;
@@ -1380,12 +1394,6 @@ fn sync_app_settings(settings: &UserSettings, event: &str) {
         let mut state = state.lock().expect("state poisoned");
         state.settings = settings.clone();
         state.push_event("settings", event);
-        state.show_speech(
-            "Settings saved",
-            event,
-            std::time::Duration::from_secs(3),
-            4,
-        );
     }
 }
 
@@ -1394,7 +1402,6 @@ fn sync_app_llm_profiles(llm_db: &LlmProfileDb, event: &str) {
         let mut state = state.lock().expect("state poisoned");
         state.llm_profiles = llm_db.clone();
         state.push_event("settings", event);
-        state.show_speech("LLM profile", event, std::time::Duration::from_secs(3), 4);
     }
 }
 
@@ -1455,6 +1462,7 @@ unsafe fn set_profile_fields(panel: &SettingsPanel, profile: &LlmProfile) {
     set_text(panel.haiku_model, &profile.haiku_model);
     set_text(panel.openai_extra_body, &profile.openai_extra_body);
     set_text(panel.extra_env, &profile.extra_env);
+    refresh_llm_multiline_scrollbars(panel);
 }
 
 unsafe fn clear_profile_fields(panel: &SettingsPanel) {
