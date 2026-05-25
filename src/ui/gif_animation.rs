@@ -15,7 +15,7 @@ use windows_sys::Win32::Graphics::GdiPlus::{
 
 use crate::app::PetMood;
 use crate::globals::{APP_STATE, PET_RENDERER};
-use crate::settings::{configured_gif_dir, load_user_settings, UserSettings};
+use crate::settings::{UserSettings, configured_gif_dir, load_user_settings};
 use crate::util::wide;
 
 const MOODS: &[PetMood] = &[

@@ -12,11 +12,11 @@ use crate::util::wide;
 
 use super::controls::{draw_round_rect, draw_text, fill_rect};
 use super::{
-    ButtonKind, COLOR_ACCENT, COLOR_BORDER, COLOR_CARD, COLOR_FIELD,
-    COLOR_FIELD_BORDER, COLOR_HEADER, COLOR_INK, COLOR_MUTED, ID_CLOSE_SETTINGS, ID_TAB_BASIC,
-    ID_TAB_LLM, ID_TAB_POMODORO, SETTINGS_CONTAINER_PAD_X, SETTINGS_GAP, SETTINGS_HEADER_HEIGHT,
-    SETTINGS_PANEL_PADDING, SETTINGS_TAB_HEIGHT, SETTINGS_TAB_TOP,
-    SettingsPanel, SettingsTab, button_kind, panel,
+    ButtonKind, COLOR_ACCENT, COLOR_BORDER, COLOR_CARD, COLOR_FIELD, COLOR_FIELD_BORDER,
+    COLOR_HEADER, COLOR_INK, COLOR_MUTED, ID_CLOSE_SETTINGS, ID_TAB_BASIC, ID_TAB_LLM,
+    ID_TAB_POMODORO, SETTINGS_CONTAINER_PAD_X, SETTINGS_GAP, SETTINGS_HEADER_HEIGHT,
+    SETTINGS_PANEL_PADDING, SETTINGS_TAB_HEIGHT, SETTINGS_TAB_TOP, SettingsPanel, SettingsTab,
+    button_kind, panel,
 };
 
 pub(super) unsafe fn paint_settings(hwnd: HWND) {
@@ -76,7 +76,7 @@ pub(super) unsafe fn draw_settings_frame(
         theme::SHADOW_SOFT,
     );
 
-draw_active_fields(hdc, active_tab);
+    draw_active_fields(hdc, active_tab);
     draw_tab_underline(
         hdc,
         SETTINGS_PANEL_PADDING + SETTINGS_CONTAINER_PAD_X,
@@ -130,7 +130,6 @@ draw_active_fields(hdc, active_tab);
         );
     }
 }
-
 
 pub(super) unsafe fn draw_tab_underline(
     hdc: HDC,

@@ -1,4 +1,4 @@
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::env;
 use std::fs;
 use std::path::PathBuf;

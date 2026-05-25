@@ -9,7 +9,7 @@ use self::pomodoro::{PomodoroState, PomodoroStatus, PomodoroTick};
 use crate::config::MAX_EVENTS;
 #[cfg(windows)]
 use crate::globals::PET_RENDERER;
-use crate::settings::{load_llm_profile_db, load_user_settings, LlmProfileDb, UserSettings};
+use crate::settings::{LlmProfileDb, UserSettings, load_llm_profile_db, load_user_settings};
 
 const THINKING_MIN_VISIBLE: Duration = Duration::from_millis(2_500);
 const WORK_MIN_VISIBLE: Duration = Duration::from_millis(3_000);
