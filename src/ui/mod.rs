@@ -1,7 +1,10 @@
 pub(crate) mod gif_animation;
+pub(crate) mod prompt_popup;
+pub(crate) mod settings_panel;
+pub(crate) mod slint_views;
 pub(crate) mod theme;
+pub(crate) mod window_icon;
 
-mod settings_panel;
 mod window;
 
 pub(crate) use gif_animation::init_animation_store;

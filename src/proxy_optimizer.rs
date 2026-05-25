@@ -1008,8 +1008,12 @@ mod tests {
     use super::*;
 
     fn profile() -> LlmProfile {
+        profile_with_id("test-profile")
+    }
+
+    fn profile_with_id(id: &str) -> LlmProfile {
         LlmProfile {
-            id: "test-profile".to_string(),
+            id: id.to_string(),
             model: "gpt-test".to_string(),
             ..LlmProfile::default()
         }
@@ -1078,6 +1082,7 @@ mod tests {
 
     #[test]
     fn over_threshold_uses_local_summary_by_default_and_keeps_recent_messages() {
+        let profile = profile_with_id(&format!("local-summary-test-{}", now_millis()));
         let messages = (0..30)
             .map(|index| {
                 json!({
@@ -1088,7 +1093,7 @@ mod tests {
             .collect::<Vec<_>>();
         let request = request_with_messages(messages);
 
-        let optimized = optimize_openai_request(request, &profile());
+        let optimized = optimize_openai_request(request, &profile);
         let output_messages = optimized.request["messages"].as_array().unwrap();
 
         assert!(optimized.local_summary);

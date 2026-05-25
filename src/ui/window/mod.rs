@@ -17,17 +17,16 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreatePopupMenu,
-    CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-    GetClientRect, GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
-    HTCAPTION, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LWA_COLORKEY, LoadCursorW, MF_SEPARATOR,
-    MF_STRING, MSG, PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SendMessageW, SetCursor, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN, TrackPopupMenu, TranslateMessage, WM_CREATE,
-    WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_NCLBUTTONDOWN, WM_PAINT, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GWLP_USERDATA, GetClientRect,
+    GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HTCAPTION, HWND_TOPMOST,
+    IDC_ARROW, IDC_HAND, LWA_COLORKEY, LoadCursorW, MF_SEPARATOR, MF_STRING, RegisterClassW,
+    SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    SendMessageW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN,
+    TrackPopupMenu, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN,
+    WM_NCLBUTTONDOWN, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::app::pomodoro::PomodoroStatus;
@@ -39,7 +38,8 @@ use crate::hooks::{
     toggle_current_choice_option,
 };
 use crate::settings::{UserSettings, WindowPosition, load_user_settings, save_user_settings};
-use crate::ui::settings_panel::show_settings_panel;
+use crate::ui::prompt_popup::{close_prompt_popup, sync_prompt_popup};
+use crate::ui::settings_panel::{close_settings_panel, show_settings_panel};
 use crate::util::wide;
 
 static CONTEXT_MENU_OPEN: AtomicBool = AtomicBool::new(false);
@@ -117,10 +117,8 @@ pub(crate) unsafe fn run_window(port: u16) {
     RegisterHotKey(hwnd, 2, MOD_CONTROL | MOD_SHIFT, 'N' as u32);
     SetTimer(hwnd, 1, 33, None);
 
-    let mut msg = MSG::default();
-    while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+    if let Err(err) = slint::run_event_loop_until_quit() {
+        eprintln!("Slint event loop failed: {err}");
     }
 
     UnregisterHotKey(hwnd, 1);
@@ -156,7 +154,11 @@ unsafe extern "system" fn window_proc(
             if !CONTEXT_MENU_OPEN.load(Ordering::Relaxed) {
                 ensure_pet_topmost(hwnd);
             }
-            sync_permission_overlay(overlay_hwnd(hwnd));
+            let overlay = overlay_hwnd(hwnd);
+            if !overlay.is_null() {
+                ShowWindow(overlay, SW_HIDE);
+            }
+            sync_prompt_popup();
             InvalidateRect(hwnd, std::ptr::null(), 0);
             0
         }
@@ -192,7 +194,9 @@ unsafe extern "system" fn window_proc(
             if !overlay.is_null() {
                 DestroyWindow(overlay);
             }
-            PostQuitMessage(0);
+            close_settings_panel();
+            close_prompt_popup();
+            let _ = slint::quit_event_loop();
             0
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -352,6 +356,7 @@ unsafe fn overlay_hwnd(hwnd: HWND) -> HWND {
     GetWindowLongPtrW(hwnd, GWLP_USERDATA) as HWND
 }
 
+#[allow(dead_code)]
 unsafe fn sync_permission_overlay(hwnd: HWND) {
     if hwnd.is_null() {
         return;

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Shared visual tokens for the settings panel and overlay popups.
 //!
 //! The look is a "modern frosted light" approximation: cool-tinted neutrals,

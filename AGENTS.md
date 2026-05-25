@@ -46,9 +46,10 @@ cargo run --release -- --port 17387
 - `src/ui/theme.rs`: shared colors, radii, and typography tokens for the settings panel and overlay popups.
 - `src/ui/window/mod.rs`: main transparent always-on-top pet window, hotkeys, context menu, clicks, scaling, and position persistence.
 - `src/ui/window/render.rs`: main window render snapshot, HUD, pet drawing, permission/choice overlay detail, and drawing helpers.
-- `src/ui/settings_panel/mod.rs`: Settings window lifecycle, tab switching, save/apply actions, and AppState synchronization.
-- `src/ui/settings_panel/controls.rs`: Win32 control creation, fonts, text helpers, message boxes, and shared drawing helpers.
-- `src/ui/settings_panel/paint.rs`: Settings panel background, tabs, field chrome, and control color handling.
+- `src/ui/slint_views.rs`: Slint component declarations for the Settings window and prompt popup.
+- `src/ui/settings_panel/`: Slint Settings window lifecycle, callback wiring, tab-specific controller behavior, and AppState synchronization.
+- `src/ui/prompt_popup.rs`: Slint permission and choice popup lifecycle, snapshots, and callbacks.
+- `src/ui/window_icon.rs`: Slint/Winit/Win32 icon bridge for auxiliary windows.
 - `src/config.rs`: constants for ports, dimensions, menu IDs, colors, and timing.
 - `src/globals.rs`: process-wide `OnceLock` handles for shared app state and pet renderer.
 - `src/notifier.rs`: simple platform notification/message-box wrapper.
@@ -81,8 +82,8 @@ cargo run --release -- --port 17387
 - UI code uses raw Win32 handles and unsafe calls. Keep unsafe usage close to Win32 boundaries and prefer small helper functions for repeated patterns.
 - Main pet window behavior belongs in `src/ui/window/mod.rs`; main pet drawing and permission/choice overlays belong in `src/ui/window/render.rs`.
 - Shared visual tokens for Settings and overlay chrome belong in `src/ui/theme.rs`; keep color, radius, and font changes centralized there.
-- Settings panel lifecycle, commands, and save logic belong in `src/ui/settings_panel/mod.rs`; controls and painting belong in sibling files.
-- The Settings panel draws its own tab backgrounds and uses real Win32 controls on top; tab buttons should not use default push-button styling because that leaves the default outline on the wrong tab.
+- Settings panel lifecycle and callback wiring belong in `src/ui/settings_panel/mod.rs`; Settings save/apply behavior belongs in tab-focused files under `src/ui/settings_panel/controller/`.
+- Slint component declarations belong in `src/ui/slint_views.rs`; keep Rust callback/state logic out of the `slint::slint!` block.
 - Use `util::wide` for strings passed to Win32 APIs.
 - Do not block the UI thread with network or filesystem work that could take noticeable time.
 - When settings change, update both persisted files and in-memory `AppState` so runtime behavior reflects changes immediately.
@@ -98,7 +99,7 @@ cargo run --release -- --port 17387
   - LLM profile serialization, OpenAI extra body parsing, and Claude env merging belong in `src/settings/mod.rs`.
   - Main pet rendering and permission/choice overlays belong in `src/ui/window/render.rs`; main window events, menu commands, and position persistence belong in `src/ui/window/mod.rs`.
   - Shared visual tokens belong in `src/ui/theme.rs`.
-  - Settings UI commands belong in `src/ui/settings_panel/mod.rs`; native controls belong in `src/ui/settings_panel/controls.rs`; panel chrome belongs in `src/ui/settings_panel/paint.rs`.
+  - Settings UI commands belong in `src/ui/settings_panel/mod.rs`; tab-specific controller behavior belongs in `src/ui/settings_panel/controller/`; shared Slint view declarations belong in `src/ui/slint_views.rs`.
   - Persistent config and JSON file read/write mechanics belong in `src/settings/`.
   - Shared domain state belongs in `src/app/mod.rs`; pomodoro domain rules belong in sibling files under `src/app/`.
 - Avoid introducing new dependencies unless they remove real complexity. This app is deliberately lightweight.

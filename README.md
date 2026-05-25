@@ -158,10 +158,11 @@ src/
     window/                主宠物窗口
       mod.rs               窗口生命周期、热键、菜单、点击处理和位置持久化
       render.rs            HUD、宠物、权限弹层和选择卡片绘制
-    settings_panel/        原生 Settings 面板
-      mod.rs               面板生命周期、tab 切换、保存/刷新逻辑
-      controls.rs          Win32 控件创建、文本、字体、消息框 helper
-      paint.rs             Settings 面板背景、tab 和字段绘制
+    slint_views.rs         Settings 窗口和权限/选择弹窗的 Slint 组件声明
+    settings_panel/        Slint Settings 面板生命周期、回调和控制器逻辑
+      controller/          Basic、Pomodoro、LLM Profiles 分区行为
+    prompt_popup.rs        Slint 权限/选择弹窗快照和回调
+    window_icon.rs         Slint/Winit/Win32 辅助窗口图标桥接
 ```
 
 其它目录：
@@ -211,7 +212,7 @@ Settings 面板可以调整 GIF 目录和每个 mood 对应的文件名。替换
 - UI 线程不要做可能卡顿的网络或文件工作。
 - 主窗口新增可视元素优先改 `src/ui/window/render.rs`；新增菜单、热键或鼠标交互优先改 `src/ui/window/mod.rs`。
 - Settings 面板和权限/选择弹层的颜色、圆角、字体等共享视觉 token 放在 `src/ui/theme.rs`。
-- Settings 面板新增字段时，把窗口消息和保存行为放在 `src/ui/settings_panel/mod.rs`，控件 helper 放在 `controls.rs`，背景/字段装饰放在 `paint.rs`。
+- Settings 面板新增字段时，把 Slint 组件声明放在 `src/ui/slint_views.rs`，回调放在 `src/ui/settings_panel/mod.rs`，保存/刷新行为放在 `src/ui/settings_panel/controller/`。
 
 ## 打包
 

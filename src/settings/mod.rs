@@ -138,6 +138,7 @@ impl UserSettings {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_animation_value(&mut self, mood: PetMood, value: String) {
         match mood {
             PetMood::Idle => self.animations.idle = value,
@@ -578,19 +579,7 @@ fn configured_gif_dir_strict(settings: &UserSettings) -> Option<PathBuf> {
 }
 
 fn dir_has_required_gifs(dir: &Path, settings: &UserSettings) -> bool {
-    use crate::app::PetMood;
-    let moods = [
-        PetMood::Idle,
-        PetMood::Thinking,
-        PetMood::Typing,
-        PetMood::Building,
-        PetMood::Permission,
-        PetMood::Happy,
-        PetMood::Error,
-        PetMood::Sleeping,
-        PetMood::Subagent,
-    ];
-    moods.iter().all(|mood| {
+    mood_rows().iter().all(|(mood, _)| {
         let name = settings.animation_value(*mood);
         let filename = if name.ends_with(".gif") || name.ends_with(".GIF") {
             name.to_string()
