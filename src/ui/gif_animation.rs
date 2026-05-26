@@ -28,6 +28,9 @@ const MOODS: &[PetMood] = &[
     PetMood::Error,
     PetMood::Sleeping,
     PetMood::Subagent,
+    PetMood::Pomodoro,
+    PetMood::Wave,
+    PetMood::Stretch,
 ];
 
 struct GifClip {

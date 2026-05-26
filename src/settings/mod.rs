@@ -50,6 +50,9 @@ pub(crate) struct AnimationSettings {
     pub(crate) error: String,
     pub(crate) sleeping: String,
     pub(crate) subagent: String,
+    pub(crate) pomodoro: String,
+    pub(crate) wave: String,
+    pub(crate) stretch: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -101,6 +104,9 @@ impl Default for AnimationSettings {
             error: "error".to_string(),
             sleeping: "sleeping".to_string(),
             subagent: "subagent".to_string(),
+            pomodoro: "pomodoro".to_string(),
+            wave: "wave".to_string(),
+            stretch: "stretch".to_string(),
         }
     }
 }
@@ -136,6 +142,9 @@ impl UserSettings {
             PetMood::Error => &self.animations.error,
             PetMood::Sleeping => &self.animations.sleeping,
             PetMood::Subagent => &self.animations.subagent,
+            PetMood::Pomodoro => &self.animations.pomodoro,
+            PetMood::Wave => &self.animations.wave,
+            PetMood::Stretch => &self.animations.stretch,
         }
     }
 
@@ -151,6 +160,9 @@ impl UserSettings {
             PetMood::Error => self.animations.error = value,
             PetMood::Sleeping => self.animations.sleeping = value,
             PetMood::Subagent => self.animations.subagent = value,
+            PetMood::Pomodoro => self.animations.pomodoro = value,
+            PetMood::Wave => self.animations.wave = value,
+            PetMood::Stretch => self.animations.stretch = value,
         }
     }
 
@@ -620,6 +632,9 @@ pub(crate) fn mood_rows() -> &'static [(PetMood, &'static str)] {
         (PetMood::Error, "Error"),
         (PetMood::Sleeping, "Sleeping"),
         (PetMood::Subagent, "Subagent"),
+        (PetMood::Pomodoro, "Pomodoro"),
+        (PetMood::Wave, "Wave"),
+        (PetMood::Stretch, "Stretch"),
     ]
 }
 

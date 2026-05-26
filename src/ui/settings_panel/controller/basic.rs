@@ -22,6 +22,9 @@ impl SettingsController {
         ui.set_anim_error(shared(&self.settings.animations.error));
         ui.set_anim_sleeping(shared(&self.settings.animations.sleeping));
         ui.set_anim_subagent(shared(&self.settings.animations.subagent));
+        ui.set_anim_pomodoro(shared(&self.settings.animations.pomodoro));
+        ui.set_anim_wave(shared(&self.settings.animations.wave));
+        ui.set_anim_stretch(shared(&self.settings.animations.stretch));
     }
 
     fn collect_basic_fields(&mut self) {
@@ -46,6 +49,9 @@ impl SettingsController {
             error: ui.get_anim_error().to_string(),
             sleeping: ui.get_anim_sleeping().to_string(),
             subagent: ui.get_anim_subagent().to_string(),
+            pomodoro: ui.get_anim_pomodoro().to_string(),
+            wave: ui.get_anim_wave().to_string(),
+            stretch: ui.get_anim_stretch().to_string(),
         };
     }
 
