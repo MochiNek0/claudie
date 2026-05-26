@@ -1,6 +1,7 @@
 mod basic;
 mod pomodoro;
 mod profiles;
+mod stats;
 
 use std::time::Duration;
 
@@ -45,14 +46,19 @@ impl SettingsController {
         self.refresh_pomodoro_fields();
         self.refresh_profile_fields();
         self.refresh_pomodoro_tab();
+        self.refresh_stats_tab();
 
         let weak = self.weak.clone();
         self._timer
             .start(TimerMode::Repeated, Duration::from_secs(1), move || {
                 if let Some(ui) = weak.upgrade()
-                    && ui.get_active_tab() == 1
+                    && (ui.get_active_tab() == 1 || ui.get_active_tab() == 3)
                 {
-                    pomodoro::set_pomodoro_status(&ui);
+                    if ui.get_active_tab() == 1 {
+                        pomodoro::set_pomodoro_status(&ui);
+                    } else {
+                        stats::set_stats_status(&ui);
+                    }
                 }
             });
     }

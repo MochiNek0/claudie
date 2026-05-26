@@ -295,6 +295,54 @@ slint::slint! {
         }
     }
 
+    component StatBarRow inherits Rectangle {
+        in property <string> label;
+        in property <string> value;
+        in property <float> bar: 0;
+        in property <brush> accent: #0a84ff;
+
+        background: transparent;
+
+        Text {
+            x: 0px;
+            y: 0px;
+            width: 62px;
+            height: root.height;
+            text: root.label;
+            overflow: elide;
+            vertical-alignment: center;
+            color: #475569;
+            font-size: 12px;
+        }
+        Rectangle {
+            x: 70px;
+            y: (root.height - 6px) / 2;
+            width: root.width - 116px;
+            height: 6px;
+            border-radius: 3px;
+            background: #dbe4f0;
+        }
+        Rectangle {
+            x: 70px;
+            y: (root.height - 6px) / 2;
+            width: max(4px, (root.width - 116px) * root.bar / 100);
+            height: 6px;
+            border-radius: 3px;
+            background: root.accent;
+        }
+        Text {
+            x: root.width - 38px;
+            y: 0px;
+            width: 38px;
+            height: root.height;
+            text: root.value;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            color: #111827;
+            font-size: 12px;
+        }
+    }
+
     export component SettingsWindow inherits Window {
         width: 880px;
         height: 700px;
@@ -316,6 +364,9 @@ slint::slint! {
         in-out property <string> anim_error;
         in-out property <string> anim_sleeping;
         in-out property <string> anim_subagent;
+        in-out property <string> anim_pomodoro;
+        in-out property <string> anim_wave;
+        in-out property <string> anim_stretch;
 
         in-out property <int> focus_minutes: 25;
         in-out property <int> short_break_minutes: 5;
@@ -337,6 +388,51 @@ slint::slint! {
         in-out property <string> haiku_model;
         in-out property <string> extra_env;
         in-out property <string> openai_extra_body;
+
+        in property <string> stats_today_title;
+        in property <string> stats_today_summary;
+        in property <string> stats_recent_title;
+        in property <string> stats_recent_summary;
+        in property <string> stats_today_write_value;
+        in property <string> stats_today_bash_value;
+        in property <string> stats_today_search_value;
+        in property <string> stats_today_subagent_value;
+        in property <string> stats_today_permission_value;
+        in property <string> stats_today_choice_value;
+        in property <float> stats_today_write_bar;
+        in property <float> stats_today_bash_bar;
+        in property <float> stats_today_search_bar;
+        in property <float> stats_today_subagent_bar;
+        in property <float> stats_today_permission_bar;
+        in property <float> stats_today_choice_bar;
+        in property <string> stats_recent_write_value;
+        in property <string> stats_recent_bash_value;
+        in property <string> stats_recent_search_value;
+        in property <string> stats_recent_subagent_value;
+        in property <string> stats_recent_permission_value;
+        in property <string> stats_recent_choice_value;
+        in property <float> stats_recent_write_bar;
+        in property <float> stats_recent_bash_bar;
+        in property <float> stats_recent_search_bar;
+        in property <float> stats_recent_subagent_bar;
+        in property <float> stats_recent_permission_bar;
+        in property <float> stats_recent_choice_bar;
+        in property <string> stats_today_input_value;
+        in property <string> stats_today_output_value;
+        in property <string> stats_today_cache_write_value;
+        in property <string> stats_today_cache_read_value;
+        in property <float> stats_today_input_bar;
+        in property <float> stats_today_output_bar;
+        in property <float> stats_today_cache_write_bar;
+        in property <float> stats_today_cache_read_bar;
+        in property <string> stats_recent_input_value;
+        in property <string> stats_recent_output_value;
+        in property <string> stats_recent_cache_write_value;
+        in property <string> stats_recent_cache_read_value;
+        in property <float> stats_recent_input_bar;
+        in property <float> stats_recent_output_bar;
+        in property <float> stats_recent_cache_write_bar;
+        in property <float> stats_recent_cache_read_bar;
 
         in property <string> status_message;
 
@@ -390,6 +486,7 @@ slint::slint! {
         ActionButton { x: 36px; y: 84px; width: 104px; height: 34px; text: "Basic"; clicked => { root.active_tab = 0; } }
         ActionButton { x: 148px; y: 84px; width: 124px; height: 34px; text: "Pomodoro"; clicked => { root.active_tab = 1; } }
         ActionButton { x: 280px; y: 84px; width: 140px; height: 34px; text: "LLM Profiles"; clicked => { root.active_tab = 2; } }
+        ActionButton { x: 428px; y: 84px; width: 96px; height: 34px; text: "Stats"; clicked => { root.active_tab = 3; } }
 
         if active_tab == 0: Rectangle {
             x: 36px;
@@ -443,6 +540,12 @@ slint::slint! {
 
             Text { x: 12px; y: 364px; text: "Subagent"; color: #6b7280; font-size: 12px; }
             MonoLineEdit { x: 12px; y: 384px; width: 182px; height: 32px; text <=> root.anim_subagent; }
+            Text { x: 212px; y: 364px; text: "Pomodoro"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 212px; y: 384px; width: 182px; height: 32px; text <=> root.anim_pomodoro; }
+            Text { x: 412px; y: 364px; text: "Wave"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 412px; y: 384px; width: 182px; height: 32px; text <=> root.anim_wave; }
+            Text { x: 612px; y: 364px; text: "Stretch"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 612px; y: 384px; width: 182px; height: 32px; text <=> root.anim_stretch; }
 
             ActionButton { x: 594px; y: 460px; width: 96px; height: 34px; text: "Save"; clicked => { root.save_basic(); } }
             ActionButton { x: 702px; y: 460px; width: 96px; height: 34px; text: "Reset"; clicked => { root.reset_basic(); } }
@@ -535,6 +638,51 @@ slint::slint! {
 
             ActionButton { x: 594px; y: 500px; width: 96px; height: 34px; text: "Save"; clicked => { root.save_profile(); } }
             ActionButton { x: 702px; y: 500px; width: 96px; height: 34px; text: "Use"; clicked => { root.use_profile(); } }
+        }
+
+        if active_tab == 3: Rectangle {
+            x: 36px;
+            y: 132px;
+            width: 808px;
+            height: 508px;
+            background: transparent;
+
+            Text { x: 12px; y: 0px; text: "Session ledger"; font-size: 16px; font-weight: 600; color: #111827; }
+            Text { x: 12px; y: 26px; width: 700px; text: "A quiet local record of Claude Code activity observed by claudie."; font-size: 13px; color: #6b7280; }
+
+            Rectangle { x: 12px; y: 64px; width: 378px; height: 236px; background: #f2f5fa; border-radius: 10px; border-width: 1px; border-color: #dae0ea; }
+            Text { x: 32px; y: 82px; width: 330px; text: root.stats_today_title; color: #111827; font-size: 14px; font-weight: 600; }
+            Text { x: 32px; y: 108px; width: 330px; height: 28px; text: root.stats_today_summary; overflow: elide; color: #111827; font-size: 12px; }
+            StatBarRow { x: 32px; y: 144px; width: 330px; height: 18px; label: "Write"; value: root.stats_today_write_value; bar: root.stats_today_write_bar; accent: #2a9d8f; }
+            StatBarRow { x: 32px; y: 168px; width: 330px; height: 18px; label: "Bash"; value: root.stats_today_bash_value; bar: root.stats_today_bash_bar; accent: #4577c3; }
+            StatBarRow { x: 32px; y: 192px; width: 330px; height: 18px; label: "Search"; value: root.stats_today_search_value; bar: root.stats_today_search_bar; accent: #d88a24; }
+            StatBarRow { x: 32px; y: 216px; width: 330px; height: 18px; label: "Agent"; value: root.stats_today_subagent_value; bar: root.stats_today_subagent_bar; accent: #7c5cc4; }
+            StatBarRow { x: 32px; y: 240px; width: 330px; height: 18px; label: "Perm"; value: root.stats_today_permission_value; bar: root.stats_today_permission_bar; accent: #0a84ff; }
+            StatBarRow { x: 32px; y: 264px; width: 330px; height: 18px; label: "Choice"; value: root.stats_today_choice_value; bar: root.stats_today_choice_bar; accent: #6b8f3f; }
+
+            Rectangle { x: 418px; y: 64px; width: 378px; height: 236px; background: #f2f5fa; border-radius: 10px; border-width: 1px; border-color: #dae0ea; }
+            Text { x: 438px; y: 82px; width: 330px; text: root.stats_recent_title; color: #111827; font-size: 14px; font-weight: 600; }
+            Text { x: 438px; y: 108px; width: 330px; height: 28px; text: root.stats_recent_summary; overflow: elide; color: #111827; font-size: 12px; }
+            StatBarRow { x: 438px; y: 144px; width: 330px; height: 18px; label: "Write"; value: root.stats_recent_write_value; bar: root.stats_recent_write_bar; accent: #2a9d8f; }
+            StatBarRow { x: 438px; y: 168px; width: 330px; height: 18px; label: "Bash"; value: root.stats_recent_bash_value; bar: root.stats_recent_bash_bar; accent: #4577c3; }
+            StatBarRow { x: 438px; y: 192px; width: 330px; height: 18px; label: "Search"; value: root.stats_recent_search_value; bar: root.stats_recent_search_bar; accent: #d88a24; }
+            StatBarRow { x: 438px; y: 216px; width: 330px; height: 18px; label: "Agent"; value: root.stats_recent_subagent_value; bar: root.stats_recent_subagent_bar; accent: #7c5cc4; }
+            StatBarRow { x: 438px; y: 240px; width: 330px; height: 18px; label: "Perm"; value: root.stats_recent_permission_value; bar: root.stats_recent_permission_bar; accent: #0a84ff; }
+            StatBarRow { x: 438px; y: 264px; width: 330px; height: 18px; label: "Choice"; value: root.stats_recent_choice_value; bar: root.stats_recent_choice_bar; accent: #6b8f3f; }
+
+            Rectangle { x: 12px; y: 322px; width: 378px; height: 150px; background: #ffffff; border-radius: 10px; border-width: 1px; border-color: #dae0ea; }
+            Text { x: 32px; y: 340px; width: 330px; text: "Tokens today"; color: #111827; font-size: 14px; font-weight: 600; }
+            StatBarRow { x: 32px; y: 370px; width: 330px; height: 17px; label: "Input"; value: root.stats_today_input_value; bar: root.stats_today_input_bar; accent: #2a9d8f; }
+            StatBarRow { x: 32px; y: 392px; width: 330px; height: 17px; label: "Output"; value: root.stats_today_output_value; bar: root.stats_today_output_bar; accent: #4577c3; }
+            StatBarRow { x: 32px; y: 414px; width: 330px; height: 17px; label: "Cache W"; value: root.stats_today_cache_write_value; bar: root.stats_today_cache_write_bar; accent: #d88a24; }
+            StatBarRow { x: 32px; y: 436px; width: 330px; height: 17px; label: "Cache R"; value: root.stats_today_cache_read_value; bar: root.stats_today_cache_read_bar; accent: #7c5cc4; }
+
+            Rectangle { x: 418px; y: 322px; width: 378px; height: 150px; background: #ffffff; border-radius: 10px; border-width: 1px; border-color: #dae0ea; }
+            Text { x: 438px; y: 340px; width: 330px; text: "Tokens last 7 days"; color: #111827; font-size: 14px; font-weight: 600; }
+            StatBarRow { x: 438px; y: 370px; width: 330px; height: 17px; label: "Input"; value: root.stats_recent_input_value; bar: root.stats_recent_input_bar; accent: #2a9d8f; }
+            StatBarRow { x: 438px; y: 392px; width: 330px; height: 17px; label: "Output"; value: root.stats_recent_output_value; bar: root.stats_recent_output_bar; accent: #4577c3; }
+            StatBarRow { x: 438px; y: 414px; width: 330px; height: 17px; label: "Cache W"; value: root.stats_recent_cache_write_value; bar: root.stats_recent_cache_write_bar; accent: #d88a24; }
+            StatBarRow { x: 438px; y: 436px; width: 330px; height: 17px; label: "Cache R"; value: root.stats_recent_cache_read_value; bar: root.stats_recent_cache_read_bar; accent: #7c5cc4; }
         }
 
         Text {
