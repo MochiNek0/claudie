@@ -37,12 +37,14 @@ claudie 受 [rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/cla
   - `Ctrl+Shift+Y`：允许当前权限请求，或提交当前选择。
   - `Ctrl+Shift+N`：拒绝当前权限请求，或取消当前选择。
 - **番茄钟**：内置 Pomodoro，支持 Start / Stop / Pause / Resume / Skip，阶段结束时弹出通知。
+- **宠物互动**：短按左键会播放互动动画，按住并移动仍可拖动窗口；番茄钟专注时可使用专属 `pomodoro` 动画。
 - **空闲睡眠**：长时间无活动后自动进入睡眠状态，有新活动时唤醒。
 - **宠物缩放**：可调整宠物窗口大小。
 - **窗口位置记忆**：退出时保存窗口位置，下次启动自动恢复。
 - **Mood -> GIF 映射**：每种情绪状态都可配置对应 GIF 文件。
-- **Settings 面板**：提供 Basic、Pomodoro、LLM Profiles 三个标签页，使用统一的 Slint 原生主题。
-- **LLM Profiles**：保存 LLM provider/profile，将当前 profile 写入 Claude Code settings，并为 OpenAI 代理配置额外请求体字段。
+- **Settings 面板**：提供 Basic、Pomodoro、LLM Profiles、Stats 四个标签页，使用统一的 Slint 原生主题。
+- **LLM Profiles**：保存 LLM provider/profile，将当前 profile 写入 Claude Code settings，并为 OpenAI 代理配置额外请求体字段；右键菜单可快速切换已保存 profile。
+- **会话小账本**：在本地按天记录 prompts、工具类型、权限/选择次数、错误、番茄钟完成数和 token 用量，并在 Stats 页以柱状图展示今日与最近 7 天。
 - **OpenAI 兼容代理**：把 Claude Code 的 Anthropic Messages 请求转换到 OpenAI Chat Completions API，支持工具调用格式转换、并行工具调用控制、上下文压缩、历史总结和能力缓存。
 - **跨平台**：Windows 提供完整桌面 UI；macOS / Linux 当前仅运行 headless hook 与 proxy 服务，没有桌面交互 UI。
 
@@ -150,8 +152,9 @@ src/
   notifier.rs              平台通知 / 消息框封装
   util.rs                  参数解析、路径、文本截断和 UTF-16 辅助函数
   app/                     AppState、权限请求、选择请求、番茄钟等领域规则
-    mod.rs                 AppState、PetMood、会话、配额、待处理交互和 mood 衰减
+    mod.rs                 AppState、PetMood、会话、配额、待处理交互、统计和 mood 衰减
     pomodoro.rs            轻量番茄钟状态与转换
+    stats.rs               本地每日会话小账本、工具分类和 token 统计
   hooks/                   Claude Code hook server、事件语义、配额提取、settings 合并
     claude_settings.rs     hook settings 生成、安装、卸载与合并
     events.rs              Claude Code 事件处理、权限等待和选择响应
@@ -171,7 +174,7 @@ src/
     slint_views.rs         Settings 窗口和 Prompt 弹窗的 Slint 组件声明
     settings_panel/        Slint Settings 面板生命周期、回调和控制器逻辑
       controller.rs        SettingsController 共享状态与同步 helper
-      controller/          Basic、Pomodoro、LLM Profiles 分区行为
+      controller/          Basic、Pomodoro、LLM Profiles、Stats 分区行为
     prompt_popup.rs        Slint 权限/选择弹窗快照和回调
     window_icon.rs         Slint/Winit/Win32 辅助窗口图标桥接
 ```
@@ -186,6 +189,7 @@ src/
 
 - `%USERPROFILE%\.claudie\settings.json`：宠物资源目录、GIF 目录、动画映射、缩放、睡眠时间、窗口位置和番茄钟设置。
 - `%USERPROFILE%\.claudie\llm_profiles.json`：LLM provider/profile 定义，包括 OpenAI 代理额外请求体字段。
+- `%USERPROFILE%\.claudie\daily_stats.json`：每日会话小账本，只保存计数，包括工具分类、权限/选择、番茄钟完成数和 token 用量。
 - `%USERPROFILE%\.claudie\proxy_summaries.json`：旧版单块总结缓存。
 - `%USERPROFILE%\.claudie\proxy_cache\`：OpenAI 代理缓存目录，包含：
   - `summaries/`：单块总结缓存 JSON 文件。
@@ -209,6 +213,9 @@ assets/claudie/
   error.gif
   sleeping.gif
   subagent.gif
+  pomodoro.gif
+  wave.gif
+  stretch.gif
 ```
 
 Settings 面板可以调整 GIF 目录和每个 mood 对应的文件名。替换美术资源时保持文件名映射一致即可。
@@ -216,6 +223,7 @@ Settings 面板可以调整 GIF 目录和每个 mood 对应的文件名。替换
 ## 维护边界
 
 - `AppState` 是中央可变模型；长期状态和领域规则优先放在 `src/app/`。
+- 每日会话小账本属于 `src/app/stats.rs`；hook 事件只负责在 `src/hooks/events.rs` 中调用统计记录，不要在 UI 层推导业务计数。
 - Hook server 保持小而同步；HTTP 解析留在 `src/hooks/server.rs`，Claude event 语义放在 `src/hooks/events.rs`。
 - 配额字段兼容逻辑集中在 `src/hooks/quota.rs`。
 - 修改 Claude settings 时只合并 claudie 管理的 hook/env 字段，保留用户其它配置。
@@ -255,4 +263,4 @@ cargo test
 cargo run --release
 ```
 
-重点检查宠物窗口是否打开并恢复上次位置、右键菜单是否可用、Basic/Pomodoro/LLM Profiles tabs 是否正常切换、GIF 资源是否加载、`POST /hook` 是否更新状态、权限/选择卡片是否可交互，以及需要时本地 LLM 代理和 `OpenAI body` 转发是否工作。
+重点检查宠物窗口是否打开并恢复上次位置、右键菜单是否可用并能快速切换 LLM Profile、Basic/Pomodoro/LLM Profiles/Stats tabs 是否正常切换、左键点击是否播放互动动画且拖动仍可用、GIF 资源是否加载、`POST /hook` 是否更新状态、权限/选择卡片是否可交互、Stats 页柱状图是否不溢出，以及需要时本地 LLM 代理和 `OpenAI body` 转发是否工作。

@@ -37,12 +37,14 @@ claudie is inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerz
   - `Ctrl+Shift+Y`: Allow current permission request / Submit current choice
   - `Ctrl+Shift+N`: Deny current permission request / Cancel current choice
 - **Pomodoro timer**: Built-in pomodoro with Start / Stop / Pause / Resume / Skip and notification on completion.
+- **Pet interaction**: A short left click plays an interaction animation, while click-and-move still drags the window; focus Pomodoro can use a dedicated `pomodoro` animation.
 - **Idle sleep**: Pet auto-sleeps after inactivity, wakes on new activity.
 - **Pet scaling**: Adjustable pet window size.
 - **Window position memory**: Saves and restores window position across sessions.
 - **Mood-to-GIF mapping**: Configurable GIF file for each mood state.
-- **Settings panel**: Basic, Pomodoro, and LLM Profiles tabs with a unified native theme.
-- **LLM Profiles**: Save LLM providers/profiles, writes the active profile into Claude Code settings, and configures extra request body fields for the OpenAI proxy.
+- **Settings panel**: Basic, Pomodoro, LLM Profiles, and Stats tabs with a unified native theme.
+- **LLM Profiles**: Save LLM providers/profiles, writes the active profile into Claude Code settings, and configures extra request body fields for the OpenAI proxy; the right-click menu can quickly switch saved profiles.
+- **Session ledger**: Locally records daily prompts, tool categories, permission/choice counts, errors, completed focus sessions, and token usage, then shows today and the last 7 days as bar charts in the Stats tab.
 - **OpenAI-compatible proxy**: Converts Claude Code Anthropic Messages requests to OpenAI Chat Completions API, with tool call format conversion, parallel tool control, context compression, history summarization, and capability caching.
 - **Cross-platform**: Windows has the full desktop UI; macOS / Linux currently run only headless hook and proxy servers without the desktop interaction UI.
 
@@ -150,8 +152,9 @@ src/
   notifier.rs              Platform notification / message-box wrapper
   util.rs                  Arg parsing, path, text shortening, and UTF-16 helpers
   app/                     AppState, permission requests, choice requests, Pomodoro domain rules
-    mod.rs                 AppState, PetMood, sessions, quota, pending interactions, mood decay
+    mod.rs                 AppState, PetMood, sessions, quota, pending interactions, stats, mood decay
     pomodoro.rs            Lightweight Pomodoro state and transitions
+    stats.rs               Local daily session ledger, tool classification, and token statistics
   hooks/                   Claude Code hook server, event semantics, quota extraction, settings merge
     claude_settings.rs     Hook settings generation, installation, uninstall, and merge
     events.rs              Claude Code event handling, permission waiting, and choice responses
@@ -171,7 +174,7 @@ src/
     slint_views.rs         Slint component declarations for Settings and Prompt windows
     settings_panel/        Slint Settings panel lifecycle, callbacks, and controller logic
       controller.rs        Shared SettingsController state and sync helpers
-      controller/          Basic, Pomodoro, and LLM Profiles tab behavior
+      controller/          Basic, Pomodoro, LLM Profiles, and Stats tab behavior
     prompt_popup.rs        Slint permission/choice popup snapshots and callbacks
     window_icon.rs         Slint/Winit/Win32 auxiliary window icon bridge
 ```
@@ -186,6 +189,7 @@ Other directories:
 
 - `%USERPROFILE%\.claudie\settings.json`: pet asset path, GIF directory, animation mapping, scale, sleep timeout, window position, and Pomodoro settings.
 - `%USERPROFILE%\.claudie\llm_profiles.json`: LLM provider/profile definitions, including OpenAI proxy extra request body fields.
+- `%USERPROFILE%\.claudie\daily_stats.json`: daily session ledger counters, including tool categories, permission/choice counts, completed focus sessions, and token usage.
 - `%USERPROFILE%\.claudie\proxy_summaries.json`: legacy (single-block) OpenAI proxy summary cache.
 - `%USERPROFILE%\.claudie\proxy_cache\`: OpenAI proxy cache directory, containing:
   - `summaries/`: single-block summary cache JSON files.
@@ -209,6 +213,9 @@ assets/claudie/
   error.gif
   sleeping.gif
   subagent.gif
+  pomodoro.gif
+  wave.gif
+  stretch.gif
 ```
 
 The Settings panel can adjust the GIF directory and the file name mapped to each mood. When replacing art assets, keep the file name mapping consistent.
@@ -216,6 +223,7 @@ The Settings panel can adjust the GIF directory and the file name mapped to each
 ## Maintenance Boundaries
 
 - `AppState` is the central mutable model; long-lived state and domain rules should usually live under `src/app/`.
+- Daily session ledger behavior belongs in `src/app/stats.rs`; hook events should only call stats recording from `src/hooks/events.rs`, not derive business counters in the UI layer.
 - Keep the hook server small and synchronous; HTTP parsing stays in `src/hooks/server.rs`, while Claude event semantics belong in `src/hooks/events.rs`.
 - Keep quota field compatibility logic centralized in `src/hooks/quota.rs`.
 - When editing Claude settings, merge only claudie-managed hook/env fields and preserve unrelated user configuration.
@@ -251,4 +259,4 @@ For UI, hook, permission, settings, or proxy behavior changes, also run manually
 cargo run --release
 ```
 
-Check that the pet window position is restored after exit, the right-click menu works, Basic/Pomodoro/LLM Profiles tabs render correctly, GIF assets load, `POST /hook` updates state, permission/choice cards work, and the local LLM proxy plus `OpenAI body` forwarding work when relevant.
+Check that the pet window position is restored after exit, the right-click menu works and can quickly switch LLM Profiles, Basic/Pomodoro/LLM Profiles/Stats tabs render correctly, left-click plays an interaction animation while dragging still works, GIF assets load, `POST /hook` updates state, permission/choice cards work, Stats bar charts do not overflow their panels, and the local LLM proxy plus `OpenAI body` forwarding work when relevant.

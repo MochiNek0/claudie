@@ -31,8 +31,9 @@ cargo run --release -- --port 17387
 
 - `src/main.rs`: CLI flags, app bootstrap, shared `AppState`, hook/profile startup, and platform entrypoint.
 - `src/app/`: core application domain.
-- `src/app/mod.rs`: `AppState`, `PetMood`, sessions, quota stats, pending permissions/choices, pomodoro integration, and mood decay.
+- `src/app/mod.rs`: `AppState`, `PetMood`, sessions, quota stats, pending permissions/choices, pomodoro integration, daily stats integration, and mood decay.
 - `src/app/pomodoro.rs`: lightweight focus timer state and transitions.
+- `src/app/stats.rs`: daily session ledger persistence, local date bucketing, tool classification, and token usage counters.
 - `src/hooks/mod.rs`: hook subsystem facade and public re-exports.
 - `src/hooks/events.rs`: Claude Code event processing, mood transitions, permission/choice waiting, and hook responses.
 - `src/hooks/quota.rs`: token, model, provider, and quota extraction from hook payloads and transcript files.
@@ -47,7 +48,7 @@ cargo run --release -- --port 17387
 - `src/ui/theme.rs`: shared colors, radii, and typography tokens for the settings panel and overlay popups.
 - `src/ui/window/mod.rs`: main transparent always-on-top pet window, hotkeys, context menu, clicks, scaling, and position persistence.
 - `src/ui/window/render.rs`: main window render snapshot, HUD, pet drawing, permission/choice overlay detail, and drawing helpers.
-- `src/ui/slint_views.rs`: Slint component declarations for the Settings window and prompt popup.
+- `src/ui/slint_views.rs`: Slint component declarations for the Settings window, Stats charts, and prompt popup.
 - `src/ui/settings_panel/`: Slint Settings window lifecycle, callback wiring, tab-specific controller behavior, and AppState synchronization.
 - `src/ui/prompt_popup.rs`: Slint permission and choice popup lifecycle, snapshots, and callbacks.
 - `src/ui/window_icon.rs`: Slint/Winit/Win32 icon bridge for auxiliary windows.
@@ -63,6 +64,7 @@ cargo run --release -- --port 17387
 
 - `%USERPROFILE%\.claudie\settings.json`: pet asset directory, GIF directory, animation mapping, scale, sleep timeout, window position, and pomodoro settings.
 - `%USERPROFILE%\.claudie\llm_profiles.json`: saved LLM provider/profile definitions, including OpenAI proxy extra request body fields.
+- `%USERPROFILE%\.claudie\daily_stats.json`: daily session ledger counters, including prompts, tool categories, permissions/choices, errors, completed focus sessions, and token usage breakdown.
 - `%USERPROFILE%\.claudie\proxy_summaries.json`: legacy (single-block) OpenAI proxy summary cache.
 - `%USERPROFILE%\.claudie\proxy_cache\`: OpenAI proxy cache directory, containing:
   - `summaries/`: single-block summary cache JSON files.
@@ -76,8 +78,11 @@ cargo run --release -- --port 17387
 - `AppState` is the central mutable model. Access it through `Arc<Mutex<AppState>>` or `APP_STATE`.
 - Normal runtime startup launches the hook server, launches the OpenAI proxy, then ensures Claude Code hooks point at the selected port. On Windows, exiting the UI calls hook cleanup.
 - Mood transitions should go through `AppState::set_mood`, `AppState::set_resting_mood`, `AppState::start_tool_activity`, `AppState::finish_tool_activity`, or `AppState::decay_mood` so activity timestamps and renderer priority stay correct.
+- Short left-click pet interactions should use `AppState::interact_with_pet`; drag behavior belongs in `src/ui/window/mod.rs` and should preserve click-vs-drag threshold handling.
+- Pomodoro focus uses the `PetMood::Pomodoro` animation, while direct pet interactions use `PetMood::Wave` or `PetMood::Stretch`.
 - Permission requests are represented by `PendingPermission` and completed through `decide_current_permission`.
 - Choice-style requests are represented by `PendingChoice`; completed through `submit_current_choice` or `deny_current_choice` in `src/hooks/events.rs`.
+- Daily stats should be recorded through `AppState` methods and stored by `src/app/stats.rs`; do not compute hook-derived business counters in Slint/UI code.
 - The hook server should stay small and synchronous. Put Claude-event semantics in `src/hooks/events.rs`, not in the HTTP parser.
 - The OpenAI proxy should remain a small local compatibility layer. Keep request/response format conversion and upstream capability handling in `src/proxy.rs`, keep context optimization and summary caching in `src/proxy_optimizer.rs`, and keep profile persistence/env behavior and OpenAI extra body validation in `src/settings/mod.rs`.
 - Keep OpenAI `parallel_tool_calls` enabled by default when tools are present. Modern OpenAI-compatible models handle independent tool calls correctly, and batching (e.g. reading multiple files, staging multiple paths in one git command) matches how Claude Code expects to operate. Users can still set `{"parallel_tool_calls": false}` in `OpenAI body` for older/smaller models that misbehave.
@@ -97,6 +102,7 @@ cargo run --release -- --port 17387
   - HTTP parsing belongs in `src/hooks/server.rs`; Claude-event semantics belong in `src/hooks/events.rs`.
   - Hook settings merge/install/uninstall belongs in `src/hooks/claude_settings.rs`.
   - Quota and token field compatibility logic belongs in `src/hooks/quota.rs`.
+  - Daily stats storage, local date grouping, tool classification, and token counter aggregation belong in `src/app/stats.rs`; hook event call sites belong in `src/hooks/events.rs`; chart display belongs in the Settings controller/Slint view.
   - OpenAI proxy transport and Anthropic/OpenAI conversion belong in `src/proxy.rs`; context optimization, long-text compression, chunked summary caching belong in `src/proxy_optimizer.rs`.
   - LLM profile serialization, OpenAI extra body parsing, and Claude env merging belong in `src/settings/mod.rs`.
   - Main pet rendering and permission/choice overlays belong in `src/ui/window/render.rs`; main window events, menu commands, and position persistence belong in `src/ui/window/mod.rs`.
@@ -106,7 +112,7 @@ cargo run --release -- --port 17387
   - Shared domain state belongs in `src/app/mod.rs`; pomodoro domain rules belong in sibling files under `src/app/`.
 - Avoid introducing new dependencies unless they remove real complexity. This app is deliberately lightweight.
 - Be careful with `~/.claude/settings.json`; preserve unrelated user settings and merge only the managed hook/env fields.
-- Keep pet resources lightweight: prefer one GIF per mood in `assets/claudie/`.
+- Keep pet resources lightweight: prefer one GIF per mood in `assets/claudie/`; current bundled interaction/focus moods include `pomodoro.gif`, `wave.gif`, and `stretch.gif`.
 - Prefer focused changes over broad refactors because Win32 regressions can be subtle.
 
 ## Verification Checklist
@@ -130,9 +136,11 @@ Then verify:
 
 - The pet window opens without a console in release builds and restores its last saved position.
 - Right-click menu opens Settings, Pomodoro actions, and Exit.
-- Settings tabs switch cleanly between Basic, Pomodoro, and LLM Profiles without leaving the tab outline on Basic.
+- Settings tabs switch cleanly between Basic, Pomodoro, LLM Profiles, and Stats without leaving stale tab state.
 - GIF resources load from settings or bundled assets.
+- Left-click on the pet plays an interaction animation, while click-and-move still drags the window and shows a hand cursor over the pet.
 - `POST /hook` updates mood/events.
 - Permission requests show Allow, Always, and Deny controls.
 - Choice requests show selectable options plus Submit and Cancel controls.
-- LLM Profiles can save/use/import profiles, OpenAI-format profiles route Claude Code through `http://127.0.0.1:17388`, OpenAI extra body fields are forwarded to upstream chat completions requests, and long proxy conversations are compressed or summarized without losing the newest messages.
+- LLM Profiles can save/use/import profiles and switch quickly from the right-click menu; OpenAI-format profiles route Claude Code through `http://127.0.0.1:17388`, OpenAI extra body fields are forwarded to upstream chat completions requests, and long proxy conversations are compressed or summarized without losing the newest messages.
+- Stats records daily counters and token usage in `%USERPROFILE%\.claudie\daily_stats.json`, and the Settings Stats tab renders today and recent activity/token bar charts without overflowing its panels.
