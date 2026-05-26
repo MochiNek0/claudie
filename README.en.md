@@ -18,7 +18,7 @@ claudie is inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerz
   |-------|----------|
   | `SessionStart` / `SessionResume` | Return to idle |
   | `UserPromptSubmit` | Thinking |
-  | `PreToolUse` | Start tool (e.g. Write→typing, Bash→building) |
+  | `PreToolUse` | Start tool, such as Write -> typing, Bash -> building, Read/Grep/Glob -> search |
   | `PostToolUse` | Finish tool |
   | `PostToolBatch` | Batch complete, trigger quota snapshot |
   | `PostToolUseFailure` / `StopFailure` / `PermissionDenied` | Error state |
@@ -43,7 +43,7 @@ claudie is inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerz
 - **Mood-to-GIF mapping**: Configurable GIF file for each mood state.
 - **Settings panel**: Basic, Pomodoro, and LLM Profiles tabs with a unified native theme.
 - **LLM Profiles**: Save LLM providers/profiles, writes the active profile into Claude Code settings, and configures extra request body fields for the OpenAI proxy.
-- **OpenAI-compatible proxy**: Converts Claude Code Anthropic Messages requests to OpenAI Chat Completions API, with tool call format conversion, parallel tool control, context compression, and history summarization.
+- **OpenAI-compatible proxy**: Converts Claude Code Anthropic Messages requests to OpenAI Chat Completions API, with tool call format conversion, parallel tool control, context compression, history summarization, and capability caching.
 - **Cross-platform**: Windows has the full desktop UI; macOS / Linux currently run only headless hook and proxy servers without the desktop interaction UI.
 
 ## Quick Start
@@ -111,7 +111,7 @@ The proxy currently implements `POST /v1/messages`, `POST /v1/messages/count_tok
 
 When tools are present, the proxy sends `parallel_tool_calls=true` upstream by default so the model can batch independent actions (read several files, stage multiple paths in one git command) the way native Claude Code expects, cutting down on serial round-trips and duplicated token overhead. For older or smaller upstream models that misbehave under concurrent tool calls, set `{"parallel_tool_calls": false}` explicitly in `OpenAI body` to switch back to sequential. The proxy also injects a short (~80 token) compat prompt telling the model to treat tool-result messages as observations from prior calls and to re-read before retrying after a failed edit; disable it with `CLAUDIE_PROXY_COMPAT_PROMPT=0` if you don't want it.
 
-OpenAI proxy context optimization is enabled by default. claudie compresses very long tool results and text before forwarding requests, and when the estimated input grows beyond the default threshold it keeps recent messages and summarizes older history in chunks. Each chunk is independently summarized and cached under `%USERPROFILE%\.claudie\proxy_cache\` in `summaries/` and `chunks/` directories. The cache stores summary text only, not API keys or full original request bodies.
+OpenAI proxy context optimization is enabled by default. claudie compresses very long tool results and text before forwarding requests, and when the estimated input grows beyond the default threshold it keeps recent messages and summarizes older history in chunks. Each chunk is independently summarized and cached under `%USERPROFILE%\.claudie\proxy_cache\` in `summaries/`, `chunks/`, and `capabilities/` directories. The cache stores summary text or upstream capability probe results only, not API keys or full original request bodies.
 
 You can tune or disable this behavior from a profile's `Extra env`:
 
@@ -132,6 +132,8 @@ CLAUDIE_PROXY_CHUNK_SUMMARY=1
 CLAUDIE_PROXY_CHUNK_SIZE_MESSAGES=8
 CLAUDIE_PROXY_CHUNK_CACHE_TTL_HOURS=168
 CLAUDIE_PROXY_CHUNK_CACHE_MAX_ENTRIES=200
+CLAUDIE_PROXY_CAPABILITY_CACHE_TTL_HOURS=168
+CLAUDIE_PROXY_CAPABILITY_CACHE_MAX_ENTRIES=200
 ```
 
 By default summaries are generated locally with extractive compaction (`CLAUDIE_PROXY_SUMMARY_MODE=local`) so expensive models are not called just to summarize. Set `CLAUDIE_PROXY_SUMMARY_MODE=model` if you prefer an upstream model-generated summary. If that summary request fails, claudie still forwards the request with long-content compression applied. Set `CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=0` to disable the completion budget cap.
@@ -148,20 +150,30 @@ src/
   notifier.rs              Platform notification / message-box wrapper
   util.rs                  Arg parsing, path, text shortening, and UTF-16 helpers
   app/                     AppState, permission requests, choice requests, Pomodoro domain rules
+    mod.rs                 AppState, PetMood, sessions, quota, pending interactions, mood decay
+    pomodoro.rs            Lightweight Pomodoro state and transitions
   hooks/                   Claude Code hook server, event semantics, quota extraction, settings merge
+    claude_settings.rs     Hook settings generation, installation, uninstall, and merge
+    events.rs              Claude Code event handling, permission waiting, and choice responses
+    quota.rs               Token, model, provider, and quota compatibility extraction
+    server.rs              Minimal synchronous HTTP server accepting POST /hook
   proxy.rs                 Local Anthropic Messages -> OpenAI Chat Completions proxy
   proxy_optimizer.rs       OpenAI proxy long-context compression, chunked history summaries, and summary cache
   settings/                User settings, LLM profiles, Claude env integration, JSON storage helpers
+    mod.rs                 Persisted settings, profile database, OpenAI body parsing, path normalization
+    storage.rs             BOM-tolerant reads and pretty JSON writes
   ui/
-    gif_animation.rs       GIF loading, frame delay reading, and GDI+ drawing
+    gif_animation.rs       GIF loading, frame delay reading, mood transitions, and GDI+ drawing
     theme.rs               Shared visual tokens for the Settings panel and permission/choice overlays
     window/                Main pet window
       mod.rs               Window lifecycle, hotkeys, menu, click handling, position persistence
       render.rs            HUD, pet, permission overlay, and choice card drawing
-    settings_panel/        Native Settings panel
-      mod.rs               Panel lifecycle, tab switching, save/refresh logic
-      controls.rs          Win32 control creation, text, fonts, message box helpers
-      paint.rs             Settings panel background, tabs, and field drawing
+    slint_views.rs         Slint component declarations for Settings and Prompt windows
+    settings_panel/        Slint Settings panel lifecycle, callbacks, and controller logic
+      controller.rs        Shared SettingsController state and sync helpers
+      controller/          Basic, Pomodoro, and LLM Profiles tab behavior
+    prompt_popup.rs        Slint permission/choice popup snapshots and callbacks
+    window_icon.rs         Slint/Winit/Win32 auxiliary window icon bridge
 ```
 
 Other directories:
@@ -178,6 +190,7 @@ Other directories:
 - `%USERPROFILE%\.claudie\proxy_cache\`: OpenAI proxy cache directory, containing:
   - `summaries/`: single-block summary cache JSON files.
   - `chunks/`: chunked summary cache JSON files, each chunk independently cached.
+  - `capabilities/`: upstream model tool-history compatibility cache.
 - `%USERPROFILE%\.claude\settings.json`: Claude Code hook settings and claudie-managed LLM env values.
 - `%USERPROFILE%\.claude\settings.json.claudie.bak`: one-time backup created before the first Claude settings modification.
 
@@ -191,7 +204,7 @@ assets/claudie/
   thinking.gif
   typing.gif
   building.gif
-  permission.gif
+  search.gif
   happy.gif
   error.gif
   sleeping.gif
@@ -211,7 +224,7 @@ The Settings panel can adjust the GIF directory and the file name mapped to each
 - Do not do potentially slow network or filesystem work on the UI thread.
 - Add main-window visual elements in `src/ui/window/render.rs`; add menus, hotkeys, and mouse interactions in `src/ui/window/mod.rs`.
 - Keep shared visual tokens for the Settings panel and permission/choice overlays in `src/ui/theme.rs`.
-- For Settings panel fields, keep window messages and save behavior in `src/ui/settings_panel/mod.rs`, control helpers in `controls.rs`, and background/field decoration in `paint.rs`.
+- For Settings panel fields, keep Slint component declarations in `src/ui/slint_views.rs`, callback wiring in `src/ui/settings_panel/mod.rs`, and save/refresh behavior in `src/ui/settings_panel/controller/`.
 
 ## Packaging
 
@@ -229,6 +242,8 @@ Before submitting changes, run at least:
 cargo fmt
 cargo check
 ```
+
+Run `cargo test` when touching hook settings, quota extraction, LLM profile logic, proxy conversion, or pure domain rules.
 
 For UI, hook, permission, settings, or proxy behavior changes, also run manually:
 

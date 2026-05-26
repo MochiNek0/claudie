@@ -17,7 +17,7 @@ impl SettingsController {
         ui.set_anim_thinking(shared(&self.settings.animations.thinking));
         ui.set_anim_typing(shared(&self.settings.animations.typing));
         ui.set_anim_building(shared(&self.settings.animations.building));
-        ui.set_anim_permission(shared(&self.settings.animations.permission));
+        ui.set_anim_search(shared(&self.settings.animations.search));
         ui.set_anim_happy(shared(&self.settings.animations.happy));
         ui.set_anim_error(shared(&self.settings.animations.error));
         ui.set_anim_sleeping(shared(&self.settings.animations.sleeping));
@@ -41,7 +41,7 @@ impl SettingsController {
             thinking: ui.get_anim_thinking().to_string(),
             typing: ui.get_anim_typing().to_string(),
             building: ui.get_anim_building().to_string(),
-            permission: ui.get_anim_permission().to_string(),
+            search: ui.get_anim_search().to_string(),
             happy: ui.get_anim_happy().to_string(),
             error: ui.get_anim_error().to_string(),
             sleeping: ui.get_anim_sleeping().to_string(),

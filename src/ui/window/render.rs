@@ -327,7 +327,7 @@ fn scaled_pet_rect(scale_percent: u32) -> (i32, i32, i32, i32) {
 
 fn draw_pet_fallback(hdc: HDC, mood: PetMood, x: i32, y: i32, w: i32, h: i32) {
     let body = match mood {
-        PetMood::Permission => rgb(245, 174, 64),
+        PetMood::Search => rgb(245, 174, 64),
         PetMood::Error => rgb(222, 86, 80),
         PetMood::Happy => rgb(72, 173, 121),
         PetMood::Building => rgb(84, 130, 200),
@@ -361,8 +361,11 @@ fn draw_pet_fallback(hdc: HDC, mood: PetMood, x: i32, y: i32, w: i32, h: i32) {
         PetMood::Error => {
             line(hdc, px(57), py(68), px(83), py(68), shade);
         }
-        PetMood::Permission => {
-            filled_rect(hdc, px(61), py(66), pw(24), ph(8), shade);
+        PetMood::Search => {
+            line(hdc, px(53), py(58), px(74), py(58), shade);
+            line(hdc, px(74), py(58), px(91), py(75), shade);
+            filled_ellipse(hdc, px(46), py(45), pw(26), ph(26), rgb(250, 253, 255));
+            line(hdc, px(50), py(58), px(67), py(58), shade);
         }
         PetMood::Sleeping => {
             line(hdc, px(44), py(51), px(55), py(51), shade);

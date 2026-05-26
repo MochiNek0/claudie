@@ -18,6 +18,7 @@ cargo run --release
 cargo run --release -- --install-claude-hooks
 cargo run --release -- --uninstall-claude-hooks
 cargo run --release -- --print-claude-settings
+cargo run --release -- --install-claude-hooks --quiet
 ```
 
 Use `--port <number>` after the binary args to change the hook port:
@@ -66,6 +67,7 @@ cargo run --release -- --port 17387
 - `%USERPROFILE%\.claudie\proxy_cache\`: OpenAI proxy cache directory, containing:
   - `summaries/`: single-block summary cache JSON files.
   - `chunks/`: chunked summary cache JSON files, each independently cached.
+  - `capabilities/`: upstream model tool-history compatibility cache.
 - `%USERPROFILE%\.claude\settings.json`: Claude Code hook settings and managed LLM env values.
 - `%USERPROFILE%\.claude\settings.json.claudie.bak`: one-time backup created before modifying Claude settings.
 
@@ -77,13 +79,13 @@ cargo run --release -- --port 17387
 - Permission requests are represented by `PendingPermission` and completed through `decide_current_permission`.
 - Choice-style requests are represented by `PendingChoice`; completed through `submit_current_choice` or `deny_current_choice` in `src/hooks/events.rs`.
 - The hook server should stay small and synchronous. Put Claude-event semantics in `src/hooks/events.rs`, not in the HTTP parser.
-- The OpenAI proxy should remain a small local compatibility layer. Keep request/response format conversion in `src/proxy.rs`, keep context optimization and summary caching in `src/proxy_optimizer.rs`, and keep profile persistence/env behavior and OpenAI extra body validation in `src/settings/mod.rs`.
+- The OpenAI proxy should remain a small local compatibility layer. Keep request/response format conversion and upstream capability handling in `src/proxy.rs`, keep context optimization and summary caching in `src/proxy_optimizer.rs`, and keep profile persistence/env behavior and OpenAI extra body validation in `src/settings/mod.rs`.
 - Keep OpenAI `parallel_tool_calls` enabled by default when tools are present. Modern OpenAI-compatible models handle independent tool calls correctly, and batching (e.g. reading multiple files, staging multiple paths in one git command) matches how Claude Code expects to operate. Users can still set `{"parallel_tool_calls": false}` in `OpenAI body` for older/smaller models that misbehave.
 - UI code uses raw Win32 handles and unsafe calls. Keep unsafe usage close to Win32 boundaries and prefer small helper functions for repeated patterns.
+- Auxiliary settings and prompt windows use Slint declarations in `src/ui/slint_views.rs`; keep Rust callback/state logic outside the `slint::slint!` block.
 - Main pet window behavior belongs in `src/ui/window/mod.rs`; main pet drawing and permission/choice overlays belong in `src/ui/window/render.rs`.
 - Shared visual tokens for Settings and overlay chrome belong in `src/ui/theme.rs`; keep color, radius, and font changes centralized there.
 - Settings panel lifecycle and callback wiring belong in `src/ui/settings_panel/mod.rs`; Settings save/apply behavior belongs in tab-focused files under `src/ui/settings_panel/controller/`.
-- Slint component declarations belong in `src/ui/slint_views.rs`; keep Rust callback/state logic out of the `slint::slint!` block.
 - Use `util::wide` for strings passed to Win32 APIs.
 - Do not block the UI thread with network or filesystem work that could take noticeable time.
 - When settings change, update both persisted files and in-memory `AppState` so runtime behavior reflects changes immediately.

@@ -311,7 +311,7 @@ slint::slint! {
         in-out property <string> anim_thinking;
         in-out property <string> anim_typing;
         in-out property <string> anim_building;
-        in-out property <string> anim_permission;
+        in-out property <string> anim_search;
         in-out property <string> anim_happy;
         in-out property <string> anim_error;
         in-out property <string> anim_sleeping;
@@ -432,8 +432,8 @@ slint::slint! {
             Text { x: 612px; y: 228px; text: "Building"; color: #6b7280; font-size: 12px; }
             MonoLineEdit { x: 612px; y: 248px; width: 182px; height: 32px; text <=> root.anim_building; }
 
-            Text { x: 12px; y: 296px; text: "Permission"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 12px; y: 316px; width: 182px; height: 32px; text <=> root.anim_permission; }
+            Text { x: 12px; y: 296px; text: "Search"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 12px; y: 316px; width: 182px; height: 32px; text <=> root.anim_search; }
             Text { x: 212px; y: 296px; text: "Happy"; color: #6b7280; font-size: 12px; }
             MonoLineEdit { x: 212px; y: 316px; width: 182px; height: 32px; text <=> root.anim_happy; }
             Text { x: 412px; y: 296px; text: "Error"; color: #6b7280; font-size: 12px; }

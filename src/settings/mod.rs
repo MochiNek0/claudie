@@ -44,7 +44,8 @@ pub(crate) struct AnimationSettings {
     pub(crate) thinking: String,
     pub(crate) typing: String,
     pub(crate) building: String,
-    pub(crate) permission: String,
+    #[serde(alias = "permission")]
+    pub(crate) search: String,
     pub(crate) happy: String,
     pub(crate) error: String,
     pub(crate) sleeping: String,
@@ -95,7 +96,7 @@ impl Default for AnimationSettings {
             thinking: "thinking".to_string(),
             typing: "typing".to_string(),
             building: "building".to_string(),
-            permission: "permission".to_string(),
+            search: "search".to_string(),
             happy: "happy".to_string(),
             error: "error".to_string(),
             sleeping: "sleeping".to_string(),
@@ -130,7 +131,7 @@ impl UserSettings {
             PetMood::Thinking => &self.animations.thinking,
             PetMood::Typing => &self.animations.typing,
             PetMood::Building => &self.animations.building,
-            PetMood::Permission => &self.animations.permission,
+            PetMood::Search => &self.animations.search,
             PetMood::Happy => &self.animations.happy,
             PetMood::Error => &self.animations.error,
             PetMood::Sleeping => &self.animations.sleeping,
@@ -145,7 +146,7 @@ impl UserSettings {
             PetMood::Thinking => self.animations.thinking = value,
             PetMood::Typing => self.animations.typing = value,
             PetMood::Building => self.animations.building = value,
-            PetMood::Permission => self.animations.permission = value,
+            PetMood::Search => self.animations.search = value,
             PetMood::Happy => self.animations.happy = value,
             PetMood::Error => self.animations.error = value,
             PetMood::Sleeping => self.animations.sleeping = value,
@@ -394,6 +395,21 @@ fn normalize_user_settings(settings: &mut UserSettings) -> bool {
         changed = true;
     }
 
+    let legacy_search_animation = settings
+        .animations
+        .search
+        .trim()
+        .eq_ignore_ascii_case("permission")
+        || settings
+            .animations
+            .search
+            .trim()
+            .eq_ignore_ascii_case("permission.gif");
+    if legacy_search_animation && settings.gif_dir.trim() == DEFAULT_GIF_DIR {
+        settings.animations.search = "search".to_string();
+        changed = true;
+    }
+
     // If the persisted gif_dir doesn't actually contain the required GIFs
     // (e.g. left over from a previous build), reset it to the bundled default
     // so the panel surfaces the right path next time it loads.
@@ -402,6 +418,9 @@ fn normalize_user_settings(settings: &mut UserSettings) -> bool {
         && configured_gif_dir_strict(settings).is_none()
     {
         settings.gif_dir = DEFAULT_GIF_DIR.to_string();
+        if legacy_search_animation {
+            settings.animations.search = "search".to_string();
+        }
         changed = true;
     }
 
@@ -596,7 +615,7 @@ pub(crate) fn mood_rows() -> &'static [(PetMood, &'static str)] {
         (PetMood::Thinking, "Thinking"),
         (PetMood::Typing, "Typing"),
         (PetMood::Building, "Building"),
-        (PetMood::Permission, "Permission"),
+        (PetMood::Search, "Search"),
         (PetMood::Happy, "Happy"),
         (PetMood::Error, "Error"),
         (PetMood::Sleeping, "Sleeping"),
@@ -1061,6 +1080,29 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![OFFICIAL_LLM_PROFILE_ID, "custom"]
         );
+    }
+
+    #[test]
+    fn legacy_permission_animation_becomes_search_for_default_assets() {
+        let mut settings: UserSettings = serde_json::from_value(serde_json::json!({
+            "gif_dir": DEFAULT_GIF_DIR,
+            "animations": {
+                "idle": "idle",
+                "thinking": "thinking",
+                "typing": "typing",
+                "building": "building",
+                "permission": "permission",
+                "happy": "happy",
+                "error": "error",
+                "sleeping": "sleeping",
+                "subagent": "subagent"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(settings.animations.search, "permission");
+        assert!(normalize_user_settings(&mut settings));
+        assert_eq!(settings.animations.search, "search");
     }
 
     #[test]

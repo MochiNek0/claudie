@@ -22,7 +22,7 @@ pub(crate) enum PetMood {
     Thinking,
     Typing,
     Building,
-    Permission,
+    Search,
     Happy,
     Error,
     Sleeping,
@@ -42,7 +42,7 @@ impl PetMood {
             Self::Thinking => "thinking",
             Self::Typing => "typing",
             Self::Building => "building",
-            Self::Permission => "permission",
+            Self::Search => "search",
             Self::Happy => "happy",
             Self::Error => "error",
             Self::Sleeping => "sleeping",
@@ -53,15 +53,15 @@ impl PetMood {
     pub(crate) fn is_active_work(self) -> bool {
         matches!(
             self,
-            Self::Thinking | Self::Typing | Self::Building | Self::Subagent
+            Self::Thinking | Self::Typing | Self::Building | Self::Search | Self::Subagent
         )
     }
 
     pub(crate) fn priority(self) -> u8 {
         match self {
-            Self::Permission => 100,
             Self::Error => 90,
             Self::Building | Self::Typing => 80,
+            Self::Search => 70,
             Self::Subagent => 65,
             Self::Thinking => 60,
             Self::Happy => 40,
@@ -247,8 +247,8 @@ impl AppState {
     pub(crate) fn set_mood(&mut self, mood: PetMood) {
         self.last_activity = Instant::now();
         self.resting_mood = mood;
-        self.resting_interrupts_visual = matches!(mood, PetMood::Permission | PetMood::Error);
-        if matches!(mood, PetMood::Permission | PetMood::Error) {
+        self.resting_interrupts_visual = matches!(mood, PetMood::Error);
+        if matches!(mood, PetMood::Error) {
             self.force_visual_mood(mood);
             return;
         }
@@ -422,7 +422,7 @@ impl AppState {
         if target == self.mood {
             return true;
         }
-        if matches!(target, PetMood::Permission | PetMood::Error) {
+        if matches!(target, PetMood::Error) {
             return true;
         }
         if self.resting_interrupts_visual && target == self.resting_mood {
@@ -581,7 +581,7 @@ impl AppState {
 fn min_visible_for(mood: PetMood) -> Duration {
     match mood {
         PetMood::Typing | PetMood::Building => WORK_MIN_VISIBLE,
-        PetMood::Thinking => THINKING_MIN_VISIBLE,
+        PetMood::Thinking | PetMood::Search => THINKING_MIN_VISIBLE,
         PetMood::Subagent => SUBAGENT_MIN_VISIBLE,
         PetMood::Happy => HAPPY_MIN_VISIBLE,
         _ => Duration::ZERO,

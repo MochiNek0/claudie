@@ -799,8 +799,8 @@ fn mood_for_tool(tool_name: &str) -> PetMood {
         "task" => PetMood::Thinking,
         "bash" | "shell" => PetMood::Building,
         "edit" | "multiedit" | "write" | "notebookedit" => PetMood::Typing,
-        "read" | "grep" | "glob" | "ls" | "webfetch" | "websearch" | "todoread" | "todowrite"
-        | "askuserquestion" | "exitplanmode" => PetMood::Thinking,
+        "read" | "grep" | "glob" | "ls" | "webfetch" | "websearch" => PetMood::Search,
+        "todoread" | "todowrite" | "askuserquestion" | "exitplanmode" => PetMood::Thinking,
         _ if normalized.contains("edit")
             || normalized.contains("write")
             || normalized.contains("patch")
@@ -814,6 +814,17 @@ fn mood_for_tool(tool_name: &str) -> PetMood {
             || normalized.contains("command") =>
         {
             PetMood::Building
+        }
+        _ if normalized.contains("read")
+            || normalized.contains("grep")
+            || normalized.contains("glob")
+            || normalized.contains("search")
+            || normalized.contains("find")
+            || normalized.contains("lookup")
+            || normalized.contains("fetch")
+            || normalized.contains("list") =>
+        {
+            PetMood::Search
         }
         _ => PetMood::Thinking,
     }
@@ -834,6 +845,9 @@ fn mood_for_tool_use(tool_name: &str, payload: &Value) -> PetMood {
     if looks_like_subagent_task(&task_text) {
         return PetMood::Subagent;
     }
+    if looks_like_search_task(&task_text) {
+        return PetMood::Search;
+    }
     PetMood::Thinking
 }
 
@@ -843,7 +857,7 @@ fn permission_visual_mood(payload: &Value, fallback_tool_name: &str) -> PetMood 
         .unwrap_or_else(|| fallback_tool_name.to_string());
     let mood = mood_for_tool_use(&tool_name, payload);
     match mood {
-        PetMood::Typing | PetMood::Building => mood,
+        PetMood::Typing | PetMood::Building | PetMood::Search => mood,
         _ => PetMood::Thinking,
     }
 }
@@ -954,21 +968,36 @@ fn looks_like_subagent_task(text: &str) -> bool {
         "\u{4ee3}\u{7406}",
         "\u{59d4}\u{6d3e}",
         "\u{5e76}\u{884c}",
-        "\u{7814}\u{7a76}",
-        "\u{5206}\u{6790}",
-        "\u{641c}\u{7d22}",
-        "\u{8c03}\u{67e5}",
         "\u{89c4}\u{5212}",
         "subagent",
         "agent",
         "delegate",
         "parallel",
-        "research",
         "analyze",
         "analyse",
-        "search",
-        "investigate",
         "planning",
+    ]
+    .into_iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn looks_like_search_task(text: &str) -> bool {
+    [
+        "\u{67e5}\u{627e}",
+        "\u{641c}\u{7d22}",
+        "\u{641c}\u{5bfb}",
+        "\u{68c0}\u{7d22}",
+        "\u{8c03}\u{67e5}",
+        "\u{7814}\u{7a76}",
+        "search",
+        "find",
+        "grep",
+        "glob",
+        "lookup",
+        "fetch",
+        "read",
+        "research",
+        "investigate",
     ]
     .into_iter()
     .any(|needle| text.contains(needle))
@@ -990,7 +1019,12 @@ mod tests {
         );
         assert_eq!(mood_for_tool("shell_command"), PetMood::Building);
         assert_eq!(mood_for_tool("agent_worker"), PetMood::Thinking);
-        assert_eq!(mood_for_tool("Read"), PetMood::Thinking);
+        assert_eq!(mood_for_tool("Read"), PetMood::Search);
+        assert_eq!(mood_for_tool("Grep"), PetMood::Search);
+        assert_eq!(
+            mood_for_tool("mcp__filesystem__search_files"),
+            PetMood::Search
+        );
         assert_eq!(mood_for_tool("AskUserQuestion"), PetMood::Thinking);
     }
 
@@ -1007,6 +1041,18 @@ mod tests {
         assert_eq!(
             hook_activity("PreToolUse", "Task", &json!({})),
             Some(HookActivity::StartTool(PetMood::Thinking))
+        );
+        assert_eq!(
+            hook_activity(
+                "PreToolUse",
+                "Task",
+                &json!({
+                    "tool_input": {
+                        "description": "Research and find references"
+                    }
+                })
+            ),
+            Some(HookActivity::StartTool(PetMood::Search))
         );
         assert_eq!(
             hook_activity(
@@ -1059,7 +1105,7 @@ mod tests {
         );
         assert_eq!(
             permission_visual_mood(&json!({ "tool_name": "Read" }), ""),
-            PetMood::Thinking
+            PetMood::Search
         );
         assert_eq!(
             permission_visual_mood(&json!({ "tool_name": "UnknownTool" }), ""),
@@ -1068,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_permission_does_not_force_permission_gif() {
+    fn pending_permission_keeps_tool_specific_visual() {
         let mut state = AppState::new();
         state.pending_permissions.push_back(PendingPermission {
             id: 1,
@@ -1267,7 +1313,7 @@ mod tests {
     }
 
     #[test]
-    fn permission_interrupts_work_and_returns_to_active_tool() {
+    fn error_interrupts_work_and_returns_to_active_tool() {
         let mut state = AppState::new();
         let start_payload = json!({
             "session_id": "s1",
@@ -1281,8 +1327,8 @@ mod tests {
         );
         assert_eq!(state.mood, PetMood::Typing);
 
-        state.set_mood(PetMood::Permission);
-        assert_eq!(state.mood, PetMood::Permission);
+        state.set_mood(PetMood::Error);
+        assert_eq!(state.mood, PetMood::Error);
         state.set_resting_mood(PetMood::Happy, false);
         assert_eq!(state.mood, PetMood::Typing);
     }

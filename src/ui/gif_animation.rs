@@ -23,7 +23,7 @@ const MOODS: &[PetMood] = &[
     PetMood::Thinking,
     PetMood::Typing,
     PetMood::Building,
-    PetMood::Permission,
+    PetMood::Search,
     PetMood::Happy,
     PetMood::Error,
     PetMood::Sleeping,
