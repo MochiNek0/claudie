@@ -53,3 +53,5 @@ pub(crate) const MENU_POMODORO_START_ID: usize = 1002;
 pub(crate) const MENU_POMODORO_STOP_ID: usize = 1003;
 pub(crate) const MENU_POMODORO_PAUSE_RESUME_ID: usize = 1006;
 pub(crate) const MENU_POMODORO_SKIP_ID: usize = 1007;
+pub(crate) const MENU_LLM_PROFILE_BASE_ID: usize = 1100;
+pub(crate) const MENU_LLM_PROFILE_MAX_ITEMS: usize = 24;

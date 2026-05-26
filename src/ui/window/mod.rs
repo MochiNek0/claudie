@@ -1,6 +1,6 @@
 mod render;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 
 use render::{RenderState, fill_rect, render_permission_overlay, render_scene, snapshot_state};
@@ -13,36 +13,45 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetLastInputInfo, LASTINPUTINFO, MOD_CONTROL, MOD_SHIFT, RegisterHotKey, ReleaseCapture,
-    UnregisterHotKey,
+    SetCapture, UnregisterHotKey,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GWLP_USERDATA, GetClientRect,
     GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HTCAPTION, HWND_TOPMOST,
-    IDC_ARROW, IDC_HAND, LWA_COLORKEY, LoadCursorW, MF_SEPARATOR, MF_STRING, RegisterClassW,
-    SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    SendMessageW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN,
-    TrackPopupMenu, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN,
-    WM_NCLBUTTONDOWN, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    IDC_ARROW, IDC_HAND, LWA_COLORKEY, LoadCursorW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    RegisterClassW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SendMessageW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TPM_TOPALIGN, TrackPopupMenu, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_VISIBLE,
 };
 
 use crate::app::pomodoro::PomodoroStatus;
-use crate::app::{AppState, PermissionDecision};
+use crate::app::{AppState, PermissionDecision, PetMood};
 use crate::config::*;
 use crate::globals::APP_STATE;
 use crate::hooks::{
     decide_current_permission, deny_current_choice, submit_current_choice,
     toggle_current_choice_option,
 };
-use crate::settings::{UserSettings, WindowPosition, load_user_settings, save_user_settings};
+use crate::settings::{
+    LlmProfile, UserSettings, WindowPosition, apply_llm_profile_to_claude,
+    ensure_claude_onboarding_complete, load_user_settings, save_llm_profile_db, save_user_settings,
+};
 use crate::ui::prompt_popup::{close_prompt_popup, sync_prompt_popup};
 use crate::ui::settings_panel::{close_settings_panel, show_settings_panel};
 use crate::util::wide;
 
 static CONTEXT_MENU_OPEN: AtomicBool = AtomicBool::new(false);
+static LEFT_BUTTON_CAPTURED: AtomicBool = AtomicBool::new(false);
+static LEFT_BUTTON_DRAGGING: AtomicBool = AtomicBool::new(false);
+static LEFT_BUTTON_DOWN_X: AtomicI32 = AtomicI32::new(0);
+static LEFT_BUTTON_DOWN_Y: AtomicI32 = AtomicI32::new(0);
+const CLICK_DRAG_THRESHOLD_PX: i32 = 6;
 
 pub(crate) unsafe fn run_window(port: u16) {
     let class_name = wide("ClaudieWindow");
@@ -179,15 +188,55 @@ unsafe extern "system" fn window_proc(
             if x < 0 || y < 0 {
                 return 0;
             }
+            LEFT_BUTTON_CAPTURED.store(true, Ordering::Relaxed);
+            LEFT_BUTTON_DRAGGING.store(false, Ordering::Relaxed);
+            LEFT_BUTTON_DOWN_X.store(x, Ordering::Relaxed);
+            LEFT_BUTTON_DOWN_Y.store(y, Ordering::Relaxed);
+            SetCapture(hwnd);
+            0
+        }
+        WM_MOUSEMOVE => {
+            if !LEFT_BUTTON_CAPTURED.load(Ordering::Relaxed)
+                || LEFT_BUTTON_DRAGGING.load(Ordering::Relaxed)
+            {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+            let (x, y) = base_point_from_client(
+                hwnd,
+                loword(lparam as u32) as i32,
+                hiword(lparam as u32) as i32,
+            );
+            let dx = x - LEFT_BUTTON_DOWN_X.load(Ordering::Relaxed);
+            let dy = y - LEFT_BUTTON_DOWN_Y.load(Ordering::Relaxed);
+            if dx.abs().max(dy.abs()) >= CLICK_DRAG_THRESHOLD_PX {
+                LEFT_BUTTON_DRAGGING.store(true, Ordering::Relaxed);
+                LEFT_BUTTON_CAPTURED.store(false, Ordering::Relaxed);
+                ReleaseCapture();
+                SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
+            }
+            0
+        }
+        WM_LBUTTONUP => {
+            let was_captured = LEFT_BUTTON_CAPTURED.swap(false, Ordering::Relaxed);
+            let was_dragging = LEFT_BUTTON_DRAGGING.swap(false, Ordering::Relaxed);
             ReleaseCapture();
-            SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
+            if was_captured && !was_dragging {
+                with_app_state(|state| state.interact_with_pet());
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
             0
         }
         WM_RBUTTONUP => {
             show_context_menu(hwnd);
             0
         }
-        WM_SETCURSOR => DefWindowProcW(hwnd, msg, wparam, lparam),
+        WM_SETCURSOR => {
+            if cursor_over_pet(hwnd) {
+                SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND));
+                return 1;
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_DESTROY => {
             persist_pet_window_position(hwnd);
             let overlay = overlay_hwnd(hwnd);
@@ -277,6 +326,21 @@ unsafe fn base_point_from_client(_hwnd: HWND, x: i32, y: i32) -> (i32, i32) {
         return (-1, -1);
     }
     (x, y)
+}
+
+unsafe fn cursor_over_pet(hwnd: HWND) -> bool {
+    let mut point = POINT { x: 0, y: 0 };
+    if GetCursorPos(&mut point) == 0 || ScreenToClient(hwnd, &mut point) == 0 {
+        return false;
+    }
+    let settings = current_user_settings();
+    let scale = settings.pet_scale_percent() as i32;
+    let pet_w = (PET_W * scale + 50) / 100;
+    let pet_h = (PET_H * scale + 50) / 100;
+    let center_x = PET_X + PET_W / 2;
+    let pet_x = center_x - pet_w / 2;
+    let pet_y = PET_Y + PET_H - pet_h;
+    point.x >= pet_x && point.x <= pet_x + pet_w && point.y >= pet_y && point.y <= pet_y + pet_h
 }
 
 unsafe extern "system" fn permission_overlay_proc(
@@ -390,6 +454,7 @@ unsafe fn show_context_menu(hwnd: HWND) {
 
     let settings_label = wide("Settings...");
     AppendMenuW(menu, MF_STRING, MENU_SETTINGS_ID, settings_label.as_ptr());
+    append_llm_profile_menu(menu);
     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
     let pomodoro_label = wide("Start Pomodoro");
     AppendMenuW(
@@ -433,13 +498,16 @@ unsafe fn show_context_menu(hwnd: HWND) {
         );
         CONTEXT_MENU_OPEN.store(false, Ordering::Relaxed);
         ensure_pet_topmost(hwnd);
-        if command as usize == MENU_SETTINGS_ID {
+        let command = command as usize;
+        if command == MENU_SETTINGS_ID {
             show_settings_panel(hwnd);
-        } else if command as usize == MENU_POMODORO_START_ID {
+        } else if let Some(index) = llm_profile_index_from_command(command) {
+            activate_llm_profile(index);
+        } else if command == MENU_POMODORO_START_ID {
             with_app_state(|state| state.start_pomodoro());
-        } else if command as usize == MENU_POMODORO_STOP_ID {
+        } else if command == MENU_POMODORO_STOP_ID {
             with_app_state(|state| state.stop_pomodoro());
-        } else if command as usize == MENU_POMODORO_PAUSE_RESUME_ID {
+        } else if command == MENU_POMODORO_PAUSE_RESUME_ID {
             with_app_state(|state| {
                 if state.pomodoro.status == PomodoroStatus::Paused {
                     state.resume_pomodoro();
@@ -447,14 +515,125 @@ unsafe fn show_context_menu(hwnd: HWND) {
                     state.pause_pomodoro();
                 }
             });
-        } else if command as usize == MENU_POMODORO_SKIP_ID {
+        } else if command == MENU_POMODORO_SKIP_ID {
             with_app_state(|state| state.skip_pomodoro());
-        } else if command as usize == MENU_EXIT_ID {
+        } else if command == MENU_EXIT_ID {
             DestroyWindow(hwnd);
         }
     }
 
     DestroyMenu(menu);
+}
+
+unsafe fn append_llm_profile_menu(menu: windows_sys::Win32::UI::WindowsAndMessaging::HMENU) {
+    let entries = llm_profile_menu_entries();
+    if entries.is_empty() {
+        return;
+    }
+    let profile_menu = CreatePopupMenu();
+    if profile_menu.is_null() {
+        return;
+    }
+
+    for (index, label, checked) in entries {
+        let label = wide(&label);
+        let flags = if checked {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING
+        };
+        AppendMenuW(
+            profile_menu,
+            flags,
+            MENU_LLM_PROFILE_BASE_ID + index,
+            label.as_ptr(),
+        );
+    }
+
+    let profile_label = wide("LLM Profile");
+    AppendMenuW(
+        menu,
+        MF_POPUP,
+        profile_menu as usize,
+        profile_label.as_ptr(),
+    );
+}
+
+fn llm_profile_menu_entries() -> Vec<(usize, String, bool)> {
+    let Some(state) = APP_STATE.get() else {
+        return Vec::new();
+    };
+    let mut db = state.lock().expect("state poisoned").llm_profiles.clone();
+    db.normalize();
+    db.profiles
+        .iter()
+        .take(MENU_LLM_PROFILE_MAX_ITEMS)
+        .enumerate()
+        .map(|(index, profile)| {
+            let label = profile_menu_label(profile);
+            (index, label, profile.id == db.active_profile_id)
+        })
+        .collect()
+}
+
+fn profile_menu_label(profile: &LlmProfile) -> String {
+    let label = profile.display_label();
+    if label.trim().is_empty() {
+        profile.id.clone()
+    } else {
+        label
+    }
+}
+
+fn llm_profile_index_from_command(command: usize) -> Option<usize> {
+    let end = MENU_LLM_PROFILE_BASE_ID + MENU_LLM_PROFILE_MAX_ITEMS;
+    (MENU_LLM_PROFILE_BASE_ID..end)
+        .contains(&command)
+        .then_some(command - MENU_LLM_PROFILE_BASE_ID)
+}
+
+fn activate_llm_profile(index: usize) {
+    let Some(state_handle) = APP_STATE.get() else {
+        return;
+    };
+    let (db, profile) = {
+        let state = state_handle.lock().expect("state poisoned");
+        let mut db = state.llm_profiles.clone();
+        db.normalize();
+        let Some(profile) = db.profiles.get(index).cloned() else {
+            return;
+        };
+        db.active_profile_id = profile.id.clone();
+        (db, profile)
+    };
+
+    if let Err(err) = save_llm_profile_db(&db) {
+        record_profile_activation_error(format!("Failed to save LLM profile: {err}"));
+        return;
+    }
+    if let Err(err) = ensure_claude_onboarding_complete() {
+        record_profile_activation_error(format!("Claude onboarding failed: {err}"));
+        return;
+    }
+    if let Err(err) = apply_llm_profile_to_claude(&profile) {
+        record_profile_activation_error(format!("Failed to apply LLM profile: {err}"));
+        return;
+    }
+
+    let label = profile_menu_label(&profile);
+    let mut state = state_handle.lock().expect("state poisoned");
+    state.llm_profiles = db;
+    state.set_mood(PetMood::Happy);
+    state.push_event("settings", format!("using {label}"));
+}
+
+fn record_profile_activation_error(message: String) {
+    if let Some(state) = APP_STATE.get() {
+        let mut state = state.lock().expect("state poisoned");
+        state.last_error = message.clone();
+        state.set_mood(PetMood::Error);
+        state.push_event("settings", message);
+    }
 }
 
 fn with_app_state(action: impl FnOnce(&mut AppState)) {
