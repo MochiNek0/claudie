@@ -1,11 +1,13 @@
 pub(crate) mod pomodoro;
+pub(crate) mod stats;
 
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use self::pomodoro::{PomodoroState, PomodoroStatus, PomodoroTick};
+use self::pomodoro::{PomodoroMode, PomodoroState, PomodoroStatus, PomodoroTick};
+use self::stats::{DailyStatsDb, ToolStatsKind, load_daily_stats};
 use crate::config::MAX_EVENTS;
 #[cfg(windows)]
 use crate::globals::PET_RENDERER;
@@ -15,6 +17,7 @@ const THINKING_MIN_VISIBLE: Duration = Duration::from_millis(2_500);
 const WORK_MIN_VISIBLE: Duration = Duration::from_millis(3_000);
 const HAPPY_MIN_VISIBLE: Duration = Duration::from_millis(2_000);
 const SUBAGENT_MIN_VISIBLE: Duration = Duration::from_millis(2_500);
+const INTERACTION_MIN_VISIBLE: Duration = Duration::from_millis(1_800);
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum PetMood {
@@ -27,6 +30,9 @@ pub(crate) enum PetMood {
     Error,
     Sleeping,
     Subagent,
+    Pomodoro,
+    Wave,
+    Stretch,
 }
 
 impl Default for PetMood {
@@ -47,6 +53,9 @@ impl PetMood {
             Self::Error => "error",
             Self::Sleeping => "sleeping",
             Self::Subagent => "subagent",
+            Self::Pomodoro => "pomodoro",
+            Self::Wave => "wave",
+            Self::Stretch => "stretch",
         }
     }
 
@@ -64,6 +73,8 @@ impl PetMood {
             Self::Search => 70,
             Self::Subagent => 65,
             Self::Thinking => 60,
+            Self::Pomodoro => 45,
+            Self::Wave | Self::Stretch => 42,
             Self::Happy => 40,
             Self::Sleeping => 20,
             Self::Idle => 10,
@@ -202,6 +213,12 @@ pub(crate) struct AppState {
     pub(crate) settings: UserSettings,
     pub(crate) llm_profiles: LlmProfileDb,
     pub(crate) pomodoro: PomodoroState,
+    pub(crate) stats: DailyStatsDb,
+    stats_last_total_tokens: u64,
+    stats_last_input_tokens: u64,
+    stats_last_output_tokens: u64,
+    stats_last_cache_creation_tokens: u64,
+    stats_last_cache_read_tokens: u64,
 }
 
 impl AppState {
@@ -230,6 +247,12 @@ impl AppState {
             settings: load_user_settings(),
             llm_profiles: load_llm_profile_db(),
             pomodoro: PomodoroState::default(),
+            stats: load_daily_stats(),
+            stats_last_total_tokens: 0,
+            stats_last_input_tokens: 0,
+            stats_last_output_tokens: 0,
+            stats_last_cache_creation_tokens: 0,
+            stats_last_cache_read_tokens: 0,
         }
     }
 
@@ -263,7 +286,7 @@ impl AppState {
     }
 
     fn force_visual_mood(&mut self, mood: PetMood) {
-        if !matches!(mood, PetMood::Idle | PetMood::Sleeping) {
+        if !matches!(mood, PetMood::Idle | PetMood::Sleeping | PetMood::Pomodoro) {
             self.last_non_idle_mood = mood;
         }
         if request_renderer_mood(mood) {
@@ -435,7 +458,7 @@ impl AppState {
     }
 
     fn transition_visual_mood(&mut self, mood: PetMood, now: Instant) {
-        if !matches!(mood, PetMood::Idle | PetMood::Sleeping) {
+        if !matches!(mood, PetMood::Idle | PetMood::Sleeping | PetMood::Pomodoro) {
             self.last_non_idle_mood = mood;
         }
         if request_renderer_mood(mood) {
@@ -496,7 +519,7 @@ impl AppState {
 
     pub(crate) fn start_pomodoro(&mut self) {
         self.pomodoro.start_focus(&self.settings.pomodoro);
-        self.set_mood(PetMood::Thinking);
+        self.set_mood(PetMood::Pomodoro);
     }
 
     pub(crate) fn stop_pomodoro(&mut self) {
@@ -508,6 +531,7 @@ impl AppState {
             return;
         }
         self.pomodoro.pause(&self.settings.pomodoro);
+        self.set_mood(self.default_resting_mood());
     }
 
     pub(crate) fn resume_pomodoro(&mut self) {
@@ -515,11 +539,28 @@ impl AppState {
             return;
         }
         self.pomodoro.resume(&self.settings.pomodoro);
+        self.set_mood(self.default_resting_mood());
+    }
+
+    pub(crate) fn interact_with_pet(&mut self) {
+        if !self.pending_permissions.is_empty() || !self.pending_choices.is_empty() {
+            return;
+        }
+        let mood = if matches!(self.mood, PetMood::Sleeping)
+            || matches!(self.resting_mood, PetMood::Sleeping)
+        {
+            PetMood::Stretch
+        } else {
+            PetMood::Wave
+        };
+        self.set_resting_mood(mood, true);
+        self.push_event("pet", mood.key());
     }
 
     pub(crate) fn skip_pomodoro(&mut self) {
         match self.pomodoro.skip(&self.settings.pomodoro) {
             PomodoroTick::FocusComplete => {
+                self.record_completed_focus();
                 self.set_mood(PetMood::Happy);
             }
             PomodoroTick::BreakComplete => {
@@ -532,6 +573,7 @@ impl AppState {
     pub(crate) fn tick_pomodoro(&mut self) {
         match self.pomodoro.tick(&self.settings.pomodoro) {
             PomodoroTick::FocusComplete => {
+                self.record_completed_focus();
                 self.set_mood(PetMood::Happy);
             }
             PomodoroTick::BreakComplete => {
@@ -566,15 +608,132 @@ impl AppState {
             && user_idle_for.is_some_and(|idle| idle > sleep_after)
             && self.active_tools == 0
             && self.active_subagents == 0
+            && !self.is_focus_pomodoro_running()
             && !matches!(self.resting_mood, PetMood::Sleeping)
         {
             self.set_resting_mood(PetMood::Sleeping, false);
+        } else if matches!(self.resting_mood, PetMood::Wave | PetMood::Stretch)
+            && idle_for > Duration::from_secs(3)
+        {
+            self.set_resting_mood(self.default_resting_mood(), false);
         } else if matches!(self.resting_mood, PetMood::Happy | PetMood::Error)
             && idle_for > Duration::from_secs(7)
         {
             self.set_resting_mood(PetMood::Idle, false);
         }
         self.refresh_visual_mood();
+    }
+
+    fn default_resting_mood(&self) -> PetMood {
+        if self.is_focus_pomodoro_running() {
+            PetMood::Pomodoro
+        } else {
+            PetMood::Idle
+        }
+    }
+
+    fn is_focus_pomodoro_running(&self) -> bool {
+        self.pomodoro.status == PomodoroStatus::Running && self.pomodoro.mode == PomodoroMode::Focus
+    }
+
+    pub(crate) fn record_prompt_stats(&mut self) {
+        self.stats.record(|day| {
+            day.prompts = day.prompts.saturating_add(1);
+        });
+    }
+
+    pub(crate) fn record_tool_stats(&mut self, kind: ToolStatsKind) {
+        self.stats.record(|day| {
+            day.tool_uses = day.tool_uses.saturating_add(1);
+            match kind {
+                ToolStatsKind::Write => day.write_tools = day.write_tools.saturating_add(1),
+                ToolStatsKind::Bash => day.bash_tools = day.bash_tools.saturating_add(1),
+                ToolStatsKind::Search => day.search_tools = day.search_tools.saturating_add(1),
+                ToolStatsKind::Subagent => {
+                    day.subagent_tools = day.subagent_tools.saturating_add(1);
+                }
+                ToolStatsKind::Other => {}
+            }
+        });
+    }
+
+    pub(crate) fn record_permission_stats(&mut self) {
+        self.stats.record(|day| {
+            day.permission_requests = day.permission_requests.saturating_add(1);
+        });
+    }
+
+    pub(crate) fn record_choice_stats(&mut self) {
+        self.stats.record(|day| {
+            day.choice_requests = day.choice_requests.saturating_add(1);
+        });
+    }
+
+    pub(crate) fn record_error_stats(&mut self) {
+        self.stats.record(|day| {
+            day.errors = day.errors.saturating_add(1);
+        });
+    }
+
+    pub(crate) fn record_token_snapshot(&mut self) {
+        let input_delta = self
+            .quota
+            .input_tokens
+            .saturating_sub(self.stats_last_input_tokens);
+        let output_delta = self
+            .quota
+            .output_tokens
+            .saturating_sub(self.stats_last_output_tokens);
+        let cache_creation_delta = self
+            .quota
+            .cache_creation_tokens
+            .saturating_sub(self.stats_last_cache_creation_tokens);
+        let cache_read_delta = self
+            .quota
+            .cache_read_tokens
+            .saturating_sub(self.stats_last_cache_read_tokens);
+        let category_delta = input_delta
+            .saturating_add(output_delta)
+            .saturating_add(cache_creation_delta)
+            .saturating_add(cache_read_delta);
+        let total = self
+            .quota
+            .observed_total_tokens
+            .max(self.quota.total_tokens)
+            .max(
+                self.quota
+                    .input_tokens
+                    .saturating_add(self.quota.output_tokens)
+                    .saturating_add(self.quota.cache_creation_tokens)
+                    .saturating_add(self.quota.cache_read_tokens),
+            );
+        if category_delta > 0 {
+            self.stats.record(|day| {
+                day.input_tokens = day.input_tokens.saturating_add(input_delta);
+                day.output_tokens = day.output_tokens.saturating_add(output_delta);
+                day.cache_creation_tokens = day
+                    .cache_creation_tokens
+                    .saturating_add(cache_creation_delta);
+                day.cache_read_tokens = day.cache_read_tokens.saturating_add(cache_read_delta);
+                day.token_delta = day.token_delta.saturating_add(category_delta);
+            });
+        } else if total > self.stats_last_total_tokens {
+            let total_delta = total - self.stats_last_total_tokens;
+            self.stats.record(|day| {
+                day.token_delta = day.token_delta.saturating_add(total_delta);
+            });
+        }
+        self.stats_last_total_tokens = total;
+        self.stats_last_input_tokens = self.quota.input_tokens;
+        self.stats_last_output_tokens = self.quota.output_tokens;
+        self.stats_last_cache_creation_tokens = self.quota.cache_creation_tokens;
+        self.stats_last_cache_read_tokens = self.quota.cache_read_tokens;
+    }
+
+    fn record_completed_focus(&mut self) {
+        self.stats.record(|day| {
+            day.completed_focus = day.completed_focus.saturating_add(1);
+        });
     }
 }
 
@@ -583,6 +742,7 @@ fn min_visible_for(mood: PetMood) -> Duration {
         PetMood::Typing | PetMood::Building => WORK_MIN_VISIBLE,
         PetMood::Thinking | PetMood::Search => THINKING_MIN_VISIBLE,
         PetMood::Subagent => SUBAGENT_MIN_VISIBLE,
+        PetMood::Pomodoro | PetMood::Wave | PetMood::Stretch => INTERACTION_MIN_VISIBLE,
         PetMood::Happy => HAPPY_MIN_VISIBLE,
         _ => Duration::ZERO,
     }

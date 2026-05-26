@@ -1,0 +1,219 @@
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+#[cfg(not(windows))]
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::settings::claudie_home;
+use crate::settings::storage::{read_json_or_default, save_pretty_json};
+
+const MAX_DAYS: usize = 45;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct DailyStatsDb {
+    pub(crate) days: Vec<DailyStats>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct DailyStats {
+    pub(crate) date: String,
+    pub(crate) prompts: u64,
+    pub(crate) tool_uses: u64,
+    pub(crate) write_tools: u64,
+    pub(crate) bash_tools: u64,
+    pub(crate) search_tools: u64,
+    pub(crate) subagent_tools: u64,
+    pub(crate) permission_requests: u64,
+    pub(crate) choice_requests: u64,
+    pub(crate) errors: u64,
+    pub(crate) completed_focus: u64,
+    pub(crate) token_delta: u64,
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
+    pub(crate) cache_creation_tokens: u64,
+    pub(crate) cache_read_tokens: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolStatsKind {
+    Write,
+    Bash,
+    Search,
+    Subagent,
+    Other,
+}
+
+pub(crate) fn stats_path() -> PathBuf {
+    claudie_home().join("daily_stats.json")
+}
+
+pub(crate) fn load_daily_stats() -> DailyStatsDb {
+    let mut db: DailyStatsDb = read_json_or_default(&stats_path());
+    db.normalize();
+    db
+}
+
+pub(crate) fn save_daily_stats(db: &DailyStatsDb) -> Result<(), String> {
+    save_pretty_json(&stats_path(), db)
+}
+
+impl DailyStatsDb {
+    pub(crate) fn normalize(&mut self) {
+        self.days.retain(|day| !day.date.trim().is_empty());
+        self.days.sort_by(|a, b| a.date.cmp(&b.date));
+        self.days.dedup_by(|a, b| {
+            if a.date == b.date {
+                b.merge(a);
+                true
+            } else {
+                false
+            }
+        });
+        if self.days.len() > MAX_DAYS {
+            let remove = self.days.len() - MAX_DAYS;
+            self.days.drain(0..remove);
+        }
+    }
+
+    pub(crate) fn today(&self) -> DailyStats {
+        let key = today_key();
+        self.days
+            .iter()
+            .find(|day| day.date == key)
+            .cloned()
+            .unwrap_or_else(|| DailyStats {
+                date: key,
+                ..DailyStats::default()
+            })
+    }
+
+    pub(crate) fn recent_total(&self, count: usize) -> DailyStats {
+        let mut total = DailyStats {
+            date: format!("last {} days", count),
+            ..DailyStats::default()
+        };
+        for day in self.days.iter().rev().take(count) {
+            total.merge(day);
+        }
+        total
+    }
+
+    pub(crate) fn record(&mut self, update: impl FnOnce(&mut DailyStats)) {
+        let key = today_key();
+        let index = match self.days.iter().position(|day| day.date == key) {
+            Some(index) => index,
+            None => {
+                self.days.push(DailyStats {
+                    date: key,
+                    ..DailyStats::default()
+                });
+                self.days.len() - 1
+            }
+        };
+        update(&mut self.days[index]);
+        self.normalize();
+        let _ = save_daily_stats(self);
+    }
+}
+
+impl DailyStats {
+    fn merge(&mut self, other: &DailyStats) {
+        self.prompts = self.prompts.saturating_add(other.prompts);
+        self.tool_uses = self.tool_uses.saturating_add(other.tool_uses);
+        self.write_tools = self.write_tools.saturating_add(other.write_tools);
+        self.bash_tools = self.bash_tools.saturating_add(other.bash_tools);
+        self.search_tools = self.search_tools.saturating_add(other.search_tools);
+        self.subagent_tools = self.subagent_tools.saturating_add(other.subagent_tools);
+        self.permission_requests = self
+            .permission_requests
+            .saturating_add(other.permission_requests);
+        self.choice_requests = self.choice_requests.saturating_add(other.choice_requests);
+        self.errors = self.errors.saturating_add(other.errors);
+        self.completed_focus = self.completed_focus.saturating_add(other.completed_focus);
+        self.token_delta = self.token_delta.saturating_add(other.token_delta);
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cache_creation_tokens = self
+            .cache_creation_tokens
+            .saturating_add(other.cache_creation_tokens);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(other.cache_read_tokens);
+    }
+}
+
+pub(crate) fn tool_stats_kind(tool_name: &str) -> ToolStatsKind {
+    let normalized = tool_name.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "task" => ToolStatsKind::Subagent,
+        "bash" | "shell" => ToolStatsKind::Bash,
+        "edit" | "multiedit" | "write" | "notebookedit" => ToolStatsKind::Write,
+        "read" | "grep" | "glob" | "ls" | "webfetch" | "websearch" => ToolStatsKind::Search,
+        _ if normalized.contains("edit")
+            || normalized.contains("write")
+            || normalized.contains("patch")
+            || normalized.contains("replace") =>
+        {
+            ToolStatsKind::Write
+        }
+        _ if normalized.contains("bash")
+            || normalized.contains("shell")
+            || normalized.contains("terminal")
+            || normalized.contains("command") =>
+        {
+            ToolStatsKind::Bash
+        }
+        _ if normalized.contains("read")
+            || normalized.contains("grep")
+            || normalized.contains("glob")
+            || normalized.contains("search")
+            || normalized.contains("find")
+            || normalized.contains("lookup")
+            || normalized.contains("fetch")
+            || normalized.contains("list") =>
+        {
+            ToolStatsKind::Search
+        }
+        _ => ToolStatsKind::Other,
+    }
+}
+
+fn today_key() -> String {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::SYSTEMTIME;
+        use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+        let mut time = SYSTEMTIME::default();
+        unsafe {
+            GetLocalTime(&mut time);
+        }
+        return format!("{:04}-{:02}-{:02}", time.wYear, time.wMonth, time.wDay);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let days = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs()
+            / 86_400;
+        let (year, month, day) = civil_from_days(days as i64);
+        format!("{year:04}-{month:02}-{day:02}")
+    }
+}
+
+#[cfg(not(windows))]
+fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    (year as i32, m as u32, d as u32)
+}

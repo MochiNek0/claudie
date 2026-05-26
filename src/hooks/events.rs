@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::app::stats::tool_stats_kind;
 use crate::app::{
     AppState, ChoiceDecision, ChoiceKind, ChoiceOption, ChoiceQuestion, ChoiceWaiter,
     PendingChoice, PendingPermission, PermissionDecision, PermissionWaiter, PetMood, SessionInfo,
@@ -73,6 +74,8 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
         if let Some(path) = transcript_path.as_deref() {
             state.quota.transcript_path = path.to_string();
         }
+        record_daily_stats(&mut state, event.as_str(), &tool_name);
+        state.record_token_snapshot();
 
         if let Some(activity) = hook_activity(event.as_str(), &tool_name, &payload) {
             apply_hook_activity(&mut state, activity, &payload);
@@ -124,6 +127,7 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
             if !snapshot.rate_limits.is_empty() {
                 state.quota.rate_limits = snapshot.rate_limits;
             }
+            state.record_token_snapshot();
         }
     }
 
@@ -178,8 +182,10 @@ fn handle_permission_request(
             permission_visual_mood(&payload, &permission.tool_name),
             true,
         );
+        state.record_permission_stats();
         state.push_event("PermissionRequest", permission.tool_name.clone());
         update_quota_from_value(&mut state.quota, &payload);
+        state.record_token_snapshot();
         permission
     };
 
@@ -350,6 +356,7 @@ fn handle_choice_request(
         };
         state.pending_choices.push_back(choice.clone());
         state.set_resting_mood(PetMood::Thinking, true);
+        state.record_choice_stats();
         state.push_event(
             "PreToolUse",
             match kind {
@@ -358,6 +365,7 @@ fn handle_choice_request(
             },
         );
         update_quota_from_value(&mut state.quota, &json!({}));
+        state.record_token_snapshot();
         choice
     };
 
@@ -790,6 +798,15 @@ fn apply_hook_activity(state: &mut AppState, activity: HookActivity, payload: &V
             state.clear_activity();
             state.set_resting_mood(PetMood::Idle, false);
         }
+    }
+}
+
+fn record_daily_stats(state: &mut AppState, event: &str, tool_name: &str) {
+    match event {
+        "UserPromptSubmit" => state.record_prompt_stats(),
+        "PreToolUse" => state.record_tool_stats(tool_stats_kind(tool_name)),
+        "PostToolUseFailure" | "StopFailure" | "PermissionDenied" => state.record_error_stats(),
+        _ => {}
     }
 }
 
