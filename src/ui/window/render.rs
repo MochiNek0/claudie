@@ -231,8 +231,7 @@ fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
         next_y += 6;
     }
 
-    let all_answered = choice.selected.iter().all(|items| !items.is_empty());
-    let submit_kind = if all_answered {
+    let submit_kind = if choice.is_submittable() {
         OverlayButtonKind::Primary
     } else {
         OverlayButtonKind::PrimaryDisabled

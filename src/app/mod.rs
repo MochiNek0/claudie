@@ -98,7 +98,10 @@ pub(crate) enum ChoiceKind {
 
 #[derive(Clone, Debug)]
 pub(crate) enum ChoiceDecision {
-    Submit(Vec<Vec<usize>>),
+    Submit {
+        selected: Vec<Vec<usize>>,
+        other_text: Vec<String>,
+    },
     Deny,
     Ignore,
 }
@@ -128,6 +131,7 @@ pub(crate) struct PendingPermission {
 pub(crate) struct ChoiceOption {
     pub(crate) label: String,
     pub(crate) description: String,
+    pub(crate) is_other: bool,
 }
 
 #[derive(Clone)]
@@ -147,8 +151,32 @@ pub(crate) struct PendingChoice {
     pub(crate) detail: String,
     pub(crate) questions: Vec<ChoiceQuestion>,
     pub(crate) selected: Vec<Vec<usize>>,
+    pub(crate) other_text: Vec<String>,
     pub(crate) tool_input: Value,
     pub(crate) waiter: Arc<ChoiceWaiter>,
+}
+
+impl PendingChoice {
+    pub(crate) fn is_submittable(&self) -> bool {
+        self.questions.iter().enumerate().all(|(qi, question)| {
+            let Some(selected) = self.selected.get(qi) else {
+                return false;
+            };
+            if selected.is_empty() {
+                return false;
+            }
+            let other_text = self
+                .other_text
+                .get(qi)
+                .map(|text| text.trim())
+                .unwrap_or("");
+            selected.iter().all(|&oi| match question.options.get(oi) {
+                Some(option) if option.is_other => !other_text.is_empty(),
+                Some(_) => true,
+                None => false,
+            })
+        })
+    }
 }
 
 #[allow(dead_code)]
@@ -615,7 +643,13 @@ impl AppState {
         } else if matches!(self.resting_mood, PetMood::Wave | PetMood::Stretch)
             && idle_for > Duration::from_secs(3)
         {
-            self.set_resting_mood(self.default_resting_mood(), false);
+            let target = if !self.pending_permissions.is_empty() || !self.pending_choices.is_empty()
+            {
+                PetMood::Thinking
+            } else {
+                self.default_resting_mood()
+            };
+            self.set_resting_mood(target, false);
         } else if matches!(self.resting_mood, PetMood::Happy | PetMood::Error)
             && idle_for > Duration::from_secs(7)
         {

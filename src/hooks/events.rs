@@ -343,6 +343,7 @@ fn handle_choice_request(
         let id = state.next_choice_id;
         state.next_choice_id += 1;
         let selected = vec![Vec::new(); questions.len()];
+        let other_text = vec![String::new(); questions.len()];
         let choice = PendingChoice {
             id,
             session_id,
@@ -351,11 +352,13 @@ fn handle_choice_request(
             detail,
             questions,
             selected,
+            other_text,
             tool_input,
             waiter: waiter.clone(),
         };
         state.pending_choices.push_back(choice.clone());
-        state.set_resting_mood(PetMood::Thinking, true);
+        let resting = state.activity_mood().unwrap_or(PetMood::Thinking);
+        state.set_resting_mood(resting, false);
         state.record_choice_stats();
         state.push_event(
             "PreToolUse",
@@ -385,13 +388,15 @@ fn handle_choice_request(
             .retain(|pending| pending.id != choice.id);
         if state.pending_permissions.is_empty() && state.pending_choices.is_empty() {
             let mood = match decision {
-                Some(ChoiceDecision::Submit(_)) => state.activity_mood().unwrap_or(PetMood::Happy),
-                Some(ChoiceDecision::Deny) => PetMood::Thinking,
+                Some(ChoiceDecision::Submit { .. }) => {
+                    state.activity_mood().unwrap_or(PetMood::Happy)
+                }
+                Some(ChoiceDecision::Deny) => state.activity_mood().unwrap_or(PetMood::Thinking),
                 Some(ChoiceDecision::Ignore) | None => {
                     state.activity_mood().unwrap_or(PetMood::Idle)
                 }
             };
-            state.set_resting_mood(mood, matches!(mood, PetMood::Thinking));
+            state.set_resting_mood(mood, false);
         }
     }
 
@@ -400,28 +405,61 @@ fn handle_choice_request(
 
 fn choice_response(choice: &PendingChoice, decision: ChoiceDecision) -> Value {
     match (choice.kind, decision) {
-        (ChoiceKind::AskUserQuestion, ChoiceDecision::Submit(selected)) => {
+        (
+            ChoiceKind::AskUserQuestion,
+            ChoiceDecision::Submit {
+                selected,
+                other_text,
+            },
+        ) => {
             let mut updated_input = choice.tool_input.clone();
             if let Some(obj) = updated_input.as_object_mut() {
                 let mut answers = serde_json::Map::new();
                 for (question_index, question) in choice.questions.iter().enumerate() {
-                    let answer = selected
+                    let parts: Vec<String> = selected
                         .get(question_index)
                         .into_iter()
                         .flat_map(|items| items.iter())
-                        .filter_map(|option_index| question.options.get(*option_index))
-                        .map(|option| option.label.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    answers.insert(question.question.clone(), Value::String(answer));
+                        .filter_map(|option_index| {
+                            let option = question.options.get(*option_index)?;
+                            if option.is_other {
+                                let text = other_text
+                                    .get(question_index)
+                                    .map(|s| s.trim())
+                                    .unwrap_or("");
+                                if text.is_empty() {
+                                    None
+                                } else {
+                                    Some(text.to_string())
+                                }
+                            } else {
+                                Some(option.label.clone())
+                            }
+                        })
+                        .collect();
+                    answers.insert(question.question.clone(), Value::String(parts.join(", ")));
                 }
                 obj.insert("answers".to_string(), Value::Object(answers));
             }
             pre_tool_allow(updated_input, "Answered in claudie")
         }
-        (ChoiceKind::ExitPlanMode, ChoiceDecision::Submit(selected)) => {
-            if selected.first().is_some_and(|items| items.contains(&0)) {
+        (
+            ChoiceKind::ExitPlanMode,
+            ChoiceDecision::Submit {
+                selected,
+                other_text,
+            },
+        ) => {
+            let first = selected.first();
+            if first.is_some_and(|items| items.contains(&0)) {
                 pre_tool_allow(choice.tool_input.clone(), "Plan approved in claudie")
+            } else if first.is_some_and(|items| items.contains(&2)) {
+                let feedback = other_text.first().map(|s| s.trim()).unwrap_or("");
+                if feedback.is_empty() {
+                    pre_tool_deny("User chose to keep planning in claudie")
+                } else {
+                    pre_tool_deny(&format!("Plan rejected: {feedback}"))
+                }
             } else {
                 pre_tool_deny("User chose to keep planning in claudie")
             }
@@ -460,7 +498,7 @@ fn parse_ask_user_questions(tool_input: &Value) -> Vec<ChoiceQuestion> {
         .flat_map(|questions| questions.iter())
         .filter_map(|question| {
             let text = string_field(question, "question")?;
-            let options = question
+            let mut options = question
                 .get("options")
                 .and_then(Value::as_array)
                 .into_iter()
@@ -468,12 +506,21 @@ fn parse_ask_user_questions(tool_input: &Value) -> Vec<ChoiceQuestion> {
                 .filter_map(|option| {
                     let label = string_field(option, "label")?;
                     let description = string_field(option, "description").unwrap_or_default();
-                    Some(ChoiceOption { label, description })
+                    Some(ChoiceOption {
+                        label,
+                        description,
+                        is_other: false,
+                    })
                 })
                 .collect::<Vec<_>>();
             if options.is_empty() {
                 return None;
             }
+            options.push(ChoiceOption {
+                label: "Other...".to_string(),
+                description: "Type a custom answer.".to_string(),
+                is_other: true,
+            });
             Some(ChoiceQuestion {
                 header: string_field(question, "header").unwrap_or_default(),
                 question: text,
@@ -497,10 +544,17 @@ fn exit_plan_questions(_tool_input: &Value) -> Vec<ChoiceQuestion> {
             ChoiceOption {
                 label: "Approve plan".to_string(),
                 description: "Leave plan mode and start implementation.".to_string(),
+                is_other: false,
             },
             ChoiceOption {
                 label: "Keep planning".to_string(),
                 description: "Reject for now and continue refining the plan.".to_string(),
+                is_other: false,
+            },
+            ChoiceOption {
+                label: "Other...".to_string(),
+                description: "Give Claude specific feedback before deciding.".to_string(),
+                is_other: true,
             },
         ],
     }]
@@ -514,16 +568,17 @@ fn summarize_exit_plan(tool_input: &Value) -> String {
     if plan.is_empty() {
         return path;
     }
+    let plan_text = shorten(&plan, 16_000);
     let mut detail = if path.is_empty() {
-        shorten(&plan, 360)
+        plan_text
     } else {
-        format!("{}\n{}", shorten(&plan, 360), path)
+        format!("{plan_text}\n{path}")
     };
     if let Some(prompts) = tool_input.get("allowedPrompts").and_then(Value::as_array) {
-        for prompt in prompts.iter().take(4) {
+        for prompt in prompts.iter().take(8) {
             let tool = string_field(prompt, "tool").unwrap_or_else(|| "Tool".to_string());
             let text = string_field(prompt, "prompt").unwrap_or_default();
-            detail.push_str(&format!("\nAllow {tool}: {}", shorten(&text, 54)));
+            detail.push_str(&format!("\nAllow {tool}: {}", shorten(&text, 120)));
         }
     }
     detail
@@ -607,33 +662,26 @@ pub(crate) fn toggle_current_choice_option(question_index: usize, option_index: 
 }
 
 pub(crate) fn submit_current_choice() {
-    decide_current_choice(ChoiceDecision::Submit(Vec::new()));
-}
-
-pub(crate) fn deny_current_choice() {
-    decide_current_choice(ChoiceDecision::Deny);
-}
-
-fn decide_current_choice(decision: ChoiceDecision) {
     if let Some(state) = APP_STATE.get() {
         let pending = {
             let mut state = state.lock().expect("state poisoned");
             let Some(choice) = state.pending_choices.front() else {
                 return;
             };
-            let is_submit = matches!(&decision, ChoiceDecision::Submit(_));
-            if is_submit && choice.selected.iter().any(Vec::is_empty) {
+            if !choice.is_submittable() {
                 return;
             }
             let selected = choice.selected.clone();
-            let decision = match decision {
-                ChoiceDecision::Submit(_) => ChoiceDecision::Submit(selected),
-                other => other,
-            };
-            state
-                .pending_choices
-                .pop_front()
-                .map(|pending| (pending, decision))
+            let other_text = choice.other_text.clone();
+            state.pending_choices.pop_front().map(|pending| {
+                (
+                    pending,
+                    ChoiceDecision::Submit {
+                        selected,
+                        other_text,
+                    },
+                )
+            })
         };
         if let Some((pending, decision)) = pending {
             let mut slot = pending
@@ -645,6 +693,42 @@ fn decide_current_choice(decision: ChoiceDecision) {
                 *slot = Some(decision);
                 pending.waiter.ready.notify_all();
             }
+        }
+    }
+}
+
+pub(crate) fn deny_current_choice() {
+    decide_current_choice(ChoiceDecision::Deny);
+}
+
+fn decide_current_choice(decision: ChoiceDecision) {
+    if let Some(state) = APP_STATE.get() {
+        let pending = {
+            let mut state = state.lock().expect("state poisoned");
+            state.pending_choices.pop_front()
+        };
+        if let Some(pending) = pending {
+            let mut slot = pending
+                .waiter
+                .decision
+                .lock()
+                .expect("choice waiter poisoned");
+            if slot.is_none() {
+                *slot = Some(decision);
+                pending.waiter.ready.notify_all();
+            }
+        }
+    }
+}
+
+pub(crate) fn set_current_choice_other_text(question_index: usize, text: String) {
+    if let Some(state) = APP_STATE.get() {
+        let mut state = state.lock().expect("state poisoned");
+        let Some(choice) = state.pending_choices.front_mut() else {
+            return;
+        };
+        if let Some(slot) = choice.other_text.get_mut(question_index) {
+            *slot = text;
         }
     }
 }
@@ -1371,6 +1455,183 @@ mod tests {
         state.active_subagents = 1;
 
         assert_eq!(state.activity_mood(), Some(PetMood::Building));
+    }
+
+    fn build_choice(questions: Vec<ChoiceQuestion>, kind: ChoiceKind) -> PendingChoice {
+        let len = questions.len();
+        PendingChoice {
+            id: 1,
+            session_id: "s1".to_string(),
+            kind,
+            title: "t".to_string(),
+            detail: "d".to_string(),
+            questions,
+            selected: vec![Vec::new(); len],
+            other_text: vec![String::new(); len],
+            tool_input: json!({}),
+            waiter: Arc::new(ChoiceWaiter {
+                decision: Mutex::new(None),
+                ready: Condvar::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn parse_ask_user_questions_appends_other_option() {
+        let input = json!({
+            "questions": [{
+                "header": "h",
+                "question": "Q?",
+                "multiSelect": false,
+                "options": [
+                    {"label": "A", "description": "a"},
+                    {"label": "B", "description": "b"}
+                ]
+            }]
+        });
+        let questions = parse_ask_user_questions(&input);
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].options.len(), 3);
+        assert!(questions[0].options[2].is_other);
+        assert_eq!(questions[0].options[2].label, "Other...");
+    }
+
+    #[test]
+    fn parse_ask_user_questions_skips_when_options_empty() {
+        let input = json!({
+            "questions": [{
+                "question": "Q?",
+                "options": []
+            }]
+        });
+        let questions = parse_ask_user_questions(&input);
+        assert!(questions.is_empty());
+    }
+
+    #[test]
+    fn exit_plan_questions_includes_other_feedback_option() {
+        let questions = exit_plan_questions(&json!({}));
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].options.len(), 3);
+        assert_eq!(questions[0].options[0].label, "Approve plan");
+        assert_eq!(questions[0].options[1].label, "Keep planning");
+        assert!(questions[0].options[2].is_other);
+    }
+
+    #[test]
+    fn is_submittable_requires_other_text_when_other_selected() {
+        let mut choice = build_choice(exit_plan_questions(&json!({})), ChoiceKind::ExitPlanMode);
+        // Select Other (index 2)
+        choice.selected[0] = vec![2];
+        choice.other_text[0] = String::new();
+        assert!(!choice.is_submittable());
+
+        choice.other_text[0] = "  ".to_string();
+        assert!(!choice.is_submittable());
+
+        choice.other_text[0] = "do X instead".to_string();
+        assert!(choice.is_submittable());
+    }
+
+    #[test]
+    fn is_submittable_blocks_when_any_question_unanswered() {
+        let questions = vec![
+            ChoiceQuestion {
+                header: String::new(),
+                question: "Q1".to_string(),
+                multi_select: false,
+                options: vec![ChoiceOption {
+                    label: "A".to_string(),
+                    description: String::new(),
+                    is_other: false,
+                }],
+            },
+            ChoiceQuestion {
+                header: String::new(),
+                question: "Q2".to_string(),
+                multi_select: false,
+                options: vec![ChoiceOption {
+                    label: "B".to_string(),
+                    description: String::new(),
+                    is_other: false,
+                }],
+            },
+        ];
+        let mut choice = build_choice(questions, ChoiceKind::AskUserQuestion);
+        choice.selected[0] = vec![0];
+        assert!(!choice.is_submittable());
+        choice.selected[1] = vec![0];
+        assert!(choice.is_submittable());
+    }
+
+    #[test]
+    fn ask_user_question_uses_other_text_in_answer() {
+        let input = json!({
+            "questions": [{
+                "question": "Pick one",
+                "options": [
+                    {"label": "A", "description": ""}
+                ]
+            }]
+        });
+        let parsed = parse_ask_user_questions(&input);
+        let mut choice = build_choice(parsed, ChoiceKind::AskUserQuestion);
+        choice.tool_input = input;
+        // Select Other (index 1)
+        choice.selected[0] = vec![1];
+        choice.other_text[0] = "custom answer".to_string();
+
+        let response = choice_response(
+            &choice,
+            ChoiceDecision::Submit {
+                selected: choice.selected.clone(),
+                other_text: choice.other_text.clone(),
+            },
+        );
+        let answer = response
+            .get("hookSpecificOutput")
+            .and_then(|h| h.get("updatedInput"))
+            .and_then(|i| i.get("answers"))
+            .and_then(|a| a.get("Pick one"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert_eq!(answer, "custom answer");
+    }
+
+    #[test]
+    fn exit_plan_other_path_denies_with_feedback() {
+        let mut choice = build_choice(exit_plan_questions(&json!({})), ChoiceKind::ExitPlanMode);
+        choice.selected[0] = vec![2];
+        choice.other_text[0] = "please address concern X".to_string();
+        let response = choice_response(
+            &choice,
+            ChoiceDecision::Submit {
+                selected: choice.selected.clone(),
+                other_text: choice.other_text.clone(),
+            },
+        );
+        let reason = response
+            .get("hookSpecificOutput")
+            .and_then(|h| h.get("permissionDecisionReason"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert_eq!(
+            response
+                .get("hookSpecificOutput")
+                .and_then(|h| h.get("permissionDecision"))
+                .and_then(Value::as_str),
+            Some("deny")
+        );
+        assert!(reason.contains("please address concern X"));
+    }
+
+    #[test]
+    fn summarize_exit_plan_keeps_long_plan_text() {
+        let plan = "x".repeat(800);
+        let input = json!({"plan": plan.clone()});
+        let detail = summarize_exit_plan(&input);
+        assert!(detail.len() >= 800);
+        assert!(detail.starts_with("xxxx"));
     }
 }
 
