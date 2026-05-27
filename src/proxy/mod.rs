@@ -158,9 +158,11 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
             Ok(summary_response) => {
                 match proxy_optimizer::summary_text_from_openai_response(&summary_response) {
                     Some(summary) => {
-                        if let Err(err) =
-                            proxy_optimizer::save_summary(&pending.cache_key, &summary, &profile)
-                        {
+                        if let Err(err) = proxy_optimizer::save_summary(
+                            &pending.cache_key,
+                            &summary,
+                            &pending.config,
+                        ) {
                             record_proxy_event(&state, format!("summary cache save failed: {err}"));
                         } else {
                             record_proxy_event(&state, "summary cache saved".to_string());

@@ -40,7 +40,12 @@ cargo run --release -- --port 17387
 - `src/hooks/claude_settings.rs`: hook settings generation, Claude settings merge, hook installation, and hook uninstall.
 - `src/hooks/server.rs`: minimal local HTTP server accepting `POST /hook`.
 - `src/proxy.rs`: local Anthropic Messages to OpenAI Chat Completions proxy on `127.0.0.1:17388`.
-- `src/proxy_optimizer.rs`: OpenAI proxy long-context compression, chunked older-history summarization, and local summary cache handling (both `proxy_cache/summaries/` and `proxy_cache/chunks/`).
+- `src/proxy_optimizer/`: OpenAI proxy long-context compression, chunked older-history summarization, and local summary cache handling (both `proxy_cache/summaries/` and `proxy_cache/chunks/`).
+- `src/proxy_optimizer/mod.rs`: public API, `OptimizedRequest` / `PendingSummary` types, `optimize_openai_request` orchestration, and shared cross-module helpers (`message_role`, `set_messages`, `now_millis`, token estimation).
+- `src/proxy_optimizer/config.rs`: `ProxyOptimizationConfig` + `SummaryMode`, env-driven parameter parsing, and per-config signature for cache-key inputs.
+- `src/proxy_optimizer/compress.rs`: in-place per-message head/tail compression and the long-text trimming used by the local summarizer.
+- `src/proxy_optimizer/summary.rs`: local extractive summarization, chunked summary generation with per-chunk caching, and `build_summary_request` for model-mode summaries.
+- `src/proxy_optimizer/cache.rs`: on-disk summary/chunk cache I/O, mtime-based LRU pruning with throttling, summary/chunk cache keys, and the streaming FNV-1a hasher.
 - `src/settings/`: user settings, LLM profiles, Claude env integration, and config file persistence.
 - `src/settings/mod.rs`: persisted user settings, window position, GIF resource mapping, LLM profile database, Claude env merge logic, OpenAI extra body parsing, and path normalization.
 - `src/settings/storage.rs`: shared JSON persistence helpers for BOM-tolerant reads and pretty writes.
@@ -84,7 +89,7 @@ cargo run --release -- --port 17387
 - Choice-style requests are represented by `PendingChoice`; completed through `submit_current_choice` or `deny_current_choice` in `src/hooks/events.rs`.
 - Daily stats should be recorded through `AppState` methods and stored by `src/app/stats.rs`; do not compute hook-derived business counters in Slint/UI code.
 - The hook server should stay small and synchronous. Put Claude-event semantics in `src/hooks/events.rs`, not in the HTTP parser.
-- The OpenAI proxy should remain a small local compatibility layer. Keep request/response format conversion and upstream capability handling in `src/proxy.rs`, keep context optimization and summary caching in `src/proxy_optimizer.rs`, and keep profile persistence/env behavior and OpenAI extra body validation in `src/settings/mod.rs`.
+- The OpenAI proxy should remain a small local compatibility layer. Keep request/response format conversion and upstream capability handling in `src/proxy/`, keep context optimization and summary caching in `src/proxy_optimizer/`, and keep profile persistence/env behavior and OpenAI extra body validation in `src/settings/mod.rs`.
 - Keep OpenAI `parallel_tool_calls` enabled by default when tools are present. Modern OpenAI-compatible models handle independent tool calls correctly, and batching (e.g. reading multiple files, staging multiple paths in one git command) matches how Claude Code expects to operate. Users can still set `{"parallel_tool_calls": false}` in `OpenAI body` for older/smaller models that misbehave.
 - UI code uses raw Win32 handles and unsafe calls. Keep unsafe usage close to Win32 boundaries and prefer small helper functions for repeated patterns.
 - Auxiliary settings and prompt windows use Slint declarations in `src/ui/slint_views.rs`; keep Rust callback/state logic outside the `slint::slint!` block.
@@ -103,7 +108,7 @@ cargo run --release -- --port 17387
   - Hook settings merge/install/uninstall belongs in `src/hooks/claude_settings.rs`.
   - Quota and token field compatibility logic belongs in `src/hooks/quota.rs`.
   - Daily stats storage, local date grouping, tool classification, and token counter aggregation belong in `src/app/stats.rs`; hook event call sites belong in `src/hooks/events.rs`; chart display belongs in the Settings controller/Slint view.
-  - OpenAI proxy transport and Anthropic/OpenAI conversion belong in `src/proxy.rs`; context optimization, long-text compression, chunked summary caching belong in `src/proxy_optimizer.rs`.
+  - OpenAI proxy transport and Anthropic/OpenAI conversion belong in `src/proxy/`; context optimization belongs in `src/proxy_optimizer/mod.rs`, message compression in `src/proxy_optimizer/compress.rs`, local/chunked summarization in `src/proxy_optimizer/summary.rs`, on-disk summary cache + pruning + cache keys in `src/proxy_optimizer/cache.rs`, and tunable config + env parsing in `src/proxy_optimizer/config.rs`.
   - LLM profile serialization, OpenAI extra body parsing, and Claude env merging belong in `src/settings/mod.rs`.
   - Main pet rendering and permission/choice overlays belong in `src/ui/window/render.rs`; main window events, menu commands, and position persistence belong in `src/ui/window/mod.rs`.
   - Shared visual tokens belong in `src/ui/theme.rs`.
