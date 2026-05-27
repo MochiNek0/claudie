@@ -1,5 +1,5 @@
 slint::slint! {
-    import { LineEdit, TextEdit } from "std-widgets.slint";
+    import { LineEdit, TextEdit, ScrollView } from "std-widgets.slint";
 
     component ActionButton inherits Rectangle {
         in property <string> text;
@@ -696,9 +696,100 @@ slint::slint! {
         }
     }
 
+    struct ChoiceOptionData {
+        question_index: int,
+        option_index: int,
+        label: string,
+        description: string,
+        selected: bool,
+        is_other: bool,
+        other_text: string,
+        multi_select: bool,
+        is_question_header: bool,
+        header: string,
+    }
+
+    component ChoiceOptionRow inherits Rectangle {
+        in property <ChoiceOptionData> data;
+        callback toggle();
+        callback other_text_changed(string);
+
+        height: data.is_question_header
+            ? 32px
+            : (data.selected && data.is_other ? 88px : 56px);
+        background: data.is_question_header
+            ? transparent
+            : (data.selected ? #eef6ff : #ffffff);
+        border-radius: 8px;
+        border-width: data.is_question_header ? 0px : 1px;
+        border-color: data.selected ? #0a84ff : #dae0ea;
+
+        if !data.is_question_header: TouchArea {
+            x: 0px; y: 0px;
+            width: parent.width;
+            height: data.selected && data.is_other ? 52px : parent.height;
+            mouse-cursor: pointer;
+            clicked => { root.toggle(); }
+        }
+
+        if data.is_question_header: Text {
+            x: 4px; y: 8px;
+            width: parent.width - 8px;
+            height: 20px;
+            text: data.header == "" ? data.description : data.header + " — " + data.description;
+            font-size: 12px;
+            font-weight: 600;
+            color: #475569;
+            overflow: elide;
+        }
+
+        if !data.is_question_header: Text {
+            x: 12px; y: 8px;
+            width: 24px; height: 22px;
+            text: data.multi_select
+                ? (data.selected ? "☑" : "☐")
+                : (data.selected ? "●" : "○");
+            font-size: 18px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            color: data.selected ? #0a84ff : #6b7280;
+        }
+
+        if !data.is_question_header: Text {
+            x: 40px; y: 6px;
+            width: parent.width - 52px;
+            height: 20px;
+            text: data.label;
+            font-size: 13px;
+            font-weight: 600;
+            color: #111827;
+            overflow: elide;
+        }
+
+        if !data.is_question_header && data.description != "": Text {
+            x: 40px; y: 26px;
+            width: parent.width - 52px;
+            height: 22px;
+            text: data.description;
+            font-size: 12px;
+            color: #6b7280;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+
+        if !data.is_question_header && data.selected && data.is_other: LineEdit {
+            x: 40px; y: 54px;
+            width: parent.width - 52px;
+            height: 28px;
+            text: data.other_text;
+            placeholder-text: "Type your answer...";
+            edited(text) => { root.other_text_changed(text); }
+        }
+    }
+
     export component PromptWindow inherits Window {
-        width: 560px;
-        height: 520px;
+        width: 620px;
+        height: 660px;
         title: "claudie request";
         icon: @image-url("../../assets/icon.ico");
         background: #f4f7fc;
@@ -709,84 +800,91 @@ slint::slint! {
         in property <string> detail_text;
         in property <string> meta_text;
         in property <bool> submit_enabled: false;
-
-        in property <bool> option0_visible: false;
-        in property <bool> option1_visible: false;
-        in property <bool> option2_visible: false;
-        in property <bool> option3_visible: false;
-        in property <bool> option4_visible: false;
-        in property <bool> option5_visible: false;
-        in property <bool> option6_visible: false;
-        in property <bool> option7_visible: false;
-        in property <string> option0_text;
-        in property <string> option1_text;
-        in property <string> option2_text;
-        in property <string> option3_text;
-        in property <string> option4_text;
-        in property <string> option5_text;
-        in property <string> option6_text;
-        in property <string> option7_text;
+        in property <string> submit_hint;
+        in property <[ChoiceOptionData]> options_model;
 
         callback allow_once();
         callback allow_always();
         callback deny();
         callback submit_choice();
         callback cancel_choice();
-        callback toggle_option0();
-        callback toggle_option1();
-        callback toggle_option2();
-        callback toggle_option3();
-        callback toggle_option4();
-        callback toggle_option5();
-        callback toggle_option6();
-        callback toggle_option7();
+        callback toggle_option(int);
+        callback set_other_text(int, string);
 
         Rectangle {
             x: 14px;
             y: 14px;
-            width: 532px;
-            height: 492px;
+            width: 592px;
+            height: 632px;
             background: white;
             border-radius: 18px;
             border-width: 1px;
             border-color: #e4e8f0;
         }
-        Text { x: 38px; y: 36px; width: 480px; text: root.title_text; font-size: 20px; font-weight: 600; color: #111827; }
-        Text { x: 38px; y: 68px; width: 480px; text: root.subtitle_text; font-size: 13px; color: #6b7280; }
-        Rectangle { x: 38px; y: 104px; width: 484px; height: 156px; background: #f2f5fa; border-radius: 10px; border-width: 1px; border-color: #dae0ea; }
-        Text { x: 58px; y: 124px; width: 444px; height: 94px; text: root.detail_text; wrap: word-wrap; font-size: 13px; color: #111827; }
-        Text { x: 58px; y: 222px; width: 444px; height: 24px; text: root.meta_text; font-size: 12px; color: #9ca3af; }
 
-        if is_choice: Rectangle {
-            x: 38px;
-            y: 278px;
-            width: 484px;
-            height: 144px;
-            background: transparent;
-            if option0_visible: ActionButton { x: 0px; y: 0px; width: 232px; height: 30px; text: root.option0_text; clicked => { root.toggle_option0(); } }
-            if option1_visible: ActionButton { x: 252px; y: 0px; width: 232px; height: 30px; text: root.option1_text; clicked => { root.toggle_option1(); } }
-            if option2_visible: ActionButton { x: 0px; y: 36px; width: 232px; height: 30px; text: root.option2_text; clicked => { root.toggle_option2(); } }
-            if option3_visible: ActionButton { x: 252px; y: 36px; width: 232px; height: 30px; text: root.option3_text; clicked => { root.toggle_option3(); } }
-            if option4_visible: ActionButton { x: 0px; y: 72px; width: 232px; height: 30px; text: root.option4_text; clicked => { root.toggle_option4(); } }
-            if option5_visible: ActionButton { x: 252px; y: 72px; width: 232px; height: 30px; text: root.option5_text; clicked => { root.toggle_option5(); } }
-            if option6_visible: ActionButton { x: 0px; y: 108px; width: 232px; height: 30px; text: root.option6_text; clicked => { root.toggle_option6(); } }
-            if option7_visible: ActionButton { x: 252px; y: 108px; width: 232px; height: 30px; text: root.option7_text; clicked => { root.toggle_option7(); } }
+        Text { x: 38px; y: 36px; width: 540px; text: root.title_text; font-size: 20px; font-weight: 600; color: #111827; }
+        Text { x: 38px; y: 68px; width: 540px; text: root.subtitle_text; font-size: 13px; color: #6b7280; }
+
+        Rectangle {
+            x: 38px; y: 100px; width: 544px; height: 168px;
+            background: #f2f5fa;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: #dae0ea;
+        }
+        ScrollView {
+            x: 50px; y: 112px; width: 520px; height: 124px;
+            VerticalLayout {
+                padding: 0px;
+                Text {
+                    text: root.detail_text;
+                    wrap: word-wrap;
+                    font-size: 13px;
+                    color: #111827;
+                }
+            }
+        }
+        Text {
+            x: 50px; y: 240px; width: 520px; height: 20px;
+            text: root.meta_text;
+            font-size: 12px;
+            color: #9ca3af;
+            overflow: elide;
         }
 
-        if !is_choice: Rectangle {
-            x: 38px;
-            y: 278px;
-            width: 484px;
-            height: 50px;
-            background: transparent;
-            Text { x: 0px; y: 0px; width: 484px; text: "Use Ctrl+Shift+Y for Allow and Ctrl+Shift+N for Deny."; font-size: 12px; color: #6b7280; }
+        if is_choice: ScrollView {
+            x: 38px; y: 284px; width: 544px; height: 268px;
+            VerticalLayout {
+                padding: 4px;
+                spacing: 8px;
+                for opt[idx] in root.options_model: ChoiceOptionRow {
+                    data: opt;
+                    toggle => { root.toggle_option(idx); }
+                    other_text_changed(t) => { root.set_other_text(idx, t); }
+                }
+            }
         }
 
-        if !is_choice: ActionButton { x: 210px; y: 448px; width: 88px; height: 34px; text: "Allow"; clicked => { root.allow_once(); } }
-        if !is_choice: ActionButton { x: 308px; y: 448px; width: 100px; height: 34px; text: "Always"; clicked => { root.allow_always(); } }
-        if !is_choice: ActionButton { x: 418px; y: 448px; width: 88px; height: 34px; text: "Deny"; clicked => { root.deny(); } }
+        if !is_choice: Text {
+            x: 38px; y: 290px; width: 544px;
+            text: "Use Ctrl+Shift+Y for Allow and Ctrl+Shift+N for Deny.";
+            font-size: 12px;
+            color: #6b7280;
+        }
 
-        if is_choice: ActionButton { x: 308px; y: 448px; width: 100px; height: 34px; text: "Submit"; enabled: root.submit_enabled; clicked => { root.submit_choice(); } }
-        if is_choice: ActionButton { x: 418px; y: 448px; width: 88px; height: 34px; text: "Cancel"; clicked => { root.cancel_choice(); } }
+        if is_choice && !submit_enabled: Text {
+            x: 38px; y: 560px; width: 544px; height: 22px;
+            text: root.submit_hint;
+            font-size: 12px;
+            color: #d97706;
+            horizontal-alignment: center;
+        }
+
+        if !is_choice: ActionButton { x: 240px; y: 596px; width: 88px; height: 34px; text: "Allow"; clicked => { root.allow_once(); } }
+        if !is_choice: ActionButton { x: 338px; y: 596px; width: 100px; height: 34px; text: "Always"; clicked => { root.allow_always(); } }
+        if !is_choice: ActionButton { x: 448px; y: 596px; width: 88px; height: 34px; text: "Deny"; clicked => { root.deny(); } }
+
+        if is_choice: ActionButton { x: 338px; y: 596px; width: 100px; height: 34px; text: "Submit"; enabled: root.submit_enabled; clicked => { root.submit_choice(); } }
+        if is_choice: ActionButton { x: 448px; y: 596px; width: 88px; height: 34px; text: "Cancel"; clicked => { root.cancel_choice(); } }
     }
 }
