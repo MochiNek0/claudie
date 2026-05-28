@@ -616,17 +616,8 @@ impl AppState {
         user_idle_for: Option<Duration>,
         user_input_tick: Option<u32>,
     ) {
-        let user_input_changed = user_input_tick.is_some_and(|tick| {
-            let changed = self
-                .last_user_input_tick
-                .is_some_and(|previous| previous != tick);
+        if let Some(tick) = user_input_tick {
             self.last_user_input_tick = Some(tick);
-            changed
-        });
-
-        if matches!(self.mood, PetMood::Sleeping) && user_input_changed {
-            self.set_resting_mood(PetMood::Idle, true);
-            return;
         }
 
         let idle_for = self.last_activity.elapsed();
@@ -634,9 +625,7 @@ impl AppState {
         if self.pending_permissions.is_empty()
             && self.pending_choices.is_empty()
             && user_idle_for.is_some_and(|idle| idle > sleep_after)
-            && self.active_tools == 0
-            && self.active_subagents == 0
-            && !self.is_focus_pomodoro_running()
+            && !self.has_active_work()
             && !matches!(self.resting_mood, PetMood::Sleeping)
         {
             self.set_resting_mood(PetMood::Sleeping, false);
@@ -656,6 +645,12 @@ impl AppState {
             self.set_resting_mood(PetMood::Idle, false);
         }
         self.refresh_visual_mood();
+    }
+
+    fn has_active_work(&self) -> bool {
+        self.activity_mood().is_some()
+            || self.resting_mood.is_active_work()
+            || self.is_focus_pomodoro_running()
     }
 
     fn default_resting_mood(&self) -> PetMood {
@@ -800,4 +795,51 @@ fn request_renderer_mood(mood: PetMood) -> bool {
 #[cfg(not(windows))]
 fn request_renderer_mood(_mood: PetMood) -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sleep_ignores_passive_user_input_until_pet_interaction() {
+        let mut state = AppState::new();
+        state.settings.sleep_after_secs = 15;
+
+        state.decay_mood(Some(Duration::from_secs(16)), Some(10));
+        assert_eq!(state.resting_mood, PetMood::Sleeping);
+        assert_eq!(state.mood, PetMood::Sleeping);
+
+        state.decay_mood(Some(Duration::ZERO), Some(11));
+        assert_eq!(state.resting_mood, PetMood::Sleeping);
+        assert_eq!(state.mood, PetMood::Sleeping);
+
+        state.interact_with_pet();
+        assert_eq!(state.resting_mood, PetMood::Stretch);
+        assert_eq!(state.mood, PetMood::Stretch);
+    }
+
+    #[test]
+    fn active_thinking_prevents_sleep_when_user_is_idle() {
+        let mut state = AppState::new();
+        state.settings.sleep_after_secs = 15;
+
+        state.set_resting_mood(PetMood::Thinking, true);
+        state.decay_mood(Some(Duration::from_secs(16)), Some(10));
+
+        assert_eq!(state.resting_mood, PetMood::Thinking);
+        assert_eq!(state.mood, PetMood::Thinking);
+    }
+
+    #[test]
+    fn active_tool_prevents_sleep_when_user_is_idle() {
+        let mut state = AppState::new();
+        state.settings.sleep_after_secs = 15;
+
+        state.start_tool_mood(PetMood::Building);
+        state.decay_mood(Some(Duration::from_secs(16)), Some(10));
+
+        assert_eq!(state.activity_mood(), Some(PetMood::Building));
+        assert_eq!(state.mood, PetMood::Building);
+    }
 }
