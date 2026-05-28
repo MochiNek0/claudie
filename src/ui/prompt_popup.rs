@@ -15,6 +15,7 @@ use crate::ui::window_icon::{apply_slint_window_icons, schedule_prompt_window_ic
 thread_local! {
     static PROMPT: RefCell<Option<PromptWindow>> = const { RefCell::new(None) };
     static PROMPT_OPTIONS: RefCell<Vec<OptionTarget>> = const { RefCell::new(Vec::new()) };
+    static PROMPT_SNAPSHOT: RefCell<Option<PromptSnapshot>> = const { RefCell::new(None) };
 }
 
 #[derive(Clone, Copy)]
@@ -33,23 +34,39 @@ pub(crate) fn sync_prompt_popup() {
                 let _ = window.hide();
             }
             PROMPT_OPTIONS.with(|options| options.borrow_mut().clear());
+            PROMPT_SNAPSHOT.with(|last| last.borrow_mut().take());
             return;
         }
 
         let snapshot = snapshot.expect("checked above");
         let mut slot = slot.borrow_mut();
+        let mut created = false;
         if slot.is_none() {
             let Ok(window) = PromptWindow::new() else {
                 return;
             };
             wire_prompt_callbacks(&window);
             *slot = Some(window);
+            created = true;
         }
         if let Some(window) = slot.as_ref() {
-            apply_prompt_snapshot(window, &snapshot);
-            let _ = window.show();
-            apply_slint_window_icons(window.window());
-            schedule_prompt_window_icon_refresh(window.as_weak());
+            let should_apply = PROMPT_SNAPSHOT.with(|last| {
+                let mut last = last.borrow_mut();
+                if created || last.as_ref() != Some(&snapshot) {
+                    *last = Some(snapshot.clone());
+                    true
+                } else {
+                    false
+                }
+            });
+            if should_apply {
+                apply_prompt_snapshot(window, &snapshot);
+            }
+            if created {
+                let _ = window.show();
+                apply_slint_window_icons(window.window());
+                schedule_prompt_window_icon_refresh(window.as_weak());
+            }
         }
     });
 }
@@ -61,6 +78,7 @@ pub(crate) fn close_prompt_popup() {
         }
     });
     PROMPT_OPTIONS.with(|options| options.borrow_mut().clear());
+    PROMPT_SNAPSHOT.with(|last| last.borrow_mut().take());
 }
 
 fn wire_prompt_callbacks(window: &PromptWindow) {
@@ -102,6 +120,7 @@ fn wire_prompt_callbacks(window: &PromptWindow) {
             }
             set_current_choice_other_text(target.question_index, text.to_string());
             refresh_submit_state();
+            remember_current_snapshot();
         }
     });
     window.window().on_close_requested(|| {
@@ -110,6 +129,7 @@ fn wire_prompt_callbacks(window: &PromptWindow) {
     });
 }
 
+#[derive(Clone, PartialEq, Eq)]
 struct PromptSnapshot {
     title: String,
     subtitle: String,
@@ -121,6 +141,7 @@ struct PromptSnapshot {
     options: Vec<OptionView>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
 struct OptionView {
     question_index: usize,
     option_index: usize,
@@ -328,6 +349,12 @@ fn refresh_submit_state() {
         };
         window.set_submit_enabled(enabled);
         window.set_submit_hint(shared(&hint));
+    });
+}
+
+fn remember_current_snapshot() {
+    PROMPT_SNAPSHOT.with(|last| {
+        *last.borrow_mut() = prompt_snapshot();
     });
 }
 
