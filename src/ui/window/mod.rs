@@ -25,9 +25,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SWP_SHOWWINDOW, SendMessageW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes,
     SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
     TPM_TOPALIGN, TrackPopupMenu, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WS_VISIBLE,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::app::pomodoro::PomodoroStatus;
@@ -51,6 +51,7 @@ static LEFT_BUTTON_CAPTURED: AtomicBool = AtomicBool::new(false);
 static LEFT_BUTTON_DRAGGING: AtomicBool = AtomicBool::new(false);
 static LEFT_BUTTON_DOWN_X: AtomicI32 = AtomicI32::new(0);
 static LEFT_BUTTON_DOWN_Y: AtomicI32 = AtomicI32::new(0);
+static RIGHT_BUTTON_CAPTURED: AtomicBool = AtomicBool::new(false);
 const CLICK_DRAG_THRESHOLD_PX: i32 = 6;
 
 pub(crate) unsafe fn run_window(port: u16) {
@@ -160,14 +161,14 @@ unsafe extern "system" fn window_proc(
                     user_idle.map(|snapshot| snapshot.1),
                 );
             }
-            if !CONTEXT_MENU_OPEN.load(Ordering::Relaxed) {
-                ensure_pet_topmost(hwnd);
-            }
             let overlay = overlay_hwnd(hwnd);
             if !overlay.is_null() {
                 ShowWindow(overlay, SW_HIDE);
             }
             sync_prompt_popup();
+            if !CONTEXT_MENU_OPEN.load(Ordering::Relaxed) {
+                ensure_pet_topmost(hwnd);
+            }
             InvalidateRect(hwnd, std::ptr::null(), 0);
             0
         }
@@ -226,7 +227,16 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
+        WM_RBUTTONDOWN => {
+            RIGHT_BUTTON_CAPTURED.store(true, Ordering::Relaxed);
+            SetCapture(hwnd);
+            0
+        }
         WM_RBUTTONUP => {
+            let was_captured = RIGHT_BUTTON_CAPTURED.swap(false, Ordering::Relaxed);
+            if was_captured {
+                ReleaseCapture();
+            }
             show_context_menu(hwnd);
             0
         }
