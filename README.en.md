@@ -2,9 +2,9 @@
 
 [中文](README.md) | English
 
-`claudie` is a lightweight desktop pet for Claude Code. The Windows version is built with Rust and a native Win32/GDI+ window. At runtime it is mostly one UI thread, a synchronous `std::net::TcpListener` hook server, and a local LLM proxy.
+`claudie` is a lightweight desktop pet for Claude Code. The Windows version is built with Rust and a native Win32/GDI+ window. At runtime it runs the desktop UI, a synchronous `std::net::TcpListener` hook server, and a local Anthropic Messages compatible proxy that forwards Claude Code requests to OpenAI Chat Completions style providers.
 
-The project intentionally avoids Electron, WebView, async runtimes, and web frameworks. Pet assets use a lightweight GIF animation directory, with one GIF file mapped to each mood.
+The project intentionally avoids Electron, WebView, async runtimes, and web frameworks. Pet assets use a lightweight GIF directory, with one GIF mapped to each mood.
 
 ## Inspiration
 
@@ -12,41 +12,37 @@ claudie is inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerz
 
 ## Features
 
-- **Hook-driven pet states**: Receives Claude Code HTTP hooks and switches pet states for the following events:
+- **Hook-driven pet states**: receives Claude Code HTTP hooks and switches pet states.
 
   | Event | Behavior |
   |-------|----------|
-  | `SessionStart` / `SessionResume` | Return to idle |
+  | `SessionStart` | Return to idle |
   | `UserPromptSubmit` | Thinking |
-  | `PreToolUse` | Start tool, such as Write -> typing, Bash -> building, Read/Grep/Glob -> search |
-  | `PostToolUse` | Finish tool |
-  | `PostToolBatch` | Batch complete, trigger quota snapshot |
+  | `PreToolUse` | Start tool activity; write tools -> typing, shell tools -> building, read/search tools -> search |
+  | `PostToolUse` | Finish tool activity |
+  | `PostToolBatch` | Batch complete, refresh quota snapshot |
   | `PostToolUseFailure` / `StopFailure` / `PermissionDenied` | Error state |
+  | `PermissionRequest` | Wait for Allow / Always / Deny in the pet UI |
   | `SubagentStart` / `TaskCreated` | Subagent working |
   | `SubagentStop` / `TaskCompleted` | Subagent done |
-  | `PreCompact` | Context compressing (thinking state) |
-  | `PostCompact` | Compression done |
+  | `PreCompact` / `PostCompact` | Context compression starts / finishes |
   | `Notification` / `Elicitation` | Notification prompt |
-  | `WorktreeCreate` | Creating worktree (building state) |
+  | `WorktreeCreate` | Creating worktree |
   | `Stop` | Task complete |
-  | `SessionEnd` | Session ended, clear all pending interactions |
+  | `SessionEnd` | Session ended, clear pending interactions |
 
-- **Permission requests**: Intercepts `PermissionRequest` hooks and shows Allow, Always Allow, and Deny controls in the pet window.
-- **Choice cards**: Supports interactive `PreToolUse` choices for `AskUserQuestion` and `ExitPlanMode`, showing selectable options with Submit / Cancel buttons.
-- **Hotkeys**:
-  - `Ctrl+Shift+Y`: Allow current permission request / Submit current choice
-  - `Ctrl+Shift+N`: Deny current permission request / Cancel current choice
-- **Pomodoro timer**: Built-in pomodoro with Start / Stop / Pause / Resume / Skip and notification on completion.
-- **Pet interaction**: A short left click plays an interaction animation, while click-and-move still drags the window; focus Pomodoro can use a dedicated `pomodoro` animation.
-- **Idle sleep**: Pet auto-sleeps after inactivity, wakes on new activity.
-- **Pet scaling**: Adjustable pet window size.
-- **Window position memory**: Saves and restores window position across sessions.
-- **Mood-to-GIF mapping**: Configurable GIF file for each mood state.
-- **Settings panel**: Basic, Pomodoro, LLM Profiles, and Stats tabs with a unified native theme.
-- **LLM Profiles**: Save LLM providers/profiles, writes the active profile into Claude Code settings, and configures extra request body fields for the OpenAI proxy; the right-click menu can quickly switch saved profiles.
-- **Session ledger**: Locally records daily prompts, tool categories, permission/choice counts, errors, completed focus sessions, and token usage, then shows today and the last 7 days as bar charts in the Stats tab.
-- **OpenAI-compatible proxy**: Converts Claude Code Anthropic Messages requests to OpenAI Chat Completions API, with tool call format conversion, parallel tool control, context compression, history summarization, and capability caching.
-- **Cross-platform**: Windows has the full desktop UI; macOS / Linux currently run only headless hook and proxy servers without the desktop interaction UI.
+- **Permission requests**: intercepts `PermissionRequest` hooks and shows Allow / Always / Deny controls in the pet window.
+- **Choice cards**: supports interactive `PreToolUse` choices for `AskUserQuestion` and `ExitPlanMode`, with options plus Submit / Cancel.
+- **Hotkeys**: `Ctrl+Shift+Y` allows a permission or submits a choice; `Ctrl+Shift+N` denies a permission or cancels a choice.
+- **Pomodoro timer**: built-in Pomodoro with Start / Stop / Pause / Resume / Skip and notifications on phase completion.
+- **Pet interaction**: short left-click plays `wave` / `stretch`; click-and-move still drags the window; focus sessions can use the `pomodoro` animation.
+- **Idle sleep**: auto-sleeps after inactivity and wakes on new activity.
+- **Window and asset settings**: pet scaling, window position memory, GIF directory, and mood-to-GIF mapping.
+- **Settings panel**: Basic, Pomodoro, LLM Profiles, and Stats tabs using native Slint windows.
+- **LLM Profiles**: save official or custom LLM profiles, write the active profile to Claude Code settings, and switch quickly from the right-click menu.
+- **Session ledger**: records daily prompts, tool categories, permission/choice counts, errors, completed focus sessions, and token usage; Stats shows today and the last 7 days.
+- **OpenAI-compatible proxy**: converts Claude Code Anthropic Messages requests to OpenAI Chat Completions with tools, streaming, image forwarding, reasoning output, parallel tool calls, tool-history fallback, context compression, summaries, and capability caching.
+- **Cross-platform**: Windows has the full desktop UI; macOS/Linux currently run only headless hook/proxy services and CLI hook management. Permission requests are denied immediately because there is no desktop interaction UI.
 
 ## Quick Start
 
@@ -56,41 +52,24 @@ Run in development:
 cargo run --release
 ```
 
-Normal startup ensures Claude Code hooks point at the current claudie port; on Windows, exiting the UI removes claudie-managed hooks. The install/uninstall commands below are for manual management or packaging flows.
+Normal startup listens on hook URL `http://127.0.0.1:17387/hook` and local proxy `http://127.0.0.1:17388`, then ensures Claude Code hooks point at the selected claudie port. On Windows, exiting the UI removes claudie-managed hooks.
 
-Install Claude Code hooks:
-
-```powershell
-cargo run --release -- --install-claude-hooks
-```
-
-Uninstall Claude Code hooks:
+Useful commands:
 
 ```powershell
-cargo run --release -- --uninstall-claude-hooks
-```
-
-Print a Claude Code settings snippet for manual merging:
-
-```powershell
-cargo run --release -- --print-claude-settings
-```
-
-Use a custom hook port:
-
-```powershell
+cargo run --release -- --help
 cargo run --release -- --port 17387
-```
-
-Suppress system notification popups during install/uninstall:
-
-```powershell
+cargo run --release -- --install-claude-hooks
+cargo run --release -- --uninstall-claude-hooks
+cargo run --release -- --print-claude-settings
 cargo run --release -- --install-claude-hooks --quiet
 ```
 
+`--install` and `--uninstall` are accepted as short aliases. `--quiet` suppresses system notification popups during hook install/uninstall.
+
 ## OpenAI-Compatible API Proxy
 
-claudie also listens on a local proxy address when it starts:
+claudie listens on:
 
 ```text
 http://127.0.0.1:17388
@@ -98,24 +77,34 @@ http://127.0.0.1:17388
 
 In Settings -> LLM Profiles, create or edit a profile:
 
-- Set `Base URL` to an OpenAI-compatible chat completions endpoint, such as `https://example.com/v1/chat/completions`.
-- Set `API key` to the upstream OpenAI-compatible service key.
+- Set `Base URL` to an OpenAI-compatible endpoint, such as `https://example.com/v1/chat/completions` or `https://example.com/v1`.
+- Set `API key` to the upstream service key. If it is empty, the proxy uses `Auth token` as the upstream key.
 - Set `Model` to a model supported by that service.
 - Optionally set `OpenAI body` to extra request body fields, using either a JSON object or one `key=value` / `key: value` entry per line; for example `{"reasoning_effort":"xhigh"}` or `model_reasoning_effort = "xhigh"`.
+- Use `Extra env` for one `KEY=VALUE` proxy switch or Claude Code environment variable per line.
 
-After clicking `Use`, claudie writes Claude Code's `ANTHROPIC_BASE_URL` to the local proxy address above. The upstream request URL and key stay only in the claudie profile. A Base URL containing `/chat/completions` enables the proxy automatically. If you enter an upstream root URL instead, add this to `Extra env`:
+After clicking `Use`, if the profile is OpenAI Chat Completions format, claudie writes Claude Code's `ANTHROPIC_BASE_URL` to the local proxy address. The upstream URL and key stay in the claudie profile. A `Base URL` containing `/chat/completions` enables the proxy automatically. If you enter an upstream root URL instead, add this to `Extra env`:
 
 ```text
 CLAUDIE_API_FORMAT=openai
 ```
 
-The proxy currently implements `POST /v1/messages`, `POST /v1/messages/count_tokens`, and `GET /v1/models`, and it converts tool calls between Anthropic and OpenAI formats. `OpenAI body` is merged into the upstream chat completions request, but it cannot override claudie-managed `messages` or `stream` fields.
+The proxy implements `POST /v1/messages`, `POST /v1/messages/count_tokens`, and `GET /v1/models`. `OpenAI body` is merged into the upstream chat completions request, but it cannot override claudie-managed `messages` or `stream` fields.
 
-When tools are present, the proxy sends `parallel_tool_calls=true` upstream by default so the model can batch independent actions (read several files, stage multiple paths in one git command) the way native Claude Code expects, cutting down on serial round-trips and duplicated token overhead. For older or smaller upstream models that misbehave under concurrent tool calls, set `{"parallel_tool_calls": false}` explicitly in `OpenAI body` to switch back to sequential. The proxy also injects a short (~80 token) compat prompt telling the model to treat tool-result messages as observations from prior calls and to re-read before retrying after a failed edit; disable it with `CLAUDIE_PROXY_COMPAT_PROMPT=0` if you don't want it.
+Current proxy capabilities:
 
-OpenAI proxy context optimization is enabled by default. claudie compresses very long tool results and text before forwarding requests, and when the estimated input grows beyond the default threshold it keeps recent messages and summarizes older history in chunks. Each chunk is independently summarized and cached under `%USERPROFILE%\.claudie\proxy_cache\` in `summaries/`, `chunks/`, and `capabilities/` directories. The cache stores summary text or upstream capability probe results only, not API keys or full original request bodies.
+- Non-streaming and streaming OpenAI responses are converted back to Anthropic Messages / SSE events.
+- Anthropic tool use / tool result is converted to OpenAI `tools`, `tool_calls`, and `tool` messages.
+- When tools are present and the model supports tools, `parallel_tool_calls=true` is sent by default; set `{"parallel_tool_calls": false}` to disable it.
+- DeepSeek R1, QwQ, GLM-Zero, and similar reasoning streams are mapped to Anthropic thinking blocks.
+- OpenAI/Azure/OpenRouter reasoning models auto-map Anthropic `thinking.budget_tokens` to `reasoning_effort`, unless the user explicitly sets it in `OpenAI body`.
+- Image content forwarding is supported. By default claudie detects vision support from the model name; force it with `CLAUDIE_PROXY_FORWARD_IMAGES=always` or disable it with `CLAUDIE_PROXY_FORWARD_IMAGES=never`.
+- Recognized OpenAI/Azure/DeepSeek/Qwen/Kimi/GLM/OpenRouter upstreams keep the compat prompt off by default; generic OneAPI/NewAPI-style upstreams get it by default. Control it with `CLAUDIE_PROXY_COMPAT_PROMPT=0/1`.
+- If an upstream rejects native tool history, the proxy retries with text transcript mode and caches the result under `proxy_cache/capabilities/`.
 
-You can tune or disable this behavior from a profile's `Extra env`:
+Context optimization is enabled by default. claudie compresses very long tool results and text; when estimated input exceeds the threshold, it keeps recent messages and summarizes older history in chunks. The cache stores summary text or capability probe results only, not API keys or full original request bodies.
+
+You can tune it from a profile's `Extra env`:
 
 ```text
 CLAUDIE_PROXY_OPTIMIZE=0
@@ -134,68 +123,58 @@ CLAUDIE_PROXY_CHUNK_SUMMARY=1
 CLAUDIE_PROXY_CHUNK_SIZE_MESSAGES=8
 CLAUDIE_PROXY_CHUNK_CACHE_TTL_HOURS=168
 CLAUDIE_PROXY_CHUNK_CACHE_MAX_ENTRIES=200
-CLAUDIE_PROXY_CAPABILITY_CACHE_TTL_HOURS=168
+CLAUDIE_PROXY_CAPABILITY_CACHE_TTL_HOURS=720
 CLAUDIE_PROXY_CAPABILITY_CACHE_MAX_ENTRIES=200
+CLAUDIE_PROXY_COMPAT_PROMPT=0
+CLAUDIE_PROXY_FORWARD_IMAGES=auto
 ```
 
-By default summaries are generated locally with extractive compaction (`CLAUDIE_PROXY_SUMMARY_MODE=local`) so expensive models are not called just to summarize. Set `CLAUDIE_PROXY_SUMMARY_MODE=model` if you prefer an upstream model-generated summary. If that summary request fails, claudie still forwards the request with long-content compression applied. Set `CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=0` to disable the completion budget cap.
-
-Chunked summarization (enabled by default) partitions older messages into groups of `CLAUDIE_PROXY_CHUNK_SIZE_MESSAGES`, generates a digest per chunk, and appends them to the compressed result. Set `CLAUDIE_PROXY_CHUNK_SUMMARY=0` to disable chunking and fall back to a single monolithic summary. Both the `proxy_cache/` directory files and the legacy `proxy_summaries.json` can be safely deleted; claudie regenerates them on demand.
+The default `CLAUDIE_PROXY_SUMMARY_MODE=local` uses local extractive summaries and does not call the upstream model for summarization. Set `CLAUDIE_PROXY_SUMMARY_MODE=model` to use upstream model summaries. If the summary request fails, claudie still forwards the request with long-content compression applied. Set `CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=0` to disable the output-token cap.
 
 ## Project Structure
 
 ```text
 src/
-  main.rs                  CLI args, app startup, hook/profile initialization, platform entrypoint
-  config.rs                Constants for ports, dimensions, menu IDs, colors, and timing
+  main.rs                  CLI, startup flow, hook/proxy initialization, platform entrypoint
+  config.rs                Ports, window dimensions, menu IDs, overlay geometry, constants
   globals.rs               Process-wide OnceLock handles
   notifier.rs              Platform notification / message-box wrapper
-  util.rs                  Arg parsing, path, text shortening, and UTF-16 helpers
-  app/                     AppState, permission requests, choice requests, Pomodoro domain rules
-    mod.rs                 AppState, PetMood, sessions, quota, pending interactions, stats, mood decay
-    pomodoro.rs            Lightweight Pomodoro state and transitions
-    stats.rs               Local daily session ledger, tool classification, and token statistics
+  util.rs                  Arg parsing, paths, text shortening, UTF-16 helpers
+  app/                     AppState, moods, permissions/choices, Pomodoro, stats domain state
   hooks/                   Claude Code hook server, event semantics, quota extraction, settings merge
-    claude_settings.rs     Hook settings generation, installation, uninstall, and merge
-    events.rs              Claude Code event handling, permission waiting, and choice responses
-    quota.rs               Token, model, provider, and quota compatibility extraction
-    server.rs              Minimal synchronous HTTP server accepting POST /hook
-  proxy.rs                 Local Anthropic Messages -> OpenAI Chat Completions proxy
-  proxy_optimizer.rs       OpenAI proxy long-context compression, chunked history summaries, and summary cache
-  settings/                User settings, LLM profiles, Claude env integration, JSON storage helpers
-    mod.rs                 Persisted settings, profile database, OpenAI body parsing, path normalization
-    storage.rs             BOM-tolerant reads and pretty JSON writes
-  ui/
-    gif_animation.rs       GIF loading, frame delay reading, mood transitions, and GDI+ drawing
-    theme.rs               Shared visual tokens for the Settings panel and permission/choice overlays
-    window/                Main pet window
-      mod.rs               Window lifecycle, hotkeys, menu, click handling, position persistence
-      render.rs            HUD, pet, permission overlay, and choice card drawing
-    slint_views.rs         Slint component declarations for Settings and Prompt windows
-    settings_panel/        Slint Settings panel lifecycle, callbacks, and controller logic
-      controller.rs        Shared SettingsController state and sync helpers
-      controller/          Basic, Pomodoro, LLM Profiles, and Stats tab behavior
-    prompt_popup.rs        Slint permission/choice popup snapshots and callbacks
-    window_icon.rs         Slint/Winit/Win32 auxiliary window icon bridge
+  proxy/                   Anthropic Messages -> OpenAI Chat Completions proxy
+  proxy_optimizer/         Long-context compression, chunk summaries, proxy cache
+  settings/                User settings, LLM profiles, Claude env integration, JSON storage
+  ui/                      Win32/GDI+ main window, Slint settings/prompt windows, rendering
 ```
+
+Key files:
+
+- `src/hooks/events.rs`: hook semantics, permission waiting, choice responses, and stats recording.
+- `src/hooks/claude_settings.rs`: hook settings install, uninstall, merge, and backup.
+- `src/proxy/request_conv.rs` / `response_conv.rs` / `streaming.rs`: request, response, and streaming conversion.
+- `src/proxy/provider.rs`: provider/model capability detection, image forwarding, reasoning, and compat prompt policy.
+- `src/proxy/tool_history.rs` / `capability_cache.rs`: tool-history transcript fallback and capability cache.
+- `src/proxy_optimizer/config.rs` / `compress.rs` / `summary.rs` / `cache.rs`: context optimization and cache.
+- `src/settings/mod.rs`: profiles, OpenAI body, Extra env, Claude settings writes, and path normalization.
+- `src/ui/window/mod.rs`: main window lifecycle, hotkeys, right-click menu, dragging, and profile menu.
+- `src/ui/window/render.rs`: HUD, pet drawing, permission overlay, and choice cards.
+- `src/ui/slint_views.rs` and `src/ui/settings_panel/`: Settings / Prompt declarations and controllers.
 
 Other directories:
 
-- `assets/claudie/`: bundled pet GIF animation assets.
+- `assets/claudie/`: bundled pet GIF animations.
 - `assets/icon.*`, `assets/claudie.manifest`: application icons and Windows manifest.
 - `packaging/`: Windows/Unix packaging and install scripts.
 
 ## Local Data
 
-- `%USERPROFILE%\.claudie\settings.json`: pet asset path, GIF directory, animation mapping, scale, sleep timeout, window position, and Pomodoro settings.
-- `%USERPROFILE%\.claudie\llm_profiles.json`: LLM provider/profile definitions, including OpenAI proxy extra request body fields.
-- `%USERPROFILE%\.claudie\daily_stats.json`: daily session ledger counters, including tool categories, permission/choice counts, completed focus sessions, and token usage.
-- `%USERPROFILE%\.claudie\proxy_summaries.json`: legacy (single-block) OpenAI proxy summary cache.
-- `%USERPROFILE%\.claudie\proxy_cache\`: OpenAI proxy cache directory, containing:
-  - `summaries/`: single-block summary cache JSON files.
-  - `chunks/`: chunked summary cache JSON files, each chunk independently cached.
-  - `capabilities/`: upstream model tool-history compatibility cache.
-- `%USERPROFILE%\.claude\settings.json`: Claude Code hook settings and claudie-managed LLM env values.
+- `%USERPROFILE%\.claudie\settings.json`: asset path, GIF mapping, scale, sleep timeout, window position, and Pomodoro settings.
+- `%USERPROFILE%\.claudie\llm_profiles.json`: LLM profiles, active profile, upstream auth, OpenAI body, and Extra env.
+- `%USERPROFILE%\.claudie\daily_stats.json`: daily prompt, tool, permission/choice, error, focus-session, and token counters; keeps up to 45 days.
+- `%USERPROFILE%\.claudie\proxy_summaries.json`: legacy single-block summary cache.
+- `%USERPROFILE%\.claudie\proxy_cache\`: proxy cache directory containing `summaries/`, `chunks/`, and `capabilities/`.
+- `%USERPROFILE%\.claude\settings.json`: Claude Code hook settings and claudie-managed LLM env.
 - `%USERPROFILE%\.claude\settings.json.claudie.bak`: one-time backup created before the first Claude settings modification.
 
 ## Pet Assets
@@ -218,21 +197,7 @@ assets/claudie/
   stretch.gif
 ```
 
-The Settings panel can adjust the GIF directory and the file name mapped to each mood. When replacing art assets, keep the file name mapping consistent.
-
-## Maintenance Boundaries
-
-- `AppState` is the central mutable model; long-lived state and domain rules should usually live under `src/app/`.
-- Daily session ledger behavior belongs in `src/app/stats.rs`; hook events should only call stats recording from `src/hooks/events.rs`, not derive business counters in the UI layer.
-- Keep the hook server small and synchronous; HTTP parsing stays in `src/hooks/server.rs`, while Claude event semantics belong in `src/hooks/events.rs`.
-- Keep quota field compatibility logic centralized in `src/hooks/quota.rs`.
-- When editing Claude settings, merge only claudie-managed hook/env fields and preserve unrelated user configuration.
-- Reuse `src/settings/storage.rs` when adding new JSON state files.
-- Keep OpenAI proxy context optimization, long-text compression, chunked history summaries, and summary cache logic centralized in `src/proxy_optimizer.rs`.
-- Do not do potentially slow network or filesystem work on the UI thread.
-- Add main-window visual elements in `src/ui/window/render.rs`; add menus, hotkeys, and mouse interactions in `src/ui/window/mod.rs`.
-- Keep shared visual tokens for the Settings panel and permission/choice overlays in `src/ui/theme.rs`.
-- For Settings panel fields, keep Slint component declarations in `src/ui/slint_views.rs`, callback wiring in `src/ui/settings_panel/mod.rs`, and save/refresh behavior in `src/ui/settings_panel/controller/`.
+The Settings panel can adjust the GIF directory and file name mapped to each mood. When replacing art assets, keep the file name mapping consistent.
 
 ## Packaging
 
@@ -241,6 +206,8 @@ The Windows installer template is in `packaging/windows/claudie.iss`:
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 ```
+
+The output is `dist\claudie-setup.exe`. Unix user-level install scripts live in `packaging/unix/`.
 
 ## Verification
 
@@ -251,7 +218,11 @@ cargo fmt
 cargo check
 ```
 
-Run `cargo test` when touching hook settings, quota extraction, LLM profile logic, proxy conversion, or pure domain rules.
+Run this when touching hook settings, quota extraction, LLM profiles, proxy conversion/streaming, context optimization, stats, Pomodoro, or pure domain rules:
+
+```powershell
+cargo test
+```
 
 For UI, hook, permission, settings, or proxy behavior changes, also run manually:
 
@@ -259,4 +230,4 @@ For UI, hook, permission, settings, or proxy behavior changes, also run manually
 cargo run --release
 ```
 
-Check that the pet window position is restored after exit, the right-click menu works and can quickly switch LLM Profiles, Basic/Pomodoro/LLM Profiles/Stats tabs render correctly, left-click plays an interaction animation while dragging still works, GIF assets load, `POST /hook` updates state, permission/choice cards work, Stats bar charts do not overflow their panels, and the local LLM proxy plus `OpenAI body` forwarding work when relevant.
+Check window position restore, right-click menu and LLM Profile switching, the four Settings tabs, left-click interaction and dragging, GIF loading, `POST /hook` state updates, permission/choice cards, Stats charts, and when relevant the local proxy, streaming conversion, `OpenAI body`, and context optimization.
