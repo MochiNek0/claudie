@@ -21,12 +21,10 @@ pub(crate) unsafe fn show_settings_panel(_parent: HWND) {
 
 pub(crate) fn show_settings_panel_tab(tab: i32) {
     SETTINGS.with(|slot| {
-        if let Some(window) = slot.borrow().as_ref() {
-            window.set_active_tab(tab);
-            let _ = window.show();
-            apply_slint_window_icons(window.window());
-            schedule_settings_window_icon_refresh(window.as_weak());
-            return;
+        // Always create a fresh window to avoid Slint rendering issues when
+        // re-showing a previously hidden window (white screen bug).
+        if let Some(old_window) = slot.borrow_mut().take() {
+            let _ = old_window.hide();
         }
 
         let Ok(window) = SettingsWindow::new() else {
