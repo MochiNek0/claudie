@@ -95,7 +95,7 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
     }
 
     if path.ends_with("/messages/count_tokens") {
-        handle_count_tokens(&mut stream, &request.body);
+        handle_count_tokens(&mut stream, &state, &request.body);
         return;
     }
 
@@ -286,10 +286,16 @@ fn active_openai_profile(state: &Arc<Mutex<AppState>>) -> Option<LlmProfile> {
         .cloned()
 }
 
-fn handle_count_tokens(stream: &mut TcpStream, body: &[u8]) {
+fn handle_count_tokens(stream: &mut TcpStream, state: &Arc<Mutex<AppState>>, body: &[u8]) {
     let input: Value = serde_json::from_slice(body).unwrap_or_else(|_| json!({}));
-    let text = input.to_string();
-    let estimate = (text.chars().count() / 4).max(1);
+    // Estimate over the text that actually reaches the prompt (messages + tool
+    // schemas) instead of the whole serialized JSON, so Claude Code's context
+    // meter and auto-compact timing track reality. Fall back to the coarse
+    // whole-blob estimate when no OpenAI profile is active.
+    let estimate = match active_openai_profile(state) {
+        Some(profile) => request_conv::estimate_request_input_tokens(&input, &profile),
+        None => (input.to_string().chars().count() / 4).max(1) as u64,
+    };
     let _ = write_json_response(stream, 200, json!({ "input_tokens": estimate }));
 }
 

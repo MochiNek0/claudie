@@ -428,6 +428,54 @@ fn content_to_text(content: &Value) -> String {
     }
 }
 
+/// Rough input-token estimate for a native Anthropic request, used by the
+/// `/v1/messages/count_tokens` endpoint and the streaming `message_start` event.
+/// Converts to the OpenAI shape so only text that actually reaches the prompt is
+/// counted (no JSON envelope, field names, or base64 image bytes), then applies
+/// the same ~4-chars-per-token heuristic the optimizer uses.
+pub(super) fn estimate_request_input_tokens(request: &Value, profile: &LlmProfile) -> u64 {
+    let Ok(openai) = anthropic_to_openai_request(request, profile) else {
+        return 1;
+    };
+    let mut chars = 0usize;
+    if let Some(messages) = openai.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            chars += openai_message_chars(message);
+        }
+    }
+    if let Some(tools) = openai.get("tools") {
+        chars += tools.to_string().chars().count();
+    }
+    (chars / 4).max(1) as u64
+}
+
+fn openai_message_chars(message: &Value) -> usize {
+    let mut chars = message
+        .get("content")
+        .map(openai_content_chars)
+        .unwrap_or(0);
+    if let Some(tool_calls) = message.get("tool_calls") {
+        chars += tool_calls.to_string().chars().count();
+    }
+    chars
+}
+
+fn openai_content_chars(content: &Value) -> usize {
+    match content {
+        Value::String(text) => text.chars().count(),
+        Value::Array(parts) => parts
+            .iter()
+            .map(|part| {
+                part.get("text")
+                    .and_then(Value::as_str)
+                    .map(|text| text.chars().count())
+                    .unwrap_or(0)
+            })
+            .sum(),
+        _ => 0,
+    }
+}
+
 fn copy_number(input: &Value, output: &mut Map<String, Value>, key: &str) {
     if let Some(value) = input.get(key)
         && value.is_number()

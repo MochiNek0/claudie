@@ -9,7 +9,9 @@ use crate::app::AppState;
 use crate::settings::LlmProfile;
 
 use super::capability_cache::save_tool_history_capability;
-use super::http::write_json_response;
+use super::http::{shorten_for_error, write_json_response};
+use super::request_conv::estimate_request_input_tokens;
+use super::response_conv::cached_input_tokens;
 use super::tool_history::{should_retry_with_tool_transcript, tool_history_as_text_transcript};
 use super::upstream::{call_openai_streaming, proxy_status_for_upstream_error};
 use super::{record_proxy_error, record_proxy_event};
@@ -28,7 +30,7 @@ pub(super) fn run_streaming_request(
 ) {
     match call_openai_streaming(agent, profile, outbound_request) {
         Ok(reader) => {
-            let _ = stream_sse_to_client(stream, reader, profile, anthropic_request);
+            let _ = stream_sse_to_client(stream, reader, state, profile, anthropic_request);
         }
         Err(err)
             if !use_tool_transcript
@@ -45,7 +47,7 @@ pub(super) fn run_streaming_request(
             let fallback = tool_history_as_text_transcript(openai_request);
             match call_openai_streaming(agent, profile, &fallback) {
                 Ok(reader) => {
-                    let _ = stream_sse_to_client(stream, reader, profile, anthropic_request);
+                    let _ = stream_sse_to_client(stream, reader, state, profile, anthropic_request);
                 }
                 Err(retry_err) => {
                     let combined = format!("{err}; text tool transcript retry failed: {retry_err}");
@@ -73,6 +75,7 @@ pub(super) fn run_streaming_request(
 fn stream_sse_to_client<R: BufRead>(
     stream: &mut TcpStream,
     reader: R,
+    state: &Arc<Mutex<AppState>>,
     profile: &LlmProfile,
     anthropic_request: &Value,
 ) -> std::io::Result<()> {
@@ -85,9 +88,16 @@ fn stream_sse_to_client<R: BufRead>(
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| profile.model.trim().to_string());
+    let estimated_input_tokens = estimate_request_input_tokens(anthropic_request, profile);
 
-    let mut translator = StreamTranslator::new(stream, fallback_model);
-    translator.run(reader)
+    let mut translator = StreamTranslator::new(stream, fallback_model, estimated_input_tokens);
+    let result = translator.run(reader);
+    // Surface mid-stream upstream errors to the pet/event log; the SSE `error`
+    // event has already been written to the client inside run().
+    if let Some(message) = translator.error_message.take() {
+        record_proxy_error(state, message);
+    }
+    result
 }
 
 struct ToolBlock {
@@ -97,6 +107,7 @@ struct ToolBlock {
 struct StreamTranslator<'a, W: Write> {
     out: &'a mut W,
     fallback_model: String,
+    estimated_input_tokens: u64,
     message_id: Option<String>,
     model: Option<String>,
     started: bool,
@@ -106,14 +117,17 @@ struct StreamTranslator<'a, W: Write> {
     tool_block_by_openai_index: HashMap<u64, ToolBlock>,
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_tokens: u64,
     stop_reason: Option<&'static str>,
+    error_message: Option<String>,
 }
 
 impl<'a, W: Write> StreamTranslator<'a, W> {
-    fn new(out: &'a mut W, fallback_model: String) -> Self {
+    fn new(out: &'a mut W, fallback_model: String, estimated_input_tokens: u64) -> Self {
         Self {
             out,
             fallback_model,
+            estimated_input_tokens,
             message_id: None,
             model: None,
             started: false,
@@ -123,7 +137,9 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
             tool_block_by_openai_index: HashMap::new(),
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_tokens: 0,
             stop_reason: None,
+            error_message: None,
         }
     }
 
@@ -156,8 +172,8 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            if chunk.get("error").is_some() {
-                let _ = self.emit_error_close();
+            if let Some(error) = chunk.get("error") {
+                let _ = self.emit_stream_error(error);
                 return Ok(());
             }
             if let Err(err) = self.absorb(&chunk) {
@@ -245,6 +261,7 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
             if let Some(output) = usage.get("completion_tokens").and_then(Value::as_u64) {
                 self.output_tokens = output;
             }
+            self.cache_read_tokens = cached_input_tokens(usage);
         }
 
         Ok(())
@@ -357,7 +374,10 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
                     "stop_reason": Value::Null,
                     "stop_sequence": Value::Null,
                     "usage": {
-                        "input_tokens": 0,
+                        // OpenAI usage only arrives at the end of the stream, so seed
+                        // input_tokens with an estimate now (overwritten by the real
+                        // value in message_delta) to mirror native message_start.
+                        "input_tokens": self.estimated_input_tokens,
                         "output_tokens": 0,
                         "cache_creation_input_tokens": 0,
                         "cache_read_input_tokens": 0
@@ -366,26 +386,45 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
             }),
         )?;
         self.started = true;
+        // Native Anthropic streams interleave a ping right after message_start.
+        self.write_event("ping", json!({ "type": "ping" }))?;
         Ok(())
     }
 
-    fn emit_error_close(&mut self) -> std::io::Result<()> {
+    /// Upstream signalled an error partway through the stream. Emit a native
+    /// Anthropic `error` event (after closing any open blocks) so Claude Code
+    /// surfaces the failure and can retry, instead of treating a truncated
+    /// stream as a successful turn. The message is also recorded by the caller.
+    fn emit_stream_error(&mut self, error: &Value) -> std::io::Result<()> {
         if !self.started {
             self.emit_message_start()?;
         }
-        if self.stop_reason.is_none() {
-            self.stop_reason = Some("end_turn");
-        }
-        self.finalize()
+        self.close_open_blocks()?;
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| error.as_str())
+            .unwrap_or("upstream streaming error");
+        let message = shorten_for_error(message);
+        let err_type = error
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("api_error")
+            .to_string();
+        self.error_message = Some(message.clone());
+        self.write_event(
+            "error",
+            json!({
+                "type": "error",
+                "error": { "type": err_type, "message": message }
+            }),
+        )
     }
 
-    fn finalize(&mut self) -> std::io::Result<()> {
-        if !self.started {
-            self.emit_message_start()?;
-        }
-        // Close every opened block in the order they were assigned. Anthropic SDK
-        // tolerates any order, but ascending matches the natural DeepSeek/Qwen flow
-        // (thinking → text → tool) and reads cleanly in logs.
+    /// Close every opened block in the order they were assigned. Anthropic SDK
+    /// tolerates any order, but ascending matches the natural DeepSeek/Qwen flow
+    /// (thinking → text → tool) and reads cleanly in logs.
+    fn close_open_blocks(&mut self) -> std::io::Result<()> {
         let mut open_indices: Vec<usize> = Vec::new();
         if let Some(index) = self.thinking_block_index {
             open_indices.push(index);
@@ -405,17 +444,28 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
                 json!({ "type": "content_block_stop", "index": index }),
             )?;
         }
+        Ok(())
+    }
+
+    fn finalize(&mut self) -> std::io::Result<()> {
+        if !self.started {
+            self.emit_message_start()?;
+        }
+        self.close_open_blocks()?;
         let stop_reason = self.stop_reason.unwrap_or("end_turn");
+        // OpenAI folds cached prompt tokens into prompt_tokens; Anthropic reports
+        // them separately, so subtract to keep Claude Code's /cost accurate.
+        let cache_read = self.cache_read_tokens.min(self.input_tokens);
         self.write_event(
             "message_delta",
             json!({
                 "type": "message_delta",
                 "delta": { "stop_reason": stop_reason, "stop_sequence": Value::Null },
                 "usage": {
-                    "input_tokens": self.input_tokens,
+                    "input_tokens": self.input_tokens - cache_read,
                     "output_tokens": self.output_tokens,
                     "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 0
+                    "cache_read_input_tokens": cache_read
                 }
             }),
         )?;
@@ -462,10 +512,12 @@ mod tests {
         let reader = std::io::BufReader::new(std::io::Cursor::new(sse_input.into_bytes()));
         let mut out: Vec<u8> = Vec::new();
         {
-            let mut translator = StreamTranslator::new(&mut out, "fallback-model".to_string());
+            let mut translator = StreamTranslator::new(&mut out, "fallback-model".to_string(), 0);
             translator.run(reader).expect("translator runs");
         }
         // Translator output does not include HTTP header; feed raw events directly.
+        // `ping` is filtered out so structural assertions below focus on content
+        // events; a dedicated test covers the ping itself.
         let mut events = Vec::new();
         let text = String::from_utf8(out).expect("utf8");
         let mut current_event: Option<String> = None;
@@ -477,7 +529,10 @@ mod tests {
                 current_event = Some(rest.trim().to_string());
             } else if let Some(rest) = line.strip_prefix("data:") {
                 let payload: Value = serde_json::from_str(rest.trim()).expect("valid json data");
-                events.push((current_event.clone().unwrap_or_default(), payload));
+                let name = current_event.clone().unwrap_or_default();
+                if name != "ping" {
+                    events.push((name, payload));
+                }
             }
         }
         events
@@ -600,6 +655,25 @@ mod tests {
     }
 
     #[test]
+    fn translator_maps_cached_tokens_into_message_delta_usage() {
+        let chunks = vec![
+            json!({ "id": "c", "choices": [{ "delta": { "content": "hi" }, "finish_reason": "stop" }] }),
+            json!({ "id": "c", "choices": [], "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 4,
+                "prompt_tokens_details": { "cached_tokens": 900 }
+            } }),
+        ];
+        let events = run_translator(&chunks);
+        let delta = events
+            .iter()
+            .find(|(name, _)| name == "message_delta")
+            .expect("message_delta");
+        assert_eq!(delta.1["usage"]["input_tokens"], 100);
+        assert_eq!(delta.1["usage"]["cache_read_input_tokens"], 900);
+    }
+
+    #[test]
     fn translator_maps_length_finish_reason_to_max_tokens() {
         let chunks = vec![
             json!({ "id": "chatcmpl-1", "choices": [{ "delta": { "content": "hi" } }] }),
@@ -614,20 +688,40 @@ mod tests {
     }
 
     #[test]
-    fn translator_closes_cleanly_on_mid_stream_error_chunk() {
+    fn translator_emits_error_event_on_mid_stream_error_chunk() {
         let chunks = vec![
             json!({ "id": "chatcmpl-1", "choices": [{ "delta": { "content": "hi" } }] }),
             json!({ "error": { "type": "server_error", "message": "boom" } }),
         ];
         let events = run_translator(&chunks);
-        // No "error" event should be emitted — must be a clean message_stop.
-        assert!(events.iter().all(|(name, _)| name != "error"));
-        assert_eq!(events.last().unwrap().0, "message_stop");
-        let delta = events
+        // Open blocks are closed, then a native Anthropic `error` event is emitted
+        // (no message_delta/message_stop) so Claude Code can surface and retry.
+        let error = events
             .iter()
-            .find(|(name, _)| name == "message_delta")
-            .expect("message_delta emitted on error close");
-        assert_eq!(delta.1["delta"]["stop_reason"], "end_turn");
+            .find(|(name, _)| name == "error")
+            .expect("error event emitted");
+        assert_eq!(error.1["error"]["type"], "server_error");
+        assert_eq!(error.1["error"]["message"], "boom");
+        assert_eq!(events.last().unwrap().0, "error");
+        assert!(events.iter().any(|(name, _)| name == "content_block_stop"));
+        assert!(events.iter().all(|(name, _)| name != "message_stop"));
+    }
+
+    #[test]
+    fn translator_emits_ping_after_message_start() {
+        let sse_input = "data: {\"id\":\"c\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+        let reader = std::io::BufReader::new(std::io::Cursor::new(sse_input.as_bytes().to_vec()));
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut translator = StreamTranslator::new(&mut out, "m".to_string(), 7);
+            translator.run(reader).unwrap();
+        }
+        let text = String::from_utf8(out).unwrap();
+        let start = text.find("event: message_start").expect("message_start");
+        let ping = text.find("event: ping").expect("ping emitted");
+        assert!(ping > start, "ping must follow message_start");
+        // message_start seeds input_tokens with the estimate.
+        assert!(text.contains("\"input_tokens\":7"));
     }
 
     #[test]
@@ -635,7 +729,7 @@ mod tests {
         let reader = std::io::BufReader::new(std::io::Cursor::new(b"data: [DONE]\n\n".to_vec()));
         let mut out: Vec<u8> = Vec::new();
         {
-            let mut translator = StreamTranslator::new(&mut out, "fallback-model".to_string());
+            let mut translator = StreamTranslator::new(&mut out, "fallback-model".to_string(), 0);
             translator.run(reader).unwrap();
         }
         let text = String::from_utf8(out).unwrap();

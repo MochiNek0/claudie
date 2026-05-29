@@ -61,6 +61,16 @@ pub(super) fn openai_to_anthropic_response(
         _ => "end_turn",
     };
 
+    let prompt_tokens = openai
+        .pointer("/usage/prompt_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_read = openai
+        .get("usage")
+        .map(cached_input_tokens)
+        .unwrap_or(0)
+        .min(prompt_tokens);
+
     json!({
         "id": openai.get("id").and_then(Value::as_str).unwrap_or("msg_claudie_proxy"),
         "type": "message",
@@ -70,10 +80,26 @@ pub(super) fn openai_to_anthropic_response(
         "stop_reason": stop_reason,
         "stop_sequence": Value::Null,
         "usage": {
-            "input_tokens": openai.pointer("/usage/prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-            "output_tokens": openai.pointer("/usage/completion_tokens").and_then(Value::as_u64).unwrap_or(0)
+            // Anthropic reports cache reads separately from input_tokens, while OpenAI
+            // folds cached prompt tokens into prompt_tokens. Subtract so Claude Code's
+            // /cost accounting matches native behaviour.
+            "input_tokens": prompt_tokens - cache_read,
+            "output_tokens": openai.pointer("/usage/completion_tokens").and_then(Value::as_u64).unwrap_or(0),
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": 0
         }
     })
+}
+
+/// Extract the number of prompt tokens served from the upstream's prompt cache.
+/// OpenAI exposes `usage.prompt_tokens_details.cached_tokens`; DeepSeek uses
+/// `usage.prompt_cache_hit_tokens`. Returns 0 when neither is present.
+pub(super) fn cached_input_tokens(usage: &Value) -> u64 {
+    usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64))
+        .unwrap_or(0)
 }
 
 fn anthropic_tool_use_from_openai(tool_call: &Value) -> Option<Value> {
@@ -293,5 +319,47 @@ mod tests {
         let content = converted["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
+    }
+
+    #[test]
+    fn maps_cached_tokens_to_cache_read_and_subtracts_from_input() {
+        let profile = LlmProfile {
+            model: "gpt-4o".to_string(),
+            ..LlmProfile::default()
+        };
+        let response = json!({
+            "id": "c",
+            "choices": [{ "finish_reason": "stop", "message": { "content": "ok" } }],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 20,
+                "prompt_tokens_details": { "cached_tokens": 800 }
+            }
+        });
+        let converted = openai_to_anthropic_response(&response, &json!({}), &profile);
+        assert_eq!(converted["usage"]["input_tokens"], 200);
+        assert_eq!(converted["usage"]["cache_read_input_tokens"], 800);
+        assert_eq!(converted["usage"]["cache_creation_input_tokens"], 0);
+    }
+
+    #[test]
+    fn maps_deepseek_prompt_cache_hit_tokens() {
+        let profile = LlmProfile {
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            model: "deepseek-chat".to_string(),
+            ..LlmProfile::default()
+        };
+        let response = json!({
+            "id": "c",
+            "choices": [{ "finish_reason": "stop", "message": { "content": "ok" } }],
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 10,
+                "prompt_cache_hit_tokens": 500
+            }
+        });
+        let converted = openai_to_anthropic_response(&response, &json!({}), &profile);
+        assert_eq!(converted["usage"]["input_tokens"], 0);
+        assert_eq!(converted["usage"]["cache_read_input_tokens"], 500);
     }
 }

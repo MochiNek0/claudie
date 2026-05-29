@@ -7,7 +7,10 @@ pub(super) const DEFAULT_KEEP_RECENT_MESSAGES: usize = 12;
 pub(super) const DEFAULT_KEEP_RECENT_TOKENS: usize = 10_000;
 pub(super) const DEFAULT_TOOL_RESULT_LIMIT_TOKENS: usize = 3_000;
 pub(super) const DEFAULT_TEXT_LIMIT_TOKENS: usize = 6_000;
-pub(super) const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 4_096;
+// High enough not to clip the long outputs Claude Code routinely asks for
+// (file writes, plans). Acts as a sanity ceiling on absurd values rather than an
+// active truncator; set CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=0 to disable entirely.
+pub(super) const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_000;
 pub(super) const DEFAULT_LOCAL_SUMMARY_TOKENS: usize = 2_000;
 pub(super) const DEFAULT_CACHE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 pub(super) const DEFAULT_SUMMARY_CACHE_TTL_HOURS: u64 = 168;
