@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use crate::app::stats::tool_stats_kind;
 use crate::app::{
     AppState, ChoiceDecision, ChoiceKind, ChoiceOption, ChoiceQuestion, ChoiceWaiter,
-    PendingChoice, PendingPermission, PermissionDecision, PermissionWaiter, PetMood, SessionInfo,
+    PendingChoice, PendingPermission, PermissionDecision, PermissionWaiter, PetMood,
 };
 use crate::config::PERMISSION_WAIT;
 use crate::globals::APP_STATE;
@@ -62,14 +62,6 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
         } else if clears_pending_interaction(event.as_str()) {
             clear_stale_interactions(&mut state, &session_id);
         }
-        state.sessions.insert(
-            session_id,
-            SessionInfo {
-                last_event: event.clone(),
-                cwd: cwd.clone(),
-                updated_at: Instant::now(),
-            },
-        );
         update_quota_from_value(&mut state.quota, &payload);
         if let Some(path) = transcript_path.as_deref() {
             state.quota.transcript_path = path.to_string();
@@ -81,12 +73,7 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
             apply_hook_activity(&mut state, activity, &payload);
         }
 
-        let detail = if tool_name.is_empty() {
-            summarize_payload(&payload)
-        } else {
-            tool_name
-        };
-        state.push_event(event.clone(), detail);
+        state.last_activity = Instant::now();
     }
 
     if matches!(
@@ -183,7 +170,6 @@ fn handle_permission_request(
             true,
         );
         state.record_permission_stats();
-        state.push_event("PermissionRequest", permission.tool_name.clone());
         update_quota_from_value(&mut state.quota, &payload);
         state.record_token_snapshot();
         permission
@@ -360,13 +346,6 @@ fn handle_choice_request(
         let resting = state.activity_mood().unwrap_or(PetMood::Thinking);
         state.set_resting_mood(resting, false);
         state.record_choice_stats();
-        state.push_event(
-            "PreToolUse",
-            match kind {
-                ChoiceKind::AskUserQuestion => "AskUserQuestion",
-                ChoiceKind::ExitPlanMode => "ExitPlanMode",
-            },
-        );
         update_quota_from_value(&mut state.quota, &json!({}));
         state.record_token_snapshot();
         choice

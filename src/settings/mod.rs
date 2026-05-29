@@ -148,24 +148,6 @@ impl UserSettings {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn set_animation_value(&mut self, mood: PetMood, value: String) {
-        match mood {
-            PetMood::Idle => self.animations.idle = value,
-            PetMood::Thinking => self.animations.thinking = value,
-            PetMood::Typing => self.animations.typing = value,
-            PetMood::Building => self.animations.building = value,
-            PetMood::Search => self.animations.search = value,
-            PetMood::Happy => self.animations.happy = value,
-            PetMood::Error => self.animations.error = value,
-            PetMood::Sleeping => self.animations.sleeping = value,
-            PetMood::Subagent => self.animations.subagent = value,
-            PetMood::Pomodoro => self.animations.pomodoro = value,
-            PetMood::Wave => self.animations.wave = value,
-            PetMood::Stretch => self.animations.stretch = value,
-        }
-    }
-
     pub(crate) fn pet_asset_base_dir(&self) -> PathBuf {
         let trimmed = self.pet_dir.trim();
         if trimmed.is_empty() {
@@ -226,13 +208,6 @@ impl LlmProfileDb {
             .iter()
             .find(|profile| profile.id == self.active_profile_id)
             .or_else(|| self.profiles.first())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn active_label(&self) -> String {
-        self.active_profile()
-            .map(LlmProfile::display_label)
-            .unwrap_or_default()
     }
 
     pub(crate) fn upsert_profile(&mut self, mut profile: LlmProfile) {

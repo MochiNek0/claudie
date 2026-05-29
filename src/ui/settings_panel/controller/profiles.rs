@@ -109,7 +109,7 @@ impl SettingsController {
             self.status(&format!("Failed to save profile: {err}"));
             return;
         }
-        sync_app_llm_profiles(&self.llm_db, "saved LLM profile");
+        sync_app_llm_profiles(&self.llm_db);
         if activate_profile {
             if let Err(err) = ensure_claude_onboarding_complete() {
                 self.status(&format!(
@@ -145,7 +145,7 @@ impl SettingsController {
             self.status(&format!("Failed to save imported profile: {err}"));
             return;
         }
-        sync_app_llm_profiles(&self.llm_db, "imported current LLM profile");
+        sync_app_llm_profiles(&self.llm_db);
         self.refresh_profile_fields();
         self.status(&format!(
             "Imported {}.",
@@ -172,7 +172,7 @@ impl SettingsController {
             self.status(&format!("Failed to delete profile: {err}"));
             return;
         }
-        sync_app_llm_profiles(&self.llm_db, "deleted LLM profile");
+        sync_app_llm_profiles(&self.llm_db);
         self.refresh_profile_fields();
         self.status(&format!("Deleted {}.", profile_label_for_message(&removed)));
     }

@@ -8,7 +8,6 @@ pub(crate) const PET_SCALE_MIN_PERCENT: u32 = 50;
 pub(crate) const PET_SCALE_MAX_PERCENT: u32 = 150;
 pub(crate) const POMODORO_MIN_MINUTES: u32 = 1;
 pub(crate) const POMODORO_MAX_MINUTES: u32 = 240;
-pub(crate) const MAX_EVENTS: usize = 8;
 pub(crate) const PERMISSION_WAIT: Duration = Duration::from_secs(590);
 pub(crate) const TRANSPARENT_KEY: u32 = 0x00ff_00ff;
 pub(crate) const PET_X: i32 = 14;

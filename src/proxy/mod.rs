@@ -146,45 +146,22 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
         }
     };
     let optimized = proxy_optimizer::optimize_openai_request(openai_request, &profile);
-    if optimized.cache_hit {
-        record_proxy_event(&state, "summary cache hit".to_string());
-    } else if optimized.local_summary {
-        record_proxy_event(&state, "local context summary applied".to_string());
-    } else if optimized.compressed {
-        record_proxy_event(&state, "compressed OpenAI proxy context".to_string());
-    }
     let openai_request = if let Some(pending) = optimized.pending_summary {
         match call_openai(&agent, &profile, &pending.summary_request) {
             Ok(summary_response) => {
                 match proxy_optimizer::summary_text_from_openai_response(&summary_response) {
                     Some(summary) => {
-                        if let Err(err) = proxy_optimizer::save_summary(
+                        let _ = proxy_optimizer::save_summary(
                             &pending.cache_key,
                             &summary,
                             &pending.config,
-                        ) {
-                            record_proxy_event(&state, format!("summary cache save failed: {err}"));
-                        } else {
-                            record_proxy_event(&state, "summary cache saved".to_string());
-                        }
+                        );
                         pending.request_with_summary(&summary)
                     }
-                    None => {
-                        record_proxy_event(
-                            &state,
-                            "summary response had no text; using compressed fallback".to_string(),
-                        );
-                        pending.fallback_request
-                    }
+                    None => pending.fallback_request,
                 }
             }
-            Err(err) => {
-                record_proxy_event(
-                    &state,
-                    format!("summary request failed; using compressed fallback: {err}"),
-                );
-                pending.fallback_request
-            }
+            Err(_) => pending.fallback_request,
         }
     } else {
         optimized.request
@@ -201,17 +178,7 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
         || cached_tool_history_needs_transcript(&profile, &openai_request);
     let known_native =
         !force_transcript_no_tools && cached_tool_history_known_native(&profile, &openai_request);
-    let outbound_request = if force_transcript_no_tools {
-        record_proxy_event(
-            &state,
-            format!("model {outbound_model} does not support tools; using text transcript"),
-        );
-        tool_history_as_text_transcript(&openai_request)
-    } else if use_tool_transcript {
-        record_proxy_event(
-            &state,
-            "using cached OpenAI tool transcript compatibility mode".to_string(),
-        );
+    let outbound_request = if use_tool_transcript {
         tool_history_as_text_transcript(&openai_request)
     } else {
         openai_request.clone()
@@ -239,13 +206,7 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
                 && !known_native
                 && should_retry_with_tool_transcript(&err, &openai_request) =>
         {
-            record_proxy_event(
-                &state,
-                "retrying OpenAI request with text tool transcript".to_string(),
-            );
-            if let Err(cache_err) = save_tool_history_capability(&profile, &openai_request, false) {
-                record_proxy_event(&state, format!("capability cache save failed: {cache_err}"));
-            }
+            let _ = save_tool_history_capability(&profile, &openai_request, false);
             let fallback_request = tool_history_as_text_transcript(&openai_request);
             match call_openai(&agent, &profile, &fallback_request) {
                 Ok(value) => value,
@@ -301,12 +262,6 @@ fn handle_count_tokens(stream: &mut TcpStream, state: &Arc<Mutex<AppState>>, bod
 
 pub(super) fn record_proxy_error(state: &Arc<Mutex<AppState>>, err: String) {
     let mut state = state.lock().expect("state poisoned");
-    state.last_error = err.clone();
+    state.last_error = err;
     state.set_mood(PetMood::Error);
-    state.push_event("proxy", err);
-}
-
-pub(super) fn record_proxy_event(state: &Arc<Mutex<AppState>>, event: String) {
-    let mut state = state.lock().expect("state poisoned");
-    state.push_event("proxy optimizer", event);
 }

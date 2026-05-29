@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use self::pomodoro::{PomodoroMode, PomodoroState, PomodoroStatus, PomodoroTick};
 use self::stats::{DailyStatsDb, ToolStatsKind, load_daily_stats};
-use crate::config::MAX_EVENTS;
 #[cfg(windows)]
 use crate::globals::PET_RENDERER;
 use crate::settings::{LlmProfileDb, UserSettings, load_llm_profile_db, load_user_settings};
@@ -179,13 +178,6 @@ impl PendingChoice {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Clone)]
-pub(crate) struct EventRecord {
-    pub(crate) event: String,
-    pub(crate) detail: String,
-}
-
 #[derive(Clone, Default)]
 pub(crate) struct QuotaStats {
     pub(crate) input_tokens: u64,
@@ -201,14 +193,6 @@ pub(crate) struct QuotaStats {
     pub(crate) last_model: String,
     pub(crate) rate_limits: String,
     pub(crate) transcript_path: String,
-}
-
-#[allow(dead_code)]
-#[derive(Clone)]
-pub(crate) struct SessionInfo {
-    pub(crate) last_event: String,
-    pub(crate) cwd: String,
-    pub(crate) updated_at: Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -233,8 +217,6 @@ pub(crate) struct AppState {
     pub(crate) active_tool_keys: HashMap<String, ActiveTool>,
     pub(crate) active_tool_names: HashMap<String, VecDeque<String>>,
     pub(crate) active_subagents: usize,
-    pub(crate) sessions: HashMap<String, SessionInfo>,
-    pub(crate) events: VecDeque<EventRecord>,
     pub(crate) pending_permissions: VecDeque<PendingPermission>,
     pub(crate) pending_choices: VecDeque<PendingChoice>,
     pub(crate) quota: QuotaStats,
@@ -267,8 +249,6 @@ impl AppState {
             active_tool_keys: HashMap::new(),
             active_tool_names: HashMap::new(),
             active_subagents: 0,
-            sessions: HashMap::new(),
-            events: VecDeque::new(),
             pending_permissions: VecDeque::new(),
             pending_choices: VecDeque::new(),
             quota: QuotaStats::default(),
@@ -282,17 +262,6 @@ impl AppState {
             stats_last_cache_creation_tokens: 0,
             stats_last_cache_read_tokens: 0,
         }
-    }
-
-    pub(crate) fn push_event(&mut self, event: impl Into<String>, detail: impl Into<String>) {
-        self.events.push_front(EventRecord {
-            event: event.into(),
-            detail: detail.into(),
-        });
-        while self.events.len() > MAX_EVENTS {
-            self.events.pop_back();
-        }
-        self.last_activity = Instant::now();
     }
 
     pub(crate) fn set_mood(&mut self, mood: PetMood) {
@@ -582,7 +551,6 @@ impl AppState {
             PetMood::Wave
         };
         self.set_resting_mood(mood, true);
-        self.push_event("pet", mood.key());
     }
 
     pub(crate) fn skip_pomodoro(&mut self) {

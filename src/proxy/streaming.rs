@@ -10,11 +10,11 @@ use crate::settings::LlmProfile;
 
 use super::capability_cache::save_tool_history_capability;
 use super::http::{shorten_for_error, write_json_response};
+use super::record_proxy_error;
 use super::request_conv::estimate_request_input_tokens;
 use super::response_conv::cached_input_tokens;
 use super::tool_history::{should_retry_with_tool_transcript, tool_history_as_text_transcript};
 use super::upstream::{call_openai_streaming, proxy_status_for_upstream_error};
-use super::{record_proxy_error, record_proxy_event};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_streaming_request(
@@ -37,13 +37,7 @@ pub(super) fn run_streaming_request(
                 && !known_native
                 && should_retry_with_tool_transcript(&err, openai_request) =>
         {
-            record_proxy_event(
-                state,
-                "retrying OpenAI streaming with text tool transcript".to_string(),
-            );
-            if let Err(cache_err) = save_tool_history_capability(profile, openai_request, false) {
-                record_proxy_event(state, format!("capability cache save failed: {cache_err}"));
-            }
+            let _ = save_tool_history_capability(profile, openai_request, false);
             let fallback = tool_history_as_text_transcript(openai_request);
             match call_openai_streaming(agent, profile, &fallback) {
                 Ok(reader) => {

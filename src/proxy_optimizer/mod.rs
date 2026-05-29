@@ -22,8 +22,12 @@ const MESSAGE_ENVELOPE_CHARS: usize = 24;
 pub(crate) struct OptimizedRequest {
     pub(crate) request: Value,
     pub(crate) pending_summary: Option<PendingSummary>,
+    // Optimizer outcome flags: asserted by the optimizer tests, not read in production.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) cache_hit: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) compressed: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) local_summary: bool,
 }
 

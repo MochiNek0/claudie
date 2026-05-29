@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Shared visual tokens for the settings panel and overlay popups.
 //!
 //! The look is a "modern frosted light" approximation: cool-tinted neutrals,
@@ -13,16 +12,12 @@ pub(crate) const fn rgb(r: u8, g: u8, b: u8) -> u32 {
 
 // Surfaces ---------------------------------------------------------------
 
-/// Window backdrop (cool light, slight blue undertone).
-pub(crate) const BG: u32 = rgb(244, 247, 252);
 /// Primary card / sheet background.
 pub(crate) const SURFACE: u32 = rgb(255, 255, 255);
 /// Header strip, subtly elevated surface.
 pub(crate) const SURFACE_ALT: u32 = rgb(249, 251, 254);
 /// Input field background.
 pub(crate) const FIELD: u32 = rgb(242, 245, 250);
-/// Field hover/active.
-pub(crate) const FIELD_HOVER: u32 = rgb(234, 239, 247);
 
 // Lines & elevation -------------------------------------------------------
 
@@ -30,8 +25,6 @@ pub(crate) const FIELD_HOVER: u32 = rgb(234, 239, 247);
 pub(crate) const HAIRLINE: u32 = rgb(228, 232, 240);
 /// Input border.
 pub(crate) const FIELD_BORDER: u32 = rgb(218, 224, 234);
-/// Shadow strip used below the settings panel header.
-pub(crate) const SHADOW_SOFT: u32 = rgb(232, 236, 244);
 
 // Text --------------------------------------------------------------------
 
@@ -45,7 +38,6 @@ pub(crate) const MUTED_SOFT: u32 = rgb(156, 163, 175);
 // Accent (Apple iOS-style blue) ------------------------------------------
 
 pub(crate) const ACCENT: u32 = rgb(10, 132, 255);
-pub(crate) const ACCENT_PRESS: u32 = rgb(0, 96, 198);
 pub(crate) const ACCENT_SOFT: u32 = rgb(229, 240, 255);
 
 // Danger ------------------------------------------------------------------
@@ -55,19 +47,7 @@ pub(crate) const DANGER_SOFT: u32 = rgb(254, 226, 232);
 
 // Radii -------------------------------------------------------------------
 
-pub(crate) const RADIUS_WINDOW: i32 = 18;
 pub(crate) const RADIUS_CARD: i32 = 14;
 pub(crate) const RADIUS_FIELD: i32 = 10;
 pub(crate) const RADIUS_BUTTON: i32 = 9;
 pub(crate) const RADIUS_CHIP: i32 = 8;
-
-// Typography (Segoe UI). Heights are passed negated into CreateFontW. ----
-
-pub(crate) const FONT_FACE: &str = "Segoe UI";
-pub(crate) const FONT_TITLE_PX: i32 = 22;
-pub(crate) const FONT_HEADING_PX: i32 = 16;
-pub(crate) const FONT_BODY_PX: i32 = 13;
-pub(crate) const FONT_LABEL_PX: i32 = 12;
-
-pub(crate) const WEIGHT_REGULAR: i32 = 400;
-pub(crate) const WEIGHT_SEMIBOLD: i32 = 600;

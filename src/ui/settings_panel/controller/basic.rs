@@ -61,7 +61,7 @@ impl SettingsController {
             PET_SCALE_MIN_PERCENT,
             PET_SCALE_MAX_PERCENT,
         );
-        sync_app_settings(&self.settings, "changed pet size");
+        sync_app_settings(&self.settings);
     }
 
     pub(in crate::ui::settings_panel) fn update_sleep_after_live(&mut self, value: f32) {
@@ -71,7 +71,7 @@ impl SettingsController {
         {
             ui.set_sleep_after(self.settings.sleep_after_secs as f32);
         }
-        sync_app_settings(&self.settings, "changed sleep timeout");
+        sync_app_settings(&self.settings);
     }
 
     pub(in crate::ui::settings_panel) fn save_basic_settings(&mut self) {
@@ -80,7 +80,7 @@ impl SettingsController {
             self.status(&format!("Failed to save basic settings: {err}"));
             return;
         }
-        sync_app_settings(&self.settings, "saved basic settings");
+        sync_app_settings(&self.settings);
         match reload_animation_store() {
             Ok(_) => self.status("Saved pet settings."),
             Err(err) => self.status(&format!("Saved, but failed to reload pet renderer: {err}")),
@@ -95,7 +95,7 @@ impl SettingsController {
         self.settings.gif_dir = defaults.gif_dir;
         self.settings.animations = defaults.animations;
         self.refresh_basic_fields();
-        sync_app_settings(&self.settings, "reset pet settings");
+        sync_app_settings(&self.settings);
         self.status("Reset pet fields to defaults.");
     }
 }

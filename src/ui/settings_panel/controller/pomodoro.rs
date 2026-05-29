@@ -43,7 +43,7 @@ impl SettingsController {
             self.status(&format!("Failed to save pomodoro settings: {err}"));
             return;
         }
-        sync_app_settings(&self.settings, "saved pomodoro settings");
+        sync_app_settings(&self.settings);
         self.refresh_pomodoro_tab();
         self.status("Saved pomodoro settings.");
     }

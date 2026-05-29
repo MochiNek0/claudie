@@ -21,10 +21,8 @@ pub(crate) fn start_hook_server(state: Arc<Mutex<AppState>>, port: u16) -> Resul
                 }
                 Err(err) => {
                     let mut state = state.lock().expect("state poisoned");
-                    let last_error = format!("Hook accept failed: {err}");
-                    state.last_error = last_error.clone();
+                    state.last_error = format!("Hook accept failed: {err}");
                     state.set_mood(PetMood::Error);
-                    state.push_event("server", last_error);
                 }
             }
         }

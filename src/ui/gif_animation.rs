@@ -349,20 +349,12 @@ pub(crate) fn init_animation_store() {
     let store = unsafe { AnimationStore::load() };
     match store {
         Ok(store) => {
-            let source_summary = store.source_summary.clone();
             let _ = PET_RENDERER.set(Mutex::new(store));
-            if let Some(state) = APP_STATE.get() {
-                state
-                    .lock()
-                    .expect("state poisoned")
-                    .push_event("assets", source_summary);
-            }
         }
         Err(err) => {
             if let Some(state) = APP_STATE.get() {
                 let mut state = state.lock().expect("state poisoned");
-                state.last_error = err.clone();
-                state.push_event("assets", err);
+                state.last_error = err;
             }
         }
     }

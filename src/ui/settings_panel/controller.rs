@@ -80,19 +80,17 @@ pub(super) fn mutate_app_state(action: impl FnOnce(&mut AppState)) {
     }
 }
 
-pub(super) fn sync_app_settings(settings: &UserSettings, event: &str) {
+pub(super) fn sync_app_settings(settings: &UserSettings) {
     if let Some(state) = APP_STATE.get() {
         let mut state = state.lock().expect("state poisoned");
         state.settings = settings.clone();
-        state.push_event("settings", event);
     }
 }
 
-pub(super) fn sync_app_llm_profiles(llm_db: &LlmProfileDb, event: &str) {
+pub(super) fn sync_app_llm_profiles(llm_db: &LlmProfileDb) {
     if let Some(state) = APP_STATE.get() {
         let mut state = state.lock().expect("state poisoned");
         state.llm_profiles = llm_db.clone();
-        state.push_event("settings", event);
     }
 }
 

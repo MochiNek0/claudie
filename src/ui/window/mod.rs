@@ -430,32 +430,6 @@ unsafe fn overlay_hwnd(hwnd: HWND) -> HWND {
     GetWindowLongPtrW(hwnd, GWLP_USERDATA) as HWND
 }
 
-#[allow(dead_code)]
-unsafe fn sync_permission_overlay(hwnd: HWND) {
-    if hwnd.is_null() {
-        return;
-    }
-    if !has_pending_overlay() {
-        ShowWindow(hwnd, SW_HIDE);
-        return;
-    }
-
-    let screen_w = GetSystemMetrics(SM_CXSCREEN);
-    let screen_h = GetSystemMetrics(SM_CYSCREEN);
-    let x = (screen_w - PERMISSION_OVERLAY_WIDTH) / 2;
-    let y = (screen_h - PERMISSION_OVERLAY_HEIGHT) / 2;
-    SetWindowPos(
-        hwnd,
-        HWND_TOPMOST,
-        x,
-        y,
-        PERMISSION_OVERLAY_WIDTH,
-        PERMISSION_OVERLAY_HEIGHT,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW,
-    );
-    InvalidateRect(hwnd, std::ptr::null(), 0);
-}
-
 unsafe fn show_context_menu(hwnd: HWND) {
     let menu = CreatePopupMenu();
     if menu.is_null() {
@@ -630,19 +604,16 @@ fn activate_llm_profile(index: usize) {
         return;
     }
 
-    let label = profile_menu_label(&profile);
     let mut state = state_handle.lock().expect("state poisoned");
     state.llm_profiles = db;
     state.set_mood(PetMood::Happy);
-    state.push_event("settings", format!("using {label}"));
 }
 
 fn record_profile_activation_error(message: String) {
     if let Some(state) = APP_STATE.get() {
         let mut state = state.lock().expect("state poisoned");
-        state.last_error = message.clone();
+        state.last_error = message;
         state.set_mood(PetMood::Error);
-        state.push_event("settings", message);
     }
 }
 

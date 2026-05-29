@@ -139,16 +139,16 @@ fn run_app(state: Arc<Mutex<AppState>>, port: u16) {
 
 fn start_runtime_hooks(state: Arc<Mutex<AppState>>, port: u16) -> bool {
     if let Err(err) = start_hook_server(state.clone(), port) {
-        record_app_error(&state, "server", err);
+        record_app_error(&state, err);
         return false;
     }
 
     if let Err(err) = start_openai_proxy_server(state.clone()) {
-        record_app_error(&state, "proxy", err);
+        record_app_error(&state, err);
     }
 
     if let Err(err) = ensure_claude_hooks(state.clone(), port) {
-        record_app_error(&state, "hooks", err);
+        record_app_error(&state, err);
         return false;
     }
 
@@ -161,9 +161,8 @@ fn cleanup_runtime_hooks() {
     }
 }
 
-fn record_app_error(state: &Arc<Mutex<AppState>>, source: &str, err: String) {
+fn record_app_error(state: &Arc<Mutex<AppState>>, err: String) {
     let mut state = state.lock().expect("state poisoned");
-    state.last_error = err.clone();
+    state.last_error = err;
     state.set_mood(PetMood::Error);
-    state.push_event(source, err);
 }
