@@ -1,3 +1,7 @@
+use std::sync::{
+    Mutex, OnceLock,
+    atomic::{AtomicI32, AtomicU64, Ordering},
+};
 use windows_sys::Win32::Foundation::{RECT, SIZE};
 use windows_sys::Win32::Graphics::Gdi::{
     CreatePen, CreateSolidBrush, DeleteObject, Ellipse, FillRect, GetTextExtentPoint32W, HDC,
@@ -11,7 +15,81 @@ use crate::config::*;
 use crate::globals::PET_RENDERER;
 use crate::settings::UserSettings;
 use crate::ui::theme;
-use crate::util::{compact_path, shorten, wide};
+use crate::util::{compact_path, markdown_to_display_text, shorten, wide};
+
+static PERMISSION_SCROLL_LINES: AtomicI32 = AtomicI32::new(0);
+static PERMISSION_SCROLL_ID: AtomicU64 = AtomicU64::new(0);
+static PERMISSION_DETAIL_CACHE: OnceLock<Mutex<PermissionDetailCache>> = OnceLock::new();
+static CHOICE_SCROLL_LINES: AtomicI32 = AtomicI32::new(0);
+static CHOICE_SCROLL_ID: AtomicU64 = AtomicU64::new(0);
+const CHOICE_SCROLL_LINE_H: i32 = 17;
+
+#[derive(Default)]
+struct PermissionDetailCache {
+    id: u64,
+    width: i32,
+    lines: Vec<PermissionDetailLine>,
+}
+
+#[derive(Clone)]
+struct PermissionDetailLine {
+    text: String,
+    color: u32,
+}
+
+pub(super) fn scroll_permission_detail_lines(delta: i32) {
+    let current = PERMISSION_SCROLL_LINES.load(Ordering::Relaxed);
+    PERMISSION_SCROLL_LINES.store(current.saturating_add(delta).max(0), Ordering::Relaxed);
+}
+
+pub(super) fn scroll_choice_lines(delta: i32) {
+    let current = CHOICE_SCROLL_LINES.load(Ordering::Relaxed);
+    CHOICE_SCROLL_LINES.store(current.saturating_add(delta).max(0), Ordering::Relaxed);
+}
+
+pub(super) fn choice_option_at_point(
+    choice: &PendingChoice,
+    px: i32,
+    py: i32,
+) -> Option<(usize, usize)> {
+    let viewport = choice_content_viewport();
+    if !point_in_rect(px, py, viewport) {
+        return None;
+    }
+
+    let (scroll_lines, _, _, _) = choice_scroll_metrics(choice);
+    let viewport_top = viewport.1;
+    let viewport_bottom = viewport.1 + viewport.3;
+    let mut y = viewport_top - scroll_lines * CHOICE_SCROLL_LINE_H;
+    if !choice.detail.trim().is_empty() {
+        y += choice_detail_reserved_h();
+    }
+
+    for (question_index, question) in choice.questions.iter().enumerate() {
+        if y > viewport_bottom {
+            break;
+        }
+        y += 16 + 28 + 3;
+        for (option_index, _) in question.options.iter().enumerate() {
+            if y > viewport_bottom {
+                break;
+            }
+            if y >= viewport_top
+                && y + CHOICE_OPTION_H <= viewport_bottom
+                && point_in_rect(
+                    px,
+                    py,
+                    (CHOICE_OPTION_X, y, CHOICE_OPTION_W, CHOICE_OPTION_H),
+                )
+            {
+                return Some((question_index, option_index));
+            }
+            y += CHOICE_OPTION_H + 4;
+        }
+        y += 6;
+    }
+    None
+}
 
 pub(super) fn render_scene(hdc: HDC, rect: &RECT, state: &RenderState) {
     fill_rect(hdc, rect, TRANSPARENT_KEY);
@@ -81,7 +159,7 @@ fn draw_permission_request(hdc: HDC, permission: &PendingPermission) {
 }
 
 fn draw_permission_detail_panel(hdc: HDC, permission: &PendingPermission, x: i32, y: i32, w: i32) {
-    let panel_h = 120;
+    let panel_h = PERMISSION_DETAIL_PANEL_H;
     filled_round_rect(
         hdc,
         x,
@@ -92,38 +170,160 @@ fn draw_permission_detail_panel(hdc: HDC, permission: &PendingPermission, x: i32
         theme::FIELD,
         theme::FIELD_BORDER,
     );
-    let mut next_y = draw_wrapped_text_limited(
-        hdc,
-        x + 16,
-        y + 14,
-        w - 32,
-        &permission.summary,
-        theme::INK,
-        17,
-        3,
-    );
-    next_y += 4;
-    text_fit(
-        hdc,
-        x + 16,
-        next_y,
-        w - 32,
-        &format!("session {}", shorten(&permission.session_id, 8)),
-        theme::MUTED,
-    );
-    next_y += 17;
-    if !permission.cwd.is_empty() {
-        draw_wrapped_text_limited(
+    ensure_permission_scroll_id(permission.id);
+    draw_scrollable_permission_text(hdc, permission, x, y, w, panel_h);
+}
+
+fn ensure_permission_scroll_id(id: u64) {
+    if PERMISSION_SCROLL_ID.swap(id, Ordering::Relaxed) != id {
+        PERMISSION_SCROLL_LINES.store(0, Ordering::Relaxed);
+    }
+}
+
+fn draw_scrollable_permission_text(
+    hdc: HDC,
+    permission: &PendingPermission,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) {
+    let line_height = 17;
+    let visible_lines = ((h - 28) / line_height).max(1) as usize;
+    let text_x = x + 16;
+    let text_y = y + 14;
+    let text_w = w - 40;
+    let (visible_rows, total_lines, max_scroll, scroll) =
+        visible_permission_detail_lines(hdc, permission, text_w, visible_lines);
+
+    for (line_index, line) in visible_rows.iter().enumerate() {
+        text(
             hdc,
-            x + 16,
-            next_y,
-            w - 32,
-            &compact_path(&permission.cwd),
-            theme::MUTED_SOFT,
-            17,
-            2,
+            text_x,
+            text_y + line_index as i32 * line_height,
+            &line.text,
+            line.color,
         );
     }
+
+    if max_scroll > 0 {
+        draw_scrollbar(
+            hdc,
+            x + w - 10,
+            y + 12,
+            h - 24,
+            visible_lines,
+            total_lines,
+            scroll,
+        );
+    }
+}
+
+fn visible_permission_detail_lines(
+    hdc: HDC,
+    permission: &PendingPermission,
+    text_w: i32,
+    visible_lines: usize,
+) -> (Vec<PermissionDetailLine>, usize, i32, i32) {
+    let mut cache = permission_detail_cache()
+        .lock()
+        .expect("permission detail cache poisoned");
+    if cache.id != permission.id || cache.width != text_w {
+        cache.id = permission.id;
+        cache.width = text_w;
+        cache.lines = build_permission_detail_lines(hdc, permission, text_w);
+    }
+
+    let total_lines = cache.lines.len();
+    let max_scroll = total_lines.saturating_sub(visible_lines) as i32;
+    let scroll = PERMISSION_SCROLL_LINES
+        .load(Ordering::Relaxed)
+        .clamp(0, max_scroll);
+    PERMISSION_SCROLL_LINES.store(scroll, Ordering::Relaxed);
+    let visible_rows = cache
+        .lines
+        .iter()
+        .skip(scroll as usize)
+        .take(visible_lines)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    (visible_rows, total_lines, max_scroll, scroll)
+}
+
+fn permission_detail_cache() -> &'static Mutex<PermissionDetailCache> {
+    PERMISSION_DETAIL_CACHE.get_or_init(|| Mutex::new(PermissionDetailCache::default()))
+}
+
+fn build_permission_detail_lines(
+    hdc: HDC,
+    permission: &PendingPermission,
+    text_w: i32,
+) -> Vec<PermissionDetailLine> {
+    let detail_text = permission_detail_text(permission);
+    let compact_cwd = compact_path(&permission.cwd);
+    wrap_text_to_width(hdc, &detail_text, text_w)
+        .into_iter()
+        .map(|line| {
+            let color = if line.starts_with("session ") {
+                theme::MUTED
+            } else if line == compact_cwd {
+                theme::MUTED_SOFT
+            } else {
+                theme::INK
+            };
+            PermissionDetailLine { text: line, color }
+        })
+        .collect()
+}
+
+fn permission_detail_text(permission: &PendingPermission) -> String {
+    let mut text = markdown_to_display_text(&permission.summary);
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str(&format!("session {}", shorten(&permission.session_id, 8)));
+    if !permission.cwd.is_empty() {
+        text.push('\n');
+        text.push_str(&compact_path(&permission.cwd));
+    }
+    text
+}
+
+fn draw_scrollbar(
+    hdc: HDC,
+    x: i32,
+    y: i32,
+    h: i32,
+    visible_lines: usize,
+    total_lines: usize,
+    scroll: i32,
+) {
+    let track_h = h.max(24);
+    filled_round_rect(
+        hdc,
+        x,
+        y,
+        4,
+        track_h,
+        4,
+        theme::FIELD_BORDER,
+        theme::FIELD_BORDER,
+    );
+    let thumb_h = ((track_h as f32 * visible_lines as f32 / total_lines as f32).round() as i32)
+        .clamp(18, track_h);
+    let max_scroll = total_lines.saturating_sub(visible_lines).max(1) as i32;
+    let thumb_y = y + (track_h - thumb_h) * scroll / max_scroll;
+    filled_round_rect(
+        hdc,
+        x,
+        thumb_y,
+        4,
+        thumb_h,
+        4,
+        theme::MUTED_SOFT,
+        theme::MUTED_SOFT,
+    );
 }
 
 fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
@@ -144,24 +344,31 @@ fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
         &choice.title,
         theme::INK,
     );
-    let mut next_y = CHOICE_CARD_Y + 50;
+    let viewport = choice_content_viewport();
+    let viewport_top = viewport.1;
+    let viewport_bottom = viewport.1 + viewport.3;
+    let (scroll_lines, max_scroll_lines, visible_lines, total_lines) =
+        choice_scroll_metrics(choice);
+    let mut next_y = viewport_top - scroll_lines * CHOICE_SCROLL_LINE_H;
     if !choice.detail.trim().is_empty() {
-        draw_wrapped_text_limited(
+        let detail = markdown_to_display_text(&choice.detail);
+        draw_wrapped_text_limited_in_viewport(
             hdc,
             text_x,
             next_y,
             text_w,
-            &choice.detail,
+            &detail,
             theme::MUTED,
             17,
             5,
+            viewport_top,
+            viewport_bottom,
         );
-        next_y += 5 * 17 + 8;
+        next_y += choice_detail_reserved_h();
     }
 
-    let limit_y = CHOICE_SUBMIT_BUTTON.1 - 12;
     for (question_index, question) in choice.questions.iter().enumerate() {
-        if next_y + 47 > limit_y {
+        if next_y > viewport_bottom {
             break;
         }
         let heading = if question.header.is_empty() {
@@ -170,8 +377,17 @@ fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
             question.header.clone()
         };
         let question_y = next_y;
-        text_fit(hdc, text_x, question_y, text_w, &heading, theme::MUTED);
-        draw_wrapped_text_limited(
+        text_fit_in_viewport(
+            hdc,
+            text_x,
+            question_y,
+            text_w,
+            &heading,
+            theme::MUTED,
+            viewport_top,
+            viewport_bottom,
+        );
+        draw_wrapped_text_limited_in_viewport(
             hdc,
             text_x,
             question_y + 16,
@@ -180,11 +396,20 @@ fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
             theme::INK,
             17,
             2,
+            viewport_top,
+            viewport_bottom,
         );
         next_y = question_y + 16 + 28 + 3;
 
         for (option_index, option) in question.options.iter().enumerate() {
-            if next_y + CHOICE_OPTION_H > limit_y {
+            if next_y > viewport_bottom {
+                break;
+            }
+            if next_y + CHOICE_OPTION_H <= viewport_top {
+                next_y += CHOICE_OPTION_H + 4;
+                continue;
+            }
+            if next_y + CHOICE_OPTION_H > viewport_bottom {
                 break;
             }
             let selected = choice
@@ -231,6 +456,18 @@ fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
         next_y += 6;
     }
 
+    if max_scroll_lines > 0 {
+        draw_scrollbar(
+            hdc,
+            CHOICE_CARD_X + CHOICE_CARD_W - 16,
+            viewport_top + 2,
+            viewport.3 - 4,
+            visible_lines,
+            total_lines,
+            scroll_lines,
+        );
+    }
+
     let submit_kind = if choice.is_submittable() {
         OverlayButtonKind::Primary
     } else {
@@ -243,6 +480,59 @@ fn draw_choice_request(hdc: HDC, choice: &PendingChoice) {
         "Cancel",
         OverlayButtonKind::Secondary,
     );
+}
+
+fn choice_content_viewport() -> (i32, i32, i32, i32) {
+    let y = CHOICE_CARD_Y + 50;
+    (
+        CHOICE_CARD_X + 24,
+        y,
+        CHOICE_CARD_W - 48,
+        CHOICE_SUBMIT_BUTTON.1 - 12 - y,
+    )
+}
+
+fn choice_detail_reserved_h() -> i32 {
+    5 * 17 + 8
+}
+
+fn ensure_choice_scroll_id(id: u64) {
+    if CHOICE_SCROLL_ID.swap(id, Ordering::Relaxed) != id {
+        CHOICE_SCROLL_LINES.store(0, Ordering::Relaxed);
+    }
+}
+
+fn choice_scroll_metrics(choice: &PendingChoice) -> (i32, i32, usize, usize) {
+    ensure_choice_scroll_id(choice.id);
+    let viewport_h = choice_content_viewport().3.max(1);
+    let content_h = choice_content_height(choice).max(1);
+    let max_scroll_px = content_h.saturating_sub(viewport_h);
+    let max_scroll_lines = if max_scroll_px == 0 {
+        0
+    } else {
+        (max_scroll_px + CHOICE_SCROLL_LINE_H - 1) / CHOICE_SCROLL_LINE_H
+    };
+    let scroll_lines = CHOICE_SCROLL_LINES
+        .load(Ordering::Relaxed)
+        .clamp(0, max_scroll_lines);
+    CHOICE_SCROLL_LINES.store(scroll_lines, Ordering::Relaxed);
+    let visible_lines = (viewport_h / CHOICE_SCROLL_LINE_H).max(1) as usize;
+    let total_lines = ((content_h + CHOICE_SCROLL_LINE_H - 1) / CHOICE_SCROLL_LINE_H)
+        .max(visible_lines as i32) as usize;
+    (scroll_lines, max_scroll_lines, visible_lines, total_lines)
+}
+
+fn choice_content_height(choice: &PendingChoice) -> i32 {
+    let mut height = 0;
+    if !choice.detail.trim().is_empty() {
+        height += choice_detail_reserved_h();
+    }
+    for question in &choice.questions {
+        height += 16 + 28 + 3;
+        height += question.options.len() as i32 * (CHOICE_OPTION_H + 4);
+        height += 6;
+    }
+    height
 }
 
 fn draw_status_hud(hdc: HDC, state: &RenderState, pet_x: i32, pet_y: i32, pet_w: i32, pet_h: i32) {
@@ -507,7 +797,24 @@ fn text_fit(hdc: HDC, x: i32, y: i32, max_width: i32, value: &str, color: u32) {
     text(hdc, x, y, &fitted, color);
 }
 
-fn draw_wrapped_text_limited(
+fn text_fit_in_viewport(
+    hdc: HDC,
+    x: i32,
+    y: i32,
+    max_width: i32,
+    value: &str,
+    color: u32,
+    viewport_top: i32,
+    viewport_bottom: i32,
+) {
+    if y < viewport_top || y + CHOICE_SCROLL_LINE_H > viewport_bottom {
+        return;
+    }
+    text_fit(hdc, x, y, max_width, value, color);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_wrapped_text_limited_in_viewport(
     hdc: HDC,
     x: i32,
     y: i32,
@@ -516,6 +823,8 @@ fn draw_wrapped_text_limited(
     color: u32,
     line_height: i32,
     max_lines: usize,
+    viewport_top: i32,
+    viewport_bottom: i32,
 ) -> i32 {
     let mut lines = wrap_text_to_width(hdc, value, max_width);
     if lines.len() > max_lines {
@@ -527,26 +836,47 @@ fn draw_wrapped_text_limited(
 
     let mut next_y = y;
     for line in lines {
-        text(hdc, x, next_y, &line, color);
+        if next_y >= viewport_top && next_y + line_height <= viewport_bottom {
+            text(hdc, x, next_y, &line, color);
+        }
         next_y += line_height;
     }
     next_y
 }
 
 fn wrap_text_to_width(hdc: HDC, value: &str, max_width: i32) -> Vec<String> {
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() || max_width <= 0 {
-        return vec![normalized];
+    if max_width <= 0 {
+        return vec![value.to_string()];
     }
 
     let mut lines = Vec::new();
+    for raw_line in value.lines() {
+        let normalized = raw_line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        wrap_single_line_to_width(hdc, &normalized, max_width, &mut lines);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn point_in_rect(px: i32, py: i32, rect: (i32, i32, i32, i32)) -> bool {
+    let (x, y, w, h) = rect;
+    px >= x && px < x + w && py >= y && py < y + h
+}
+
+fn wrap_single_line_to_width(hdc: HDC, line: &str, max_width: i32, lines: &mut Vec<String>) {
     let mut current = String::new();
-    for word in normalized.split(' ') {
+    for word in line.split(' ') {
         if current.is_empty() {
             if text_width(hdc, word) <= max_width {
                 current.push_str(word);
             } else {
-                append_split_word(hdc, word, max_width, &mut lines, &mut current);
+                append_split_word(hdc, word, max_width, lines, &mut current);
             }
             continue;
         }
@@ -560,7 +890,7 @@ fn wrap_text_to_width(hdc: HDC, value: &str, max_width: i32) -> Vec<String> {
             if text_width(hdc, word) <= max_width {
                 current.push_str(word);
             } else {
-                append_split_word(hdc, word, max_width, &mut lines, &mut current);
+                append_split_word(hdc, word, max_width, lines, &mut current);
             }
         }
     }
@@ -568,7 +898,6 @@ fn wrap_text_to_width(hdc: HDC, value: &str, max_width: i32) -> Vec<String> {
     if !current.is_empty() {
         lines.push(current);
     }
-    lines
 }
 
 fn append_split_word(

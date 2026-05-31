@@ -1,3 +1,4 @@
+mod secrets;
 pub(crate) mod storage;
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 use crate::app::{PetMood, pomodoro::PomodoroSettings};
 use crate::config::{DEFAULT_PROXY_PORT, PET_SCALE_MAX_PERCENT, PET_SCALE_MIN_PERCENT};
-use storage::{json_without_bom, read_json, read_json_or_default, save_pretty_json};
+use storage::{
+    json_without_bom, read_json, read_json_or_default, save_pretty_json, write_text_atomic,
+};
 
 const DEFAULT_GIF_DIR: &str = "assets/claudie";
 const DEFAULT_SLEEP_AFTER_SECS: u32 = 75;
@@ -61,7 +64,17 @@ pub(crate) struct LlmProfile {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) base_url: String,
+    #[serde(
+        default,
+        serialize_with = "secrets::serialize_secret",
+        deserialize_with = "secrets::deserialize_secret"
+    )]
     pub(crate) auth_token: String,
+    #[serde(
+        default,
+        serialize_with = "secrets::serialize_secret",
+        deserialize_with = "secrets::deserialize_secret"
+    )]
     pub(crate) api_key: String,
     pub(crate) model: String,
     pub(crate) opus_model: String,
@@ -489,14 +502,13 @@ pub(crate) fn apply_llm_profile_to_claude(profile: &LlmProfile) -> Result<(), St
     if path.exists() && !backup_path.exists() {
         let _ = fs::copy(&path, backup_path);
     }
-    fs::write(
+    write_text_atomic(
         &path,
-        format!(
+        &format!(
             "{}\n",
             serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?
         ),
     )
-    .map_err(|err| err.to_string())
 }
 
 pub(crate) fn current_claude_llm_profile() -> Option<LlmProfile> {
@@ -640,7 +652,7 @@ fn ensure_claude_onboarding_complete_at(path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|err| err.to_string())?;
         }
-        return fs::write(path, format!("{{\n  {FIELD}\n}}\n")).map_err(|err| err.to_string());
+        return write_text_atomic(path, &format!("{{\n  {FIELD}\n}}\n"));
     }
 
     let text = fs::read_to_string(path).map_err(|err| err.to_string())?;
@@ -670,7 +682,7 @@ fn ensure_claude_onboarding_complete_at(path: &Path) -> Result<(), String> {
         append_root_bool_field(text, FIELD)
     };
 
-    fs::write(path, updated).map_err(|err| err.to_string())
+    write_text_atomic(path, &updated)
 }
 
 fn append_root_bool_field(text: &str, field: &str) -> String {

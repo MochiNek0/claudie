@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::app::AppState;
+use crate::settings::storage::write_text_atomic;
 
 pub(crate) fn settings_snippet(port: u16) -> String {
     serde_json::to_string_pretty(&hooks_value(port)).expect("valid settings")
@@ -78,14 +79,13 @@ pub(crate) fn install_claude_hooks(port: u16) -> Result<PathBuf, String> {
         fs::copy(&settings_path, &backup_path).map_err(|err| err.to_string())?;
     }
 
-    fs::write(
+    write_text_atomic(
         &settings_path,
-        format!(
+        &format!(
             "{}\n",
             serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?
         ),
-    )
-    .map_err(|err| err.to_string())?;
+    )?;
 
     Ok(settings_path)
 }
@@ -109,14 +109,13 @@ pub(crate) fn uninstall_claude_hooks() -> Result<Option<PathBuf>, String> {
         return Ok(Some(settings_path));
     }
 
-    fs::write(
+    write_text_atomic(
         &settings_path,
-        format!(
+        &format!(
             "{}\n",
             serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?
         ),
-    )
-    .map_err(|err| err.to_string())?;
+    )?;
 
     Ok(Some(settings_path))
 }

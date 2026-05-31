@@ -280,11 +280,32 @@ fn append_user_content(messages: &mut Vec<Value>, content: &Value, vision_enable
         return;
     }
 
+    if content
+        .as_array()
+        .expect("checked array")
+        .iter()
+        .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+    {
+        append_tool_result_user_content(messages, content, vision_enabled);
+        return;
+    }
+
     let mut parts: Vec<UserPart> = Vec::new();
+    for block in content.as_array().expect("checked array") {
+        append_regular_user_block(&mut parts, block, vision_enabled);
+    }
+    flush_user_parts(messages, &mut parts);
+}
+
+fn append_tool_result_user_content(
+    messages: &mut Vec<Value>,
+    content: &Value,
+    vision_enabled: bool,
+) {
+    let mut deferred_parts: Vec<UserPart> = Vec::new();
     for block in content.as_array().expect("checked array") {
         match block.get("type").and_then(Value::as_str) {
             Some("tool_result") => {
-                flush_user_parts(messages, &mut parts);
                 let tool_call_id = block
                     .get("tool_use_id")
                     .and_then(Value::as_str)
@@ -297,37 +318,37 @@ fn append_user_content(messages: &mut Vec<Value>, content: &Value, vision_enable
                     "content": text_for_tool
                 }));
                 if !image_followup.is_empty() {
-                    let mut array: Vec<Value> = Vec::new();
-                    array.push(json!({
-                        "type": "text",
-                        "text": format!("Images attached for tool_result {tool_call_id}:")
-                    }));
-                    array.extend(image_followup);
-                    messages.push(json!({
-                        "role": "user",
-                        "content": Value::Array(array)
-                    }));
+                    deferred_parts.push(UserPart::Text(format!(
+                        "Images attached for tool_result {tool_call_id}:"
+                    )));
+                    deferred_parts.extend(image_followup.into_iter().map(UserPart::Image));
                 }
             }
-            Some("text") => {
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    parts.push(UserPart::Text(text.to_string()));
-                }
+            _ => append_regular_user_block(&mut deferred_parts, block, vision_enabled),
+        }
+    }
+    flush_user_parts(messages, &mut deferred_parts);
+}
+
+fn append_regular_user_block(parts: &mut Vec<UserPart>, block: &Value, vision_enabled: bool) {
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => {
+            if let Some(text) = block.get("text").and_then(Value::as_str) {
+                parts.push(UserPart::Text(text.to_string()));
             }
-            Some("image") => {
-                if let Some(part) = anthropic_image_to_openai_part(block, vision_enabled) {
-                    parts.push(part);
-                }
+        }
+        Some("image") => {
+            if let Some(part) = anthropic_image_to_openai_part(block, vision_enabled) {
+                parts.push(part);
             }
-            _ => {
-                let text = content_to_text(block);
-                if !text.trim().is_empty() {
-                    parts.push(UserPart::Text(text));
-                }
+        }
+        _ => {
+            let text = content_to_text(block);
+            if !text.trim().is_empty() {
+                parts.push(UserPart::Text(text));
             }
         }
     }
-    flush_user_parts(messages, &mut parts);
 }
 
 fn assistant_content_to_openai(content: &Value) -> (String, Vec<Value>) {
@@ -807,6 +828,50 @@ mod tests {
         );
         assert_eq!(parts[1]["type"], "image_url");
         assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,BBBB");
+    }
+
+    #[test]
+    fn mixed_tool_results_are_grouped_before_user_text() {
+        let profile = LlmProfile {
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-4o".to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "tool_use", "id": "call_a", "name": "Bash", "input": { "command": "git status" } },
+                        { "type": "tool_use", "id": "call_b", "name": "Bash", "input": { "command": "cargo check" } }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "system reminder before results" },
+                        { "type": "tool_result", "tool_use_id": "call_a", "content": "status output" },
+                        { "type": "text", "text": "system reminder between results" },
+                        { "type": "tool_result", "tool_use_id": "call_b", "content": "check output" },
+                        { "type": "text", "text": "system reminder after results" }
+                    ]
+                }
+            ]
+        });
+
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        let messages = converted["messages"].as_array().unwrap();
+        let roles = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(roles, vec!["assistant", "tool", "tool", "user"]);
+        assert_eq!(messages[1]["tool_call_id"], "call_a");
+        assert_eq!(messages[2]["tool_call_id"], "call_b");
+        let deferred = messages[3]["content"].as_str().unwrap();
+        assert!(deferred.contains("before results"));
+        assert!(deferred.contains("between results"));
+        assert!(deferred.contains("after results"));
     }
 
     #[test]

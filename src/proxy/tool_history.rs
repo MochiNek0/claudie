@@ -155,4 +155,29 @@ mod tests {
                 .contains("README contents")
         );
     }
+
+    #[test]
+    fn openai_missing_tool_response_error_triggers_transcript_retry() {
+        let request = json!({
+            "model": "gpt-test",
+            "messages": [{
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": { "name": "Bash", "arguments": "{}" }
+                }]
+            }]
+        });
+
+        assert!(should_retry_with_tool_transcript(
+            &UpstreamError {
+                status: Some(400),
+                message: "OpenAI proxy upstream returned HTTP 400: An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'."
+                    .to_string(),
+            },
+            &request
+        ));
+    }
 }

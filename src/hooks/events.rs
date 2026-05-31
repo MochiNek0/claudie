@@ -16,6 +16,8 @@ use crate::util::shorten;
 
 use super::quota::{scan_transcript_usage, update_quota_from_value};
 
+const PAYLOAD_SUMMARY_MAX_CHARS: usize = 2_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HookActivity {
     Idle,
@@ -59,6 +61,7 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
         let mut state = state.lock().expect("state poisoned");
         if clears_all_pending_interactions(event.as_str()) {
             clear_all_interactions(&mut state);
+            state.clear_session_activities(&session_id);
         } else if clears_pending_interaction(event.as_str()) {
             clear_stale_interactions(&mut state, &session_id);
         }
@@ -165,10 +168,9 @@ fn handle_permission_request(
             waiter: waiter.clone(),
         };
         state.pending_permissions.push_back(permission.clone());
-        state.set_resting_mood(
-            permission_visual_mood(&payload, &permission.tool_name),
-            true,
-        );
+        let mood = permission_visual_mood(&payload, &permission.tool_name);
+        state.start_permission_activity(permission.id, &permission.session_id, mood);
+        state.set_resting_mood(mood, true);
         state.record_permission_stats();
         update_quota_from_value(&mut state.quota, &payload);
         state.record_token_snapshot();
@@ -203,6 +205,7 @@ fn handle_permission_request(
 
     {
         let mut state = state.lock().expect("state poisoned");
+        state.finish_permission_activity(permission.id);
         state
             .pending_permissions
             .retain(|pending| pending.id != permission.id);
@@ -333,6 +336,7 @@ fn handle_choice_request(
         };
         state.pending_choices.push_back(choice.clone());
         let resting = state.activity_mood().unwrap_or(PetMood::Thinking);
+        state.start_choice_activity(choice.id, &choice.session_id, resting);
         state.set_resting_mood(resting, false);
         state.record_choice_stats();
         update_quota_from_value(&mut state.quota, &json!({}));
@@ -351,6 +355,7 @@ fn handle_choice_request(
 
     {
         let mut state = state.lock().expect("state poisoned");
+        state.finish_choice_activity(choice.id);
         state
             .pending_choices
             .retain(|pending| pending.id != choice.id);
@@ -587,7 +592,11 @@ pub(crate) fn decide_current_permission(decision: PermissionDecision) {
     if let Some(state) = APP_STATE.get() {
         let pending = {
             let mut state = state.lock().expect("state poisoned");
-            state.pending_permissions.pop_front()
+            let pending = state.pending_permissions.pop_front();
+            if let Some(pending) = pending.as_ref() {
+                state.finish_permission_activity(pending.id);
+            }
+            pending
         };
         if let Some(pending) = pending {
             let mut slot = pending
@@ -642,6 +651,7 @@ pub(crate) fn submit_current_choice() {
             let selected = choice.selected.clone();
             let other_text = choice.other_text.clone();
             state.pending_choices.pop_front().map(|pending| {
+                state.finish_choice_activity(pending.id);
                 (
                     pending,
                     ChoiceDecision::Submit {
@@ -673,7 +683,11 @@ fn decide_current_choice(decision: ChoiceDecision) {
     if let Some(state) = APP_STATE.get() {
         let pending = {
             let mut state = state.lock().expect("state poisoned");
-            state.pending_choices.pop_front()
+            let pending = state.pending_choices.pop_front();
+            if let Some(pending) = pending.as_ref() {
+                state.finish_choice_activity(pending.id);
+            }
+            pending
         };
         if let Some(pending) = pending {
             let mut slot = pending
@@ -713,6 +727,7 @@ fn clear_stale_interactions(state: &mut AppState, session_id: &str) {
     });
 
     for pending in stale {
+        state.finish_permission_activity(pending.id);
         let mut slot = pending
             .waiter
             .decision
@@ -735,6 +750,7 @@ fn clear_stale_interactions(state: &mut AppState, session_id: &str) {
     });
 
     for pending in stale_choices {
+        state.finish_choice_activity(pending.id);
         let mut slot = pending
             .waiter
             .decision
@@ -750,6 +766,7 @@ fn clear_stale_interactions(state: &mut AppState, session_id: &str) {
 fn clear_all_interactions(state: &mut AppState) {
     let stale_permissions = state.pending_permissions.drain(..).collect::<Vec<_>>();
     for pending in stale_permissions {
+        state.finish_permission_activity(pending.id);
         let mut slot = pending
             .waiter
             .decision
@@ -763,6 +780,7 @@ fn clear_all_interactions(state: &mut AppState) {
 
     let stale_choices = state.pending_choices.drain(..).collect::<Vec<_>>();
     for pending in stale_choices {
+        state.finish_choice_activity(pending.id);
         let mut slot = pending
             .waiter
             .decision
@@ -1613,11 +1631,11 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
 fn summarize_payload(value: &Value) -> String {
     if let Some(tool_input) = value.get("tool_input").or_else(|| value.get("toolInput")) {
         if let Some(command) = string_field(tool_input, "command") {
-            return shorten(&command, 90);
+            return shorten(&command, PAYLOAD_SUMMARY_MAX_CHARS);
         }
         for key in ["file_path", "path", "pattern", "url", "prompt"] {
             if let Some(text) = string_field(tool_input, key) {
-                return shorten(&text, 90);
+                return shorten(&text, PAYLOAD_SUMMARY_MAX_CHARS);
             }
         }
     }
@@ -1625,7 +1643,7 @@ fn summarize_payload(value: &Value) -> String {
         .or_else(|| string_field(value, "reason"))
         .or_else(|| string_field(value, "notification"))
     {
-        return shorten(&message, 90);
+        return shorten(&message, PAYLOAD_SUMMARY_MAX_CHARS);
     }
-    shorten(&value.to_string(), 90)
+    shorten(&value.to_string(), PAYLOAD_SUMMARY_MAX_CHARS)
 }

@@ -11,6 +11,7 @@ use crate::hooks::{
 };
 use crate::ui::slint_views::{ChoiceOptionData, PromptWindow};
 use crate::ui::window_icon::{apply_slint_window_icons, schedule_prompt_window_icon_refresh};
+use crate::util::markdown_to_display_text;
 
 thread_local! {
     static PROMPT: RefCell<Option<PromptWindow>> = const { RefCell::new(None) };
@@ -168,7 +169,7 @@ fn permission_snapshot(permission: &PendingPermission) -> PromptSnapshot {
     PromptSnapshot {
         title: "Permission request".to_string(),
         subtitle: format!("{} wants access", permission.tool_name.trim()),
-        detail: permission.summary.clone(),
+        detail: markdown_to_display_text(&permission.summary),
         meta: prompt_meta(&permission.session_id, &permission.cwd),
         is_choice: false,
         submit_enabled: false,
@@ -178,14 +179,15 @@ fn permission_snapshot(permission: &PendingPermission) -> PromptSnapshot {
 }
 
 fn choice_snapshot(choice: &PendingChoice) -> PromptSnapshot {
-    let mut detail = choice.detail.trim().to_string();
+    let mut detail = markdown_to_display_text(choice.detail.trim());
     if detail.is_empty() {
-        detail = choice
+        let questions = choice
             .questions
             .iter()
             .map(|question| question.question.clone())
             .collect::<Vec<_>>()
             .join("\n\n");
+        detail = markdown_to_display_text(&questions);
     }
 
     let mut options = Vec::new();

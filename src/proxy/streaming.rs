@@ -26,16 +26,13 @@ pub(super) fn run_streaming_request(
     openai_request: &Value,
     outbound_request: &Value,
     use_tool_transcript: bool,
-    known_native: bool,
 ) {
     match call_openai_streaming(agent, profile, outbound_request) {
         Ok(reader) => {
             let _ = stream_sse_to_client(stream, reader, state, profile, anthropic_request);
         }
         Err(err)
-            if !use_tool_transcript
-                && !known_native
-                && should_retry_with_tool_transcript(&err, openai_request) =>
+            if !use_tool_transcript && should_retry_with_tool_transcript(&err, openai_request) =>
         {
             let _ = save_tool_history_capability(profile, openai_request, false);
             let fallback = tool_history_as_text_transcript(openai_request);
@@ -94,8 +91,61 @@ fn stream_sse_to_client<R: BufRead>(
     result
 }
 
-struct ToolBlock {
+struct ToolCallState {
     block_index: usize,
+    id: Option<String>,
+    name: Option<String>,
+    pending_arguments: String,
+    started: bool,
+}
+
+impl ToolCallState {
+    fn new(block_index: usize) -> Self {
+        Self {
+            block_index,
+            id: None,
+            name: None,
+            pending_arguments: String::new(),
+            started: false,
+        }
+    }
+
+    fn ready_to_start(&self) -> bool {
+        self.id.is_some() && self.name.is_some()
+    }
+
+    fn absorb_id(&mut self, id: Option<&str>) {
+        if self.id.is_none() {
+            if let Some(id) = id.filter(|value| !value.is_empty()) {
+                self.id = Some(id.to_string());
+            }
+        }
+    }
+
+    fn absorb_name(&mut self, name: Option<&str>) {
+        if self.name.is_none() {
+            if let Some(name) = name.filter(|value| !value.is_empty()) {
+                self.name = Some(name.to_string());
+            }
+        }
+    }
+
+    fn start_payload(&mut self) -> ToolCallStart {
+        self.started = true;
+        ToolCallStart {
+            block_index: self.block_index,
+            id: self.id.clone().unwrap_or_else(|| "tool_call".to_string()),
+            name: self.name.clone().unwrap_or_else(|| "tool".to_string()),
+            arguments: std::mem::take(&mut self.pending_arguments),
+        }
+    }
+}
+
+struct ToolCallStart {
+    block_index: usize,
+    id: String,
+    name: String,
+    arguments: String,
 }
 
 struct StreamTranslator<'a, W: Write> {
@@ -108,7 +158,7 @@ struct StreamTranslator<'a, W: Write> {
     thinking_block_index: Option<usize>,
     text_block_index: Option<usize>,
     next_block_index: usize,
-    tool_block_by_openai_index: HashMap<u64, ToolBlock>,
+    tool_calls_by_openai_index: HashMap<u64, ToolCallState>,
     input_tokens: u64,
     output_tokens: u64,
     cache_read_tokens: u64,
@@ -128,7 +178,7 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
             thinking_block_index: None,
             text_block_index: None,
             next_block_index: 0,
-            tool_block_by_openai_index: HashMap::new(),
+            tool_calls_by_openai_index: HashMap::new(),
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
@@ -263,51 +313,109 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
 
     fn absorb_tool_call(&mut self, tc: &Value) -> std::io::Result<()> {
         let openai_index = tc.get("index").and_then(Value::as_u64).unwrap_or(0);
-        let block_index = if let Some(existing) = self.tool_block_by_openai_index.get(&openai_index)
-        {
-            existing.block_index
-        } else {
-            let block_index = self.next_block_index;
-            self.next_block_index += 1;
-            let id = tc
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("tool_call")
-                .to_string();
-            let name = tc
-                .pointer("/function/name")
-                .and_then(Value::as_str)
-                .unwrap_or("tool")
-                .to_string();
-            self.tool_block_by_openai_index
-                .insert(openai_index, ToolBlock { block_index });
-            self.write_event(
-                "content_block_start",
-                json!({
-                    "type": "content_block_start",
-                    "index": block_index,
-                    "content_block": {
-                        "type": "tool_use",
-                        "id": id,
-                        "name": name,
-                        "input": {}
-                    }
-                }),
-            )?;
-            block_index
+        let id = tc.get("id").and_then(Value::as_str);
+        let name = tc.pointer("/function/name").and_then(Value::as_str);
+        let arguments = tc
+            .pointer("/function/arguments")
+            .and_then(Value::as_str)
+            .filter(|arg_frag| !arg_frag.is_empty());
+
+        let delta = {
+            let tool_call = self
+                .tool_calls_by_openai_index
+                .entry(openai_index)
+                .or_insert_with(|| {
+                    let block_index = self.next_block_index;
+                    self.next_block_index += 1;
+                    ToolCallState::new(block_index)
+                });
+            tool_call.absorb_id(id);
+            tool_call.absorb_name(name);
+
+            if tool_call.started {
+                arguments.map(|arguments| (tool_call.block_index, arguments.to_string()))
+            } else {
+                if let Some(arguments) = arguments {
+                    tool_call.pending_arguments.push_str(arguments);
+                }
+                None
+            }
         };
 
-        if let Some(arg_frag) = tc.pointer("/function/arguments").and_then(Value::as_str) {
-            if !arg_frag.is_empty() {
-                self.write_event(
-                    "content_block_delta",
-                    json!({
-                        "type": "content_block_delta",
-                        "index": block_index,
-                        "delta": { "type": "input_json_delta", "partial_json": arg_frag }
-                    }),
-                )?;
+        if let Some((block_index, arguments)) = delta {
+            self.write_tool_arguments_delta(block_index, &arguments)?;
+        }
+        self.flush_ready_tool_blocks(false)
+    }
+
+    fn write_tool_block_start(
+        &mut self,
+        block_index: usize,
+        id: &str,
+        name: &str,
+    ) -> std::io::Result<()> {
+        self.write_event(
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": block_index,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": id,
+                    "name": name,
+                    "input": {}
+                }
+            }),
+        )
+    }
+
+    fn write_tool_arguments_delta(
+        &mut self,
+        block_index: usize,
+        arguments: &str,
+    ) -> std::io::Result<()> {
+        if arguments.is_empty() {
+            return Ok(());
+        }
+        self.write_event(
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": block_index,
+                "delta": { "type": "input_json_delta", "partial_json": arguments }
+            }),
+        )
+    }
+
+    fn flush_pending_tool_blocks(&mut self) -> std::io::Result<()> {
+        self.flush_ready_tool_blocks(true)
+    }
+
+    fn flush_ready_tool_blocks(&mut self, force: bool) -> std::io::Result<()> {
+        let mut keys = self
+            .tool_calls_by_openai_index
+            .iter()
+            .map(|(key, tool_call)| (tool_call.block_index, *key))
+            .collect::<Vec<_>>();
+        keys.sort_by_key(|(block_index, _)| *block_index);
+
+        let mut starts = Vec::new();
+        for (_, key) in keys {
+            let Some(tool_call) = self.tool_calls_by_openai_index.get_mut(&key) else {
+                continue;
+            };
+            if tool_call.started {
+                continue;
             }
+            if force || tool_call.ready_to_start() {
+                starts.push(tool_call.start_payload());
+            } else {
+                break;
+            }
+        }
+        for start in starts {
+            self.write_tool_block_start(start.block_index, &start.id, &start.name)?;
+            self.write_tool_arguments_delta(start.block_index, &start.arguments)?;
         }
         Ok(())
     }
@@ -419,6 +527,7 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
     /// tolerates any order, but ascending matches the natural DeepSeek/Qwen flow
     /// (thinking → text → tool) and reads cleanly in logs.
     fn close_open_blocks(&mut self) -> std::io::Result<()> {
+        self.flush_pending_tool_blocks()?;
         let mut open_indices: Vec<usize> = Vec::new();
         if let Some(index) = self.thinking_block_index {
             open_indices.push(index);
@@ -427,8 +536,9 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
             open_indices.push(index);
         }
         open_indices.extend(
-            self.tool_block_by_openai_index
+            self.tool_calls_by_openai_index
                 .values()
+                .filter(|b| b.started)
                 .map(|b| b.block_index),
         );
         open_indices.sort();
@@ -615,6 +725,108 @@ mod tests {
         assert_eq!(events[3].1["delta"]["partial_json"], "/tmp/a");
         assert_eq!(events[4].1["delta"]["partial_json"], "\"}");
         assert_eq!(events[6].1["delta"]["stop_reason"], "tool_use");
+    }
+
+    #[test]
+    fn translator_buffers_tool_arguments_until_id_and_name_arrive() {
+        let chunks = vec![
+            json!({
+                "id": "chatcmpl-1",
+                "choices": [{ "delta": { "tool_calls": [{
+                    "index": 0,
+                    "function": { "arguments": "{\"path\":\"" }
+                }] } }]
+            }),
+            json!({
+                "id": "chatcmpl-1",
+                "choices": [{ "delta": { "tool_calls": [{
+                    "index": 0, "id": "call_late", "type": "function",
+                    "function": { "name": "Read", "arguments": "README.md\"}" }
+                }] }, "finish_reason": "tool_calls" }]
+            }),
+        ];
+
+        let events = run_translator(&chunks);
+        let starts: Vec<&Value> = events
+            .iter()
+            .filter(|(name, _)| name == "content_block_start")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0]["content_block"]["id"], "call_late");
+        assert_eq!(starts[0]["content_block"]["name"], "Read");
+
+        let deltas: Vec<&Value> = events
+            .iter()
+            .filter(|(name, value)| {
+                name == "content_block_delta" && value["delta"]["type"] == "input_json_delta"
+            })
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(
+            deltas[0]["delta"]["partial_json"],
+            "{\"path\":\"README.md\"}"
+        );
+    }
+
+    #[test]
+    fn translator_flushes_incomplete_tool_call_on_done() {
+        let chunks = vec![json!({
+            "id": "chatcmpl-1",
+            "choices": [{ "delta": { "tool_calls": [{
+                "index": 0,
+                "function": { "arguments": "{\"query\":\"status\"}" }
+            }] }, "finish_reason": "tool_calls" }]
+        })];
+
+        let events = run_translator(&chunks);
+        let start = events
+            .iter()
+            .find(|(name, _)| name == "content_block_start")
+            .expect("fallback tool block starts");
+        assert_eq!(start.1["content_block"]["id"], "tool_call");
+        assert_eq!(start.1["content_block"]["name"], "tool");
+        let delta = events
+            .iter()
+            .find(|(name, value)| {
+                name == "content_block_delta" && value["delta"]["type"] == "input_json_delta"
+            })
+            .expect("buffered tool arguments flush");
+        assert_eq!(delta.1["delta"]["partial_json"], "{\"query\":\"status\"}");
+        assert!(events.iter().any(|(name, _)| name == "content_block_stop"));
+    }
+
+    #[test]
+    fn translator_keeps_tool_block_start_order_when_later_call_is_ready_first() {
+        let chunks = vec![
+            json!({
+                "id": "chatcmpl-1",
+                "choices": [{ "delta": { "tool_calls": [
+                    { "index": 0, "function": { "arguments": "{\"a\":" } },
+                    { "index": 1, "id": "call_b", "type": "function", "function": { "name": "Second", "arguments": "{}" } }
+                ] } }]
+            }),
+            json!({
+                "id": "chatcmpl-1",
+                "choices": [{ "delta": { "tool_calls": [{
+                    "index": 0, "id": "call_a", "type": "function",
+                    "function": { "name": "First", "arguments": "1}" }
+                }] }, "finish_reason": "tool_calls" }]
+            }),
+        ];
+
+        let events = run_translator(&chunks);
+        let starts: Vec<&Value> = events
+            .iter()
+            .filter(|(name, _)| name == "content_block_start")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(starts.len(), 2);
+        assert_eq!(starts[0]["index"], 0);
+        assert_eq!(starts[0]["content_block"]["id"], "call_a");
+        assert_eq!(starts[1]["index"], 1);
+        assert_eq!(starts[1]["content_block"]["id"], "call_b");
     }
 
     #[test]

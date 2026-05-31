@@ -20,6 +20,7 @@ pub(crate) const PERMISSION_BUBBLE_X: i32 = 129;
 pub(crate) const PERMISSION_BUBBLE_Y: i32 = 228;
 pub(crate) const PERMISSION_BUBBLE_W: i32 = 382;
 pub(crate) const PERMISSION_BUBBLE_H: i32 = 256;
+pub(crate) const PERMISSION_DETAIL_PANEL_H: i32 = 120;
 pub(crate) const PERM_BUTTON_Y: i32 = PERMISSION_BUBBLE_Y + PERMISSION_BUBBLE_H - 44;
 pub(crate) const PERM_BUTTON_ROW_X: i32 = PERMISSION_BUBBLE_X + (PERMISSION_BUBBLE_W - 262) / 2;
 pub(crate) const ALLOW_BUTTON: (i32, i32, i32, i32) = (PERM_BUTTON_ROW_X, PERM_BUTTON_Y, 74, 32);

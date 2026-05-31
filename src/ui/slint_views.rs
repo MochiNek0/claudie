@@ -266,7 +266,7 @@ slint::slint! {
             x: 0px;
             y: root.height + 4px;
             width: root.width;
-            height: min(root.model.length, 7) * 32px + 8px;
+            height: min(root.model.length, 8) * 32px + 8px;
             close-policy: close-on-click-outside;
 
             Rectangle {
@@ -277,18 +277,23 @@ slint::slint! {
                 border-width: 1px;
                 border-color: #cfd8e6;
             }
-            VerticalLayout {
+            ScrollView {
                 x: 4px;
                 y: 4px;
                 width: root.width - 8px;
-                spacing: 2px;
-                for item[index] in root.model : OptionRow {
-                    height: 30px;
-                    text: item;
-                    clicked => {
-                        root.current-index = index;
-                        root.selected(index);
-                        popup.close();
+                height: popup.height - 8px;
+
+                VerticalLayout {
+                    padding: 0px;
+                    spacing: 2px;
+                    for item[index] in root.model : OptionRow {
+                        height: 30px;
+                        text: item;
+                        clicked => {
+                            root.current-index = index;
+                            root.selected(index);
+                            popup.close();
+                        }
                     }
                 }
             }
@@ -620,9 +625,9 @@ slint::slint! {
             MonoLineEdit { x: 412px; y: 228px; width: 382px; height: 34px; text <=> root.base_url; }
 
             Text { x: 12px; y: 272px; text: "API key"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 12px; y: 292px; width: 382px; height: 34px; text <=> root.api_key; }
+            MonoLineEdit { x: 12px; y: 292px; width: 382px; height: 34px; input-type: InputType.password; text <=> root.api_key; }
             Text { x: 412px; y: 272px; text: "Auth token (proxy)"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 412px; y: 292px; width: 382px; height: 34px; text <=> root.auth_token; }
+            MonoLineEdit { x: 412px; y: 292px; width: 382px; height: 34px; input-type: InputType.password; text <=> root.auth_token; }
 
             Text { x: 12px; y: 336px; text: "Opus"; color: #6b7280; font-size: 12px; }
             MonoLineEdit { x: 12px; y: 356px; width: 248px; height: 34px; text <=> root.opus_model; }

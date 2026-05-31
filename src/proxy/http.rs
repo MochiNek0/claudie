@@ -9,7 +9,17 @@ const MAX_PROXY_REQUEST_BYTES: usize = 10 * 1024 * 1024;
 pub(super) struct HttpRequest {
     pub(super) method: String,
     pub(super) path: String,
+    pub(super) headers: Vec<(String, String)>,
     pub(super) body: Vec<u8>,
+}
+
+impl HttpRequest {
+    pub(super) fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 pub(super) fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
@@ -44,6 +54,7 @@ pub(super) fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, S
     let path = parts.next().unwrap_or_default().to_string();
 
     let mut content_length = 0_usize;
+    let mut headers = Vec::new();
     for line in lines {
         if let Some((name, value)) = line.split_once(':')
             && name.eq_ignore_ascii_case("content-length")
@@ -52,6 +63,9 @@ pub(super) fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, S
                 .trim()
                 .parse::<usize>()
                 .map_err(|err| err.to_string())?;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            headers.push((name.trim().to_string(), value.trim().to_string()));
         }
     }
     if content_length > MAX_PROXY_REQUEST_BYTES {
@@ -73,7 +87,12 @@ pub(super) fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, S
     }
     body.truncate(content_length);
 
-    Ok(HttpRequest { method, path, body })
+    Ok(HttpRequest {
+        method,
+        path,
+        headers,
+        body,
+    })
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {

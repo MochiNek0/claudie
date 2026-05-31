@@ -12,6 +12,8 @@ const MAX_DAYS: usize = 45;
 #[serde(default)]
 pub(crate) struct DailyStatsDb {
     pub(crate) days: Vec<DailyStats>,
+    #[serde(skip)]
+    dirty: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -113,7 +115,20 @@ impl DailyStatsDb {
         };
         update(&mut self.days[index]);
         self.normalize();
-        let _ = save_daily_stats(self);
+        self.dirty = true;
+    }
+
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    pub(crate) fn flush(&mut self) -> Result<(), String> {
+        if !self.dirty {
+            return Ok(());
+        }
+        save_daily_stats(self)?;
+        self.dirty = false;
+        Ok(())
     }
 }
 

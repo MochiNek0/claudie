@@ -7,17 +7,33 @@ use std::time::Duration;
 
 use crate::app::{AppState, PetMood};
 use crate::hooks::process_hook;
+use crate::util::ConnectionLimiter;
+
+const MAX_HOOK_CONNECTIONS: usize = 16;
+const MAX_HOOK_REQUEST_BYTES: usize = 10 * 1024 * 1024;
 
 pub(crate) fn start_hook_server(state: Arc<Mutex<AppState>>, port: u16) -> Result<(), String> {
     let listener = TcpListener::bind(("127.0.0.1", port))
         .map_err(|err| format!("Hook server failed: {err}"))?;
 
     thread::spawn(move || {
+        let limiter = ConnectionLimiter::new(MAX_HOOK_CONNECTIONS);
         for stream in listener.incoming() {
             match stream {
-                Ok(stream) => {
+                Ok(mut stream) => {
+                    let Some(permit) = limiter.try_acquire() else {
+                        let _ = write_http_response(
+                            &mut stream,
+                            503,
+                            json!({ "error": "claudie hook server is busy" }).to_string(),
+                        );
+                        continue;
+                    };
                     let state = state.clone();
-                    thread::spawn(move || handle_client(stream, state));
+                    thread::spawn(move || {
+                        let _permit = permit;
+                        handle_client(stream, state);
+                    });
                 }
                 Err(err) => {
                     let mut state = state.lock().expect("state poisoned");
@@ -61,8 +77,17 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>) {
         }
     };
 
-    let response = process_hook(payload, state);
+    let response = process_hook(payload, state.clone());
     let _ = write_http_response(&mut stream, 200, response.to_string());
+    flush_stats_if_due(&state);
+}
+
+fn flush_stats_if_due(state: &Arc<Mutex<AppState>>) {
+    let mut state = state.lock().expect("state poisoned");
+    if let Err(err) = state.flush_stats_if_due() {
+        state.last_error = format!("Stats save failed: {err}");
+        state.set_mood(PetMood::Error);
+    }
 }
 
 struct HttpRequest {
@@ -113,6 +138,9 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
             }
         }
     }
+    if content_length > MAX_HOOK_REQUEST_BYTES {
+        return Err("request body too large".to_string());
+    }
 
     let body_start = header_end + 4;
     let mut body = buffer[body_start..].to_vec();
@@ -141,6 +169,7 @@ fn write_http_response(stream: &mut TcpStream, status: u16, body: String) -> std
         200 => "OK",
         400 => "Bad Request",
         404 => "Not Found",
+        503 => "Service Unavailable",
         _ => "OK",
     };
     let response = format!(

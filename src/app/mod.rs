@@ -16,6 +16,11 @@ const WORK_MIN_VISIBLE: Duration = Duration::from_millis(3_000);
 const HAPPY_MIN_VISIBLE: Duration = Duration::from_millis(2_000);
 const SUBAGENT_MIN_VISIBLE: Duration = Duration::from_millis(2_500);
 const INTERACTION_MIN_VISIBLE: Duration = Duration::from_millis(1_800);
+const STATS_FLUSH_INTERVAL: Duration = Duration::from_secs(3);
+const RESTING_ACTIVITY_KEY: &str = "resting";
+const SUBAGENT_ACTIVITY_KEY: &str = "subagent";
+const POMODORO_ACTIVITY_KEY: &str = "pomodoro";
+const INTERACTION_ACTIVITY_KEY: &str = "interaction";
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum PetMood {
@@ -216,6 +221,7 @@ pub(crate) struct AppState {
     pub(crate) active_tool_keys: HashMap<String, ActiveTool>,
     pub(crate) active_tool_names: HashMap<String, VecDeque<String>>,
     pub(crate) active_subagents: usize,
+    pub(crate) activity_spans: HashMap<String, ActivitySpan>,
     pub(crate) pending_permissions: VecDeque<PendingPermission>,
     pub(crate) pending_choices: VecDeque<PendingChoice>,
     pub(crate) quota: QuotaStats,
@@ -228,17 +234,19 @@ pub(crate) struct AppState {
     stats_last_output_tokens: u64,
     stats_last_cache_creation_tokens: u64,
     stats_last_cache_read_tokens: u64,
+    stats_last_flush: Instant,
 }
 
 impl AppState {
     pub(crate) fn new() -> Self {
-        Self {
+        let now = Instant::now();
+        let mut state = Self {
             mood: PetMood::Idle,
-            mood_started_at: Instant::now(),
+            mood_started_at: now,
             resting_mood: PetMood::Idle,
             resting_interrupts_visual: false,
             last_non_idle_mood: PetMood::Idle,
-            last_activity: Instant::now(),
+            last_activity: now,
             last_user_input_tick: None,
             last_error: String::new(),
             next_permission_id: 1,
@@ -248,6 +256,7 @@ impl AppState {
             active_tool_keys: HashMap::new(),
             active_tool_names: HashMap::new(),
             active_subagents: 0,
+            activity_spans: HashMap::new(),
             pending_permissions: VecDeque::new(),
             pending_choices: VecDeque::new(),
             quota: QuotaStats::default(),
@@ -260,13 +269,16 @@ impl AppState {
             stats_last_output_tokens: 0,
             stats_last_cache_creation_tokens: 0,
             stats_last_cache_read_tokens: 0,
-        }
+            stats_last_flush: now,
+        };
+        state.set_resting_activity_at(PetMood::Idle, false, now);
+        state
     }
 
     pub(crate) fn set_mood(&mut self, mood: PetMood) {
-        self.last_activity = Instant::now();
-        self.resting_mood = mood;
-        self.resting_interrupts_visual = matches!(mood, PetMood::Error);
+        let now = Instant::now();
+        self.last_activity = now;
+        self.set_resting_activity_at(mood, matches!(mood, PetMood::Error), now);
         if matches!(mood, PetMood::Error) {
             self.force_visual_mood(mood);
             return;
@@ -275,9 +287,9 @@ impl AppState {
     }
 
     pub(crate) fn set_resting_mood(&mut self, mood: PetMood, interrupts_visual: bool) {
-        self.last_activity = Instant::now();
-        self.resting_mood = mood;
-        self.resting_interrupts_visual = interrupts_visual;
+        let now = Instant::now();
+        self.last_activity = now;
+        self.set_resting_activity_at(mood, interrupts_visual, now);
         self.refresh_visual_mood();
     }
 
@@ -289,6 +301,89 @@ impl AppState {
             self.mood = mood;
             self.mood_started_at = Instant::now();
         }
+    }
+
+    fn set_resting_activity_at(&mut self, mood: PetMood, interrupts_visual: bool, now: Instant) {
+        self.resting_mood = mood;
+        self.resting_interrupts_visual = interrupts_visual;
+        if !matches!(mood, PetMood::Wave | PetMood::Stretch) {
+            self.activity_spans.remove(INTERACTION_ACTIVITY_KEY);
+        }
+        self.activity_spans.insert(
+            RESTING_ACTIVITY_KEY.to_string(),
+            ActivitySpan::at(
+                RESTING_ACTIVITY_KEY,
+                "",
+                ActivityKind::Resting,
+                mood,
+                mood.priority(),
+                interrupts_visual,
+                now,
+            ),
+        );
+    }
+
+    pub(crate) fn begin_activity_span(&mut self, span: ActivitySpan) {
+        self.last_activity = Instant::now();
+        self.activity_spans.insert(span.key.clone(), span);
+        self.refresh_visual_mood();
+    }
+
+    pub(crate) fn end_activity_span(&mut self, key: &str) -> Option<ActivitySpan> {
+        let removed = self.activity_spans.remove(key);
+        if removed.is_some() {
+            self.last_activity = Instant::now();
+            self.refresh_visual_mood();
+        }
+        removed
+    }
+
+    pub(crate) fn clear_activity_spans_by_kind(&mut self, kind: ActivityKind) {
+        let before = self.activity_spans.len();
+        self.activity_spans
+            .retain(|_, span| span.kind == ActivityKind::Resting || span.kind != kind);
+        if self.activity_spans.len() != before {
+            self.last_activity = Instant::now();
+            self.refresh_visual_mood();
+        }
+    }
+
+    pub(crate) fn clear_session_activities(&mut self, session_id: &str) {
+        let before = self.activity_spans.len();
+        self.activity_spans
+            .retain(|_, span| span.kind == ActivityKind::Resting || span.session_id != session_id);
+        if self.activity_spans.len() != before {
+            self.last_activity = Instant::now();
+            self.refresh_visual_mood();
+        }
+    }
+
+    pub(crate) fn start_permission_activity(&mut self, id: u64, session_id: &str, mood: PetMood) {
+        self.begin_activity_span(ActivitySpan::new(
+            permission_activity_key(id),
+            session_id,
+            ActivityKind::Permission,
+            mood,
+            true,
+        ));
+    }
+
+    pub(crate) fn finish_permission_activity(&mut self, id: u64) {
+        self.end_activity_span(&permission_activity_key(id));
+    }
+
+    pub(crate) fn start_choice_activity(&mut self, id: u64, session_id: &str, mood: PetMood) {
+        self.begin_activity_span(ActivitySpan::new(
+            choice_activity_key(id),
+            session_id,
+            ActivityKind::Choice,
+            mood,
+            false,
+        ));
+    }
+
+    pub(crate) fn finish_choice_activity(&mut self, id: u64) {
+        self.end_activity_span(&choice_activity_key(id));
     }
 
     pub(crate) fn start_tool_activity(
@@ -314,6 +409,13 @@ impl AppState {
             .entry(name_key)
             .or_default()
             .push_back(key.clone());
+        self.begin_activity_span(ActivitySpan::new(
+            tool_activity_key(&key),
+            tool_session_from_key(&key),
+            ActivityKind::Tool,
+            mood,
+            false,
+        ));
         self.active_tool_keys
             .insert(key, ActiveTool { tool_name, mood });
         self.last_activity = Instant::now();
@@ -339,6 +441,7 @@ impl AppState {
         {
             if let Some(tool) = self.active_tool_keys.remove(&key) {
                 self.remove_tool_name_key(&tool.tool_name, &key);
+                self.end_activity_span(&tool_activity_key(&key));
             }
         }
         self.active_tools = self.active_tools.saturating_sub(1);
@@ -368,6 +471,7 @@ impl AppState {
             return fallback_mood;
         };
         self.remove_tool_name_key(&tool.tool_name, &key);
+        self.end_activity_span(&tool_activity_key(&key));
         self.active_tools = self.active_tools.saturating_sub(1);
         self.decrement_active_tool_mood(tool.mood);
         self.last_activity = Instant::now();
@@ -380,16 +484,121 @@ impl AppState {
         self.active_tool_moods.clear();
         self.active_tool_keys.clear();
         self.active_tool_names.clear();
+        self.clear_activity_spans_by_kind(ActivityKind::Tool);
         self.refresh_visual_mood();
     }
 
     pub(crate) fn clear_activity(&mut self) {
         self.finish_all_tools();
         self.active_subagents = 0;
+        self.activity_spans.remove(SUBAGENT_ACTIVITY_KEY);
         self.refresh_visual_mood();
     }
 
     pub(crate) fn activity_mood(&self) -> Option<PetMood> {
+        self.best_active_work_span()
+            .map(|span| span.mood)
+            .or_else(|| self.legacy_activity_mood())
+    }
+
+    pub(crate) fn start_subagent(&mut self) {
+        self.active_subagents = self.active_subagents.saturating_add(1);
+        self.sync_subagent_span();
+        self.last_activity = Instant::now();
+        self.refresh_visual_mood();
+    }
+
+    pub(crate) fn finish_subagent(&mut self) {
+        self.active_subagents = self.active_subagents.saturating_sub(1);
+        self.sync_subagent_span();
+        self.last_activity = Instant::now();
+        self.refresh_visual_mood();
+    }
+
+    pub(crate) fn refresh_visual_mood(&mut self) {
+        self.refresh_visual_mood_at(Instant::now());
+    }
+
+    pub(crate) fn refresh_visual_mood_at(&mut self, now: Instant) {
+        self.prune_expired_activity_spans(now);
+        let target = self.projected_activity();
+        if self.can_switch_visual_to(target, now) {
+            self.transition_visual_mood(target.mood, now);
+        }
+    }
+
+    fn projected_activity(&self) -> ActivityProjection {
+        if let Some(span) = self.best_span(|_| true) {
+            return ActivityProjection {
+                mood: span.mood,
+                interrupts_visual: span.interrupts_visual,
+            };
+        }
+        let resting = self
+            .activity_spans
+            .get(RESTING_ACTIVITY_KEY)
+            .filter(|span| span.kind == ActivityKind::Resting);
+        ActivityProjection {
+            mood: resting.map(|span| span.mood).unwrap_or(self.resting_mood),
+            interrupts_visual: resting
+                .map(|span| span.interrupts_visual)
+                .unwrap_or(self.resting_interrupts_visual),
+        }
+    }
+
+    fn can_switch_visual_to(&self, target: ActivityProjection, now: Instant) -> bool {
+        if target.mood == self.mood {
+            return true;
+        }
+        if matches!(target.mood, PetMood::Error) {
+            return true;
+        }
+        if target.interrupts_visual {
+            return true;
+        }
+        if target.mood.priority() > self.mood.priority() {
+            return true;
+        }
+        now.duration_since(self.mood_started_at) >= self.current_mood_min_visible()
+    }
+
+    fn transition_visual_mood(&mut self, mood: PetMood, now: Instant) {
+        if !matches!(mood, PetMood::Idle | PetMood::Sleeping | PetMood::Pomodoro) {
+            self.last_non_idle_mood = mood;
+        }
+        if request_renderer_mood(mood) {
+            if self.mood != mood {
+                self.mood_started_at = now;
+            }
+            self.mood = mood;
+            if mood == self.resting_mood {
+                self.resting_interrupts_visual = false;
+                if let Some(resting) = self.activity_spans.get_mut(RESTING_ACTIVITY_KEY) {
+                    resting.interrupts_visual = false;
+                }
+            }
+        }
+    }
+
+    fn best_active_work_span(&self) -> Option<&ActivitySpan> {
+        self.best_span(|span| {
+            matches!(span.kind, ActivityKind::Tool | ActivityKind::Subagent)
+                && span.mood.is_active_work()
+        })
+    }
+
+    fn best_span(&self, accept: impl Fn(&ActivitySpan) -> bool) -> Option<&ActivitySpan> {
+        self.activity_spans
+            .values()
+            .filter(|span| accept(span))
+            .max_by(|a, b| {
+                a.priority
+                    .cmp(&b.priority)
+                    .then_with(|| a.started_at.cmp(&b.started_at))
+            })
+    }
+
+    fn legacy_activity_mood(&self) -> Option<PetMood> {
         let direct_tool_mood = self
             .active_tool_moods
             .iter()
@@ -410,61 +619,51 @@ impl AppState {
         None
     }
 
-    pub(crate) fn start_subagent(&mut self) {
-        self.active_subagents = self.active_subagents.saturating_add(1);
-        self.last_activity = Instant::now();
-        self.refresh_visual_mood();
+    fn current_mood_min_visible(&self) -> Duration {
+        self.activity_spans
+            .values()
+            .filter(|span| span.mood == self.mood)
+            .map(|span| span.min_visible)
+            .max()
+            .unwrap_or_else(|| min_visible_for(self.mood))
     }
 
-    pub(crate) fn finish_subagent(&mut self) {
-        self.active_subagents = self.active_subagents.saturating_sub(1);
-        self.last_activity = Instant::now();
-        self.refresh_visual_mood();
+    fn prune_expired_activity_spans(&mut self, now: Instant) {
+        self.activity_spans
+            .retain(|_, span| span.kind == ActivityKind::Resting || !span.is_expired_at(now));
     }
 
-    pub(crate) fn refresh_visual_mood(&mut self) {
-        self.refresh_visual_mood_at(Instant::now());
-    }
-
-    pub(crate) fn refresh_visual_mood_at(&mut self, now: Instant) {
-        let target = self.projected_mood();
-        if self.can_switch_visual_to(target, now) {
-            self.transition_visual_mood(target, now);
+    fn sync_subagent_span(&mut self) {
+        if self.active_subagents > 0 {
+            self.activity_spans.insert(
+                SUBAGENT_ACTIVITY_KEY.to_string(),
+                ActivitySpan::new(
+                    SUBAGENT_ACTIVITY_KEY,
+                    "",
+                    ActivityKind::Subagent,
+                    PetMood::Subagent,
+                    false,
+                ),
+            );
+        } else {
+            self.activity_spans.remove(SUBAGENT_ACTIVITY_KEY);
         }
     }
 
-    fn projected_mood(&self) -> PetMood {
-        self.activity_mood().unwrap_or(self.resting_mood)
-    }
-
-    fn can_switch_visual_to(&self, target: PetMood, now: Instant) -> bool {
-        if target == self.mood {
-            return true;
-        }
-        if matches!(target, PetMood::Error) {
-            return true;
-        }
-        if self.resting_interrupts_visual && target == self.resting_mood {
-            return true;
-        }
-        if target.priority() > self.mood.priority() {
-            return true;
-        }
-        now.duration_since(self.mood_started_at) >= min_visible_for(self.mood)
-    }
-
-    fn transition_visual_mood(&mut self, mood: PetMood, now: Instant) {
-        if !matches!(mood, PetMood::Idle | PetMood::Sleeping | PetMood::Pomodoro) {
-            self.last_non_idle_mood = mood;
-        }
-        if request_renderer_mood(mood) {
-            if self.mood != mood {
-                self.mood_started_at = now;
-            }
-            self.mood = mood;
-            if mood == self.resting_mood {
-                self.resting_interrupts_visual = false;
-            }
+    fn sync_pomodoro_span(&mut self) {
+        if self.is_focus_pomodoro_running() {
+            self.activity_spans.insert(
+                POMODORO_ACTIVITY_KEY.to_string(),
+                ActivitySpan::new(
+                    POMODORO_ACTIVITY_KEY,
+                    "",
+                    ActivityKind::Pomodoro,
+                    PetMood::Pomodoro,
+                    false,
+                ),
+            );
+        } else {
+            self.activity_spans.remove(POMODORO_ACTIVITY_KEY);
         }
     }
 
@@ -515,11 +714,14 @@ impl AppState {
 
     pub(crate) fn start_pomodoro(&mut self) {
         self.pomodoro.start_focus(&self.settings.pomodoro);
+        self.sync_pomodoro_span();
         self.set_mood(PetMood::Pomodoro);
     }
 
     pub(crate) fn stop_pomodoro(&mut self) {
         self.pomodoro.stop(&self.settings.pomodoro);
+        self.sync_pomodoro_span();
+        self.set_mood(self.default_resting_mood());
     }
 
     pub(crate) fn pause_pomodoro(&mut self) {
@@ -527,6 +729,7 @@ impl AppState {
             return;
         }
         self.pomodoro.pause(&self.settings.pomodoro);
+        self.sync_pomodoro_span();
         self.set_mood(self.default_resting_mood());
     }
 
@@ -535,6 +738,7 @@ impl AppState {
             return;
         }
         self.pomodoro.resume(&self.settings.pomodoro);
+        self.sync_pomodoro_span();
         self.set_mood(self.default_resting_mood());
     }
 
@@ -549,6 +753,16 @@ impl AppState {
         } else {
             PetMood::Wave
         };
+        self.begin_activity_span(
+            ActivitySpan::new(
+                INTERACTION_ACTIVITY_KEY,
+                "",
+                ActivityKind::Interaction,
+                mood,
+                true,
+            )
+            .with_priority(PetMood::Pomodoro.priority().saturating_add(1)),
+        );
         self.set_resting_mood(mood, true);
     }
 
@@ -556,9 +770,11 @@ impl AppState {
         match self.pomodoro.skip(&self.settings.pomodoro) {
             PomodoroTick::FocusComplete => {
                 self.record_completed_focus();
+                self.sync_pomodoro_span();
                 self.set_mood(PetMood::Happy);
             }
             PomodoroTick::BreakComplete => {
+                self.sync_pomodoro_span();
                 self.set_mood(PetMood::Idle);
             }
             PomodoroTick::None => {}
@@ -569,9 +785,11 @@ impl AppState {
         match self.pomodoro.tick(&self.settings.pomodoro) {
             PomodoroTick::FocusComplete => {
                 self.record_completed_focus();
+                self.sync_pomodoro_span();
                 self.set_mood(PetMood::Happy);
             }
             PomodoroTick::BreakComplete => {
+                self.sync_pomodoro_span();
                 self.set_mood(PetMood::Idle);
             }
             PomodoroTick::None => {}
@@ -731,6 +949,103 @@ impl AppState {
             day.completed_focus = day.completed_focus.saturating_add(1);
         });
     }
+
+    pub(crate) fn flush_stats_if_due(&mut self) -> Result<(), String> {
+        if !self.stats.is_dirty() || self.stats_last_flush.elapsed() < STATS_FLUSH_INTERVAL {
+            return Ok(());
+        }
+        self.flush_stats_now()
+    }
+
+    pub(crate) fn flush_stats_now(&mut self) -> Result<(), String> {
+        let result = self.stats.flush();
+        self.stats_last_flush = Instant::now();
+        result
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(crate) enum ActivityKind {
+    Resting,
+    Tool,
+    Subagent,
+    Permission,
+    Choice,
+    Pomodoro,
+    Interaction,
+    Fishing,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ActivitySpan {
+    // Source-level activity; rendering projects all live spans to one PetMood.
+    pub(crate) key: String,
+    pub(crate) session_id: String,
+    pub(crate) kind: ActivityKind,
+    pub(crate) mood: PetMood,
+    pub(crate) priority: u8,
+    pub(crate) started_at: Instant,
+    pub(crate) min_visible: Duration,
+    pub(crate) expires_at: Option<Instant>,
+    pub(crate) interrupts_visual: bool,
+}
+
+impl ActivitySpan {
+    pub(crate) fn new(
+        key: impl Into<String>,
+        session_id: impl Into<String>,
+        kind: ActivityKind,
+        mood: PetMood,
+        interrupts_visual: bool,
+    ) -> Self {
+        Self::at(
+            key,
+            session_id,
+            kind,
+            mood,
+            mood.priority(),
+            interrupts_visual,
+            Instant::now(),
+        )
+    }
+
+    fn at(
+        key: impl Into<String>,
+        session_id: impl Into<String>,
+        kind: ActivityKind,
+        mood: PetMood,
+        priority: u8,
+        interrupts_visual: bool,
+        now: Instant,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            session_id: session_id.into(),
+            kind,
+            mood,
+            priority,
+            started_at: now,
+            min_visible: min_visible_for(mood),
+            expires_at: None,
+            interrupts_visual,
+        }
+    }
+
+    fn with_priority(mut self, priority: u8) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    fn is_expired_at(&self, now: Instant) -> bool {
+        self.expires_at.is_some_and(|expires_at| now >= expires_at)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ActivityProjection {
+    mood: PetMood,
+    interrupts_visual: bool,
 }
 
 fn min_visible_for(mood: PetMood) -> Duration {
@@ -748,6 +1063,22 @@ fn normalize_tool_name_key(tool_name: &str) -> String {
     tool_name.trim().to_ascii_lowercase()
 }
 
+fn tool_activity_key(key: &str) -> String {
+    format!("tool:{key}")
+}
+
+fn permission_activity_key(id: u64) -> String {
+    format!("permission:{id}")
+}
+
+fn choice_activity_key(id: u64) -> String {
+    format!("choice:{id}")
+}
+
+fn tool_session_from_key(key: &str) -> String {
+    key.split(':').next().unwrap_or_default().to_string()
+}
+
 fn request_renderer_mood(mood: PetMood) -> bool {
     match PET_RENDERER.get() {
         Some(renderer) => renderer
@@ -761,6 +1092,62 @@ fn request_renderer_mood(mood: PetMood) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_spans_project_active_work_over_resting_state() {
+        let mut state = AppState::new();
+
+        state.set_resting_mood(PetMood::Happy, false);
+        state.start_tool_mood(PetMood::Building);
+
+        assert_eq!(state.activity_mood(), Some(PetMood::Building));
+        assert_eq!(state.mood, PetMood::Building);
+        assert!(
+            state
+                .activity_spans
+                .values()
+                .any(|span| span.kind == ActivityKind::Tool && span.mood == PetMood::Building)
+        );
+    }
+
+    #[test]
+    fn clearing_session_activities_removes_only_matching_spans() {
+        let mut state = AppState::new();
+
+        state.begin_activity_span(ActivitySpan::new(
+            "fish:s1",
+            "s1",
+            ActivityKind::Fishing,
+            PetMood::Happy,
+            false,
+        ));
+        state.begin_activity_span(ActivitySpan::new(
+            "choice:s2",
+            "s2",
+            ActivityKind::Choice,
+            PetMood::Thinking,
+            false,
+        ));
+
+        state.clear_session_activities("s1");
+
+        assert!(!state.activity_spans.contains_key("fish:s1"));
+        assert!(state.activity_spans.contains_key("choice:s2"));
+        assert!(state.activity_spans.contains_key(RESTING_ACTIVITY_KEY));
+    }
+
+    #[test]
+    fn resting_error_overrides_lower_priority_activity_span() {
+        let mut state = AppState::new();
+
+        state.start_pomodoro();
+        assert_eq!(state.mood, PetMood::Pomodoro);
+
+        state.set_resting_mood(PetMood::Error, true);
+
+        assert_eq!(state.resting_mood, PetMood::Error);
+        assert_eq!(state.mood, PetMood::Error);
+    }
 
     #[test]
     fn sleep_ignores_passive_user_input_until_pet_interaction() {

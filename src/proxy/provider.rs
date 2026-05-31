@@ -155,13 +155,6 @@ impl Provider {
             Provider::OpenAI | Provider::Azure | Provider::OpenRouter
         )
     }
-
-    /// Should we pre-seed the tool-history capability cache as `supports_native_tool_history=true`?
-    /// All recognized commercial APIs honour OpenAI's native `tool`/`tool_calls` roles.
-    /// Generic (incl. self-hosted OneAPI/NewAPI) still needs to learn through a 400 probe.
-    pub(super) fn trusts_native_tool_history(self) -> bool {
-        !matches!(self, Provider::Generic)
-    }
 }
 
 #[cfg(test)]
@@ -242,32 +235,5 @@ mod tests {
                 "wrong provider for {url}"
             );
         }
-    }
-
-    #[test]
-    fn trusts_native_tool_history_covers_known_providers() {
-        for url in [
-            "https://api.openai.com/v1",
-            "https://my-resource.openai.azure.com/v1",
-            "https://api.deepseek.com/v1",
-            "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "https://api.moonshot.cn/v1",
-            "https://open.bigmodel.cn/api/paas/v4",
-            "https://openrouter.ai/api/v1",
-        ] {
-            let profile = LlmProfile {
-                base_url: url.to_string(),
-                ..LlmProfile::default()
-            };
-            assert!(
-                Provider::detect(&profile).trusts_native_tool_history(),
-                "{url} should trust native tool history"
-            );
-        }
-        let generic = LlmProfile {
-            base_url: "http://my-oneapi.local:3000/v1".to_string(),
-            ..LlmProfile::default()
-        };
-        assert!(!Provider::detect(&generic).trusts_native_tool_history());
     }
 }

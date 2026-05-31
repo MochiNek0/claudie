@@ -1,9 +1,12 @@
 mod render;
 
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::time::Duration;
 
-use render::{RenderState, fill_rect, render_permission_overlay, render_scene, snapshot_state};
+use render::{
+    RenderState, choice_option_at_point, fill_rect, render_permission_overlay, render_scene,
+    scroll_choice_lines, scroll_permission_detail_lines, snapshot_state,
+};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
@@ -25,9 +28,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SWP_SHOWWINDOW, SendMessageW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes,
     SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
     TPM_TOPALIGN, TrackPopupMenu, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCLBUTTONDOWN, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCLBUTTONDOWN, WM_PAINT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::app::pomodoro::PomodoroStatus;
@@ -52,7 +55,13 @@ static LEFT_BUTTON_DRAGGING: AtomicBool = AtomicBool::new(false);
 static LEFT_BUTTON_DOWN_X: AtomicI32 = AtomicI32::new(0);
 static LEFT_BUTTON_DOWN_Y: AtomicI32 = AtomicI32::new(0);
 static RIGHT_BUTTON_CAPTURED: AtomicBool = AtomicBool::new(false);
+static CURRENT_TIMER_MS: AtomicU32 = AtomicU32::new(ACTIVE_TIMER_MS);
+static LAST_TOPMOST_TICK: AtomicU32 = AtomicU32::new(0);
 const CLICK_DRAG_THRESHOLD_PX: i32 = 6;
+const ACTIVE_TIMER_MS: u32 = 33;
+const IDLE_TIMER_MS: u32 = 120;
+const SLEEP_TIMER_MS: u32 = 500;
+const TOPMOST_REFRESH_MS: u32 = 1_000;
 
 pub(crate) unsafe fn run_window(port: u16) {
     let class_name = wide("ClaudieWindow");
@@ -125,7 +134,7 @@ pub(crate) unsafe fn run_window(port: u16) {
     ensure_pet_topmost(hwnd);
     RegisterHotKey(hwnd, 1, MOD_CONTROL | MOD_SHIFT, 'Y' as u32);
     RegisterHotKey(hwnd, 2, MOD_CONTROL | MOD_SHIFT, 'N' as u32);
-    SetTimer(hwnd, 1, 33, None);
+    SetTimer(hwnd, 1, ACTIVE_TIMER_MS, None);
 
     if let Err(err) = slint::run_event_loop_until_quit() {
         eprintln!("Slint event loop failed: {err}");
@@ -152,6 +161,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_ERASEBKGND => 1,
         WM_TIMER => {
+            let mut timer_ms = IDLE_TIMER_MS;
             if let Some(state) = APP_STATE.get() {
                 let mut state = state.lock().expect("state poisoned");
                 let user_idle = user_idle_snapshot();
@@ -160,13 +170,15 @@ unsafe extern "system" fn window_proc(
                     user_idle.map(|snapshot| snapshot.0),
                     user_idle.map(|snapshot| snapshot.1),
                 );
+                timer_ms = desired_timer_interval(&state);
             }
+            update_window_timer(hwnd, timer_ms);
             let overlay = overlay_hwnd(hwnd);
             if !overlay.is_null() {
                 ShowWindow(overlay, SW_HIDE);
             }
             sync_prompt_popup();
-            if !CONTEXT_MENU_OPEN.load(Ordering::Relaxed) {
+            if !CONTEXT_MENU_OPEN.load(Ordering::Relaxed) && should_refresh_topmost() {
                 ensure_pet_topmost(hwnd);
             }
             InvalidateRect(hwnd, std::ptr::null(), 0);
@@ -249,6 +261,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             persist_pet_window_position(hwnd);
+            flush_app_stats_now();
             let overlay = overlay_hwnd(hwnd);
             if !overlay.is_null() {
                 DestroyWindow(overlay);
@@ -324,11 +337,63 @@ unsafe fn persist_pet_window_position(hwnd: HWND) {
     }
 }
 
+fn flush_app_stats_now() {
+    if let Some(state) = APP_STATE.get() {
+        let mut state = state.lock().expect("state poisoned");
+        if let Err(err) = state.flush_stats_now() {
+            state.last_error = format!("Stats save failed: {err}");
+        }
+    }
+}
+
 fn has_pending_overlay() -> bool {
     APP_STATE.get().is_some_and(|state| {
         let state = state.lock().expect("state poisoned");
         !state.pending_permissions.is_empty() || !state.pending_choices.is_empty()
     })
+}
+
+fn desired_timer_interval(state: &AppState) -> u32 {
+    let pending = !state.pending_permissions.is_empty() || !state.pending_choices.is_empty();
+    if pending
+        || state.mood.is_active_work()
+        || matches!(
+            state.mood,
+            PetMood::Happy | PetMood::Error | PetMood::Pomodoro | PetMood::Wave | PetMood::Stretch
+        )
+    {
+        ACTIVE_TIMER_MS
+    } else if state.mood == PetMood::Sleeping {
+        SLEEP_TIMER_MS
+    } else {
+        IDLE_TIMER_MS
+    }
+}
+
+unsafe fn update_window_timer(hwnd: HWND, interval_ms: u32) {
+    let previous = CURRENT_TIMER_MS.swap(interval_ms, Ordering::Relaxed);
+    if previous != interval_ms {
+        SetTimer(hwnd, 1, interval_ms, None);
+    }
+}
+
+fn should_refresh_topmost() -> bool {
+    let now = unsafe { GetTickCount() };
+    let mut last = LAST_TOPMOST_TICK.load(Ordering::Relaxed);
+    loop {
+        if last != 0 && now.wrapping_sub(last) < TOPMOST_REFRESH_MS {
+            return false;
+        }
+        match LAST_TOPMOST_TICK.compare_exchange_weak(
+            last,
+            now,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(next) => last = next,
+        }
+    }
 }
 
 unsafe fn base_point_from_client(_hwnd: HWND, x: i32, y: i32) -> (i32, i32) {
@@ -398,6 +463,21 @@ unsafe extern "system" fn permission_overlay_proc(
             }
             0
         }
+        WM_MOUSEWHEEL => {
+            let wheel_delta = hiword(wparam as u32) as i32;
+            let line_delta = if wheel_delta > 0 { -3 } else { 3 };
+            if choice_content_can_scroll_at(hwnd, lparam) {
+                scroll_choice_lines(line_delta);
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+                return 0;
+            }
+            if permission_detail_can_scroll_at(hwnd, lparam) {
+                scroll_permission_detail_lines(line_delta);
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+                return 0;
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_SETCURSOR => {
             if cursor_over_permission_button(hwnd) {
                 SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND));
@@ -407,6 +487,55 @@ unsafe extern "system" fn permission_overlay_proc(
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
+}
+
+unsafe fn permission_detail_can_scroll_at(hwnd: HWND, lparam: LPARAM) -> bool {
+    if !has_pending_permission() || has_pending_choice() {
+        return false;
+    }
+
+    let mut point = POINT {
+        x: loword(lparam as u32) as i32,
+        y: hiword(lparam as u32) as i32,
+    };
+    if ScreenToClient(hwnd, &mut point) == 0 {
+        return false;
+    }
+
+    point_in_tuple(point.x, point.y, permission_detail_panel_rect())
+}
+
+unsafe fn choice_content_can_scroll_at(hwnd: HWND, lparam: LPARAM) -> bool {
+    if !has_pending_choice() {
+        return false;
+    }
+
+    let mut point = POINT {
+        x: loword(lparam as u32) as i32,
+        y: hiword(lparam as u32) as i32,
+    };
+    if ScreenToClient(hwnd, &mut point) == 0 {
+        return false;
+    }
+
+    point_in_tuple(point.x, point.y, choice_content_rect())
+}
+
+fn permission_detail_panel_rect() -> (i32, i32, i32, i32) {
+    let x = PERMISSION_BUBBLE_X + 24;
+    let y = PERMISSION_BUBBLE_Y + 76;
+    let w = PERMISSION_BUBBLE_W - 48;
+    (x, y, w, PERMISSION_DETAIL_PANEL_H)
+}
+
+fn choice_content_rect() -> (i32, i32, i32, i32) {
+    let y = CHOICE_CARD_Y + 50;
+    (
+        CHOICE_CARD_X + 24,
+        y,
+        CHOICE_CARD_W - 48,
+        CHOICE_SUBMIT_BUTTON.1 - 12 - y,
+    )
 }
 
 unsafe fn cursor_over_permission_button(hwnd: HWND) -> bool {
@@ -633,36 +762,21 @@ fn has_pending_choice() -> bool {
     })
 }
 
+fn has_pending_permission() -> bool {
+    APP_STATE.get().is_some_and(|state| {
+        !state
+            .lock()
+            .expect("state poisoned")
+            .pending_permissions
+            .is_empty()
+    })
+}
+
 fn choice_option_at(px: i32, py: i32) -> Option<(usize, usize)> {
     APP_STATE.get().and_then(|state| {
         let state = state.lock().expect("state poisoned");
         let choice = state.pending_choices.front()?;
-        let mut y = CHOICE_CARD_Y + 50;
-        if !choice.detail.trim().is_empty() {
-            y += 5 * 17 + 8;
-        }
-        let limit_y = CHOICE_SUBMIT_BUTTON.1 - 12;
-        for (question_index, question) in choice.questions.iter().enumerate() {
-            if y + 47 > limit_y {
-                break;
-            }
-            y += 16 + 28 + 3;
-            for (option_index, _) in question.options.iter().enumerate() {
-                if y + CHOICE_OPTION_H > limit_y {
-                    break;
-                }
-                if point_in_tuple(
-                    px,
-                    py,
-                    (CHOICE_OPTION_X, y, CHOICE_OPTION_W, CHOICE_OPTION_H),
-                ) {
-                    return Some((question_index, option_index));
-                }
-                y += CHOICE_OPTION_H + 4;
-            }
-            y += 6;
-        }
-        None
+        choice_option_at_point(choice, px, py)
     })
 }
 

@@ -7,7 +7,6 @@ use crate::proxy_optimizer;
 use crate::settings::LlmProfile;
 use crate::settings::storage::{read_json_or_default, save_pretty_json};
 
-use super::provider::Provider;
 use super::tool_history::request_has_tool_history;
 
 const CAPABILITY_CACHE_VERSION: &str = "v1";
@@ -40,37 +39,7 @@ pub(super) fn cached_tool_history_needs_transcript(profile: &LlmProfile, request
     cached_tool_history_needs_transcript_at(profile, &path)
 }
 
-pub(super) fn cached_tool_history_known_native(profile: &LlmProfile, request: &Value) -> bool {
-    if !request_has_tool_history(request) {
-        return false;
-    }
-    let path = capability_cache_file_path(profile, request);
-    let cache: CapabilityCacheFile = read_json_or_default(&path);
-    if cache.version != CAPABILITY_CACHE_VERSION {
-        return false;
-    }
-    if capability_cache_expired(&cache, profile) {
-        return false;
-    }
-    cache.supports_native_tool_history == Some(true)
-}
-
-/// Pre-seed the capability cache for providers known to honour OpenAI's native
-/// `tool` / `tool_calls` roles, so the first request with tool history doesn't
-/// have to fail once before we trust them. Only writes when no cache entry
-/// exists — prior learnings (good or bad) are preserved.
-pub(super) fn prefill_tool_history_capability(profile: &LlmProfile, request: &Value) {
-    if !Provider::detect(profile).trusts_native_tool_history() || !request_has_tool_history(request)
-    {
-        return;
-    }
-    let path = capability_cache_file_path(profile, request);
-    if path.exists() {
-        return;
-    }
-    let _ = save_tool_history_capability(profile, request, true);
-}
-
+/// Return whether this upstream/model previously needed text transcript mode.
 fn cached_tool_history_needs_transcript_at(profile: &LlmProfile, path: &Path) -> bool {
     let mut cache: CapabilityCacheFile = read_json_or_default(path);
     if cache.version != CAPABILITY_CACHE_VERSION {
