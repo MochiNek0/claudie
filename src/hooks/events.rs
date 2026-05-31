@@ -175,17 +175,6 @@ fn handle_permission_request(
         permission
     };
 
-    #[cfg(not(windows))]
-    {
-        let mut state = state.lock().expect("state poisoned");
-        state
-            .pending_permissions
-            .retain(|pending| pending.id != permission.id);
-        state.last_error = "Permission UI is not available on this platform.".to_string();
-        state.set_mood(PetMood::Error);
-        return permission_response(PermissionDecision::Deny, &permission);
-    }
-
     let decision = {
         let deadline = Instant::now() + PERMISSION_WAIT;
         let mut guard = waiter.decision.lock().expect("permission waiter poisoned");

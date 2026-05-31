@@ -58,9 +58,7 @@ fn hook_events() -> &'static [&'static str] {
 }
 
 pub(crate) fn install_claude_hooks(port: u16) -> Result<PathBuf, String> {
-    let home = env::var_os("USERPROFILE")
-        .or_else(|| env::var_os("HOME"))
-        .ok_or_else(|| "USERPROFILE/HOME is not set".to_string())?;
+    let home = env::var_os("USERPROFILE").ok_or_else(|| "USERPROFILE is not set".to_string())?;
     let claude_dir = PathBuf::from(home).join(".claude");
     fs::create_dir_all(&claude_dir).map_err(|err| err.to_string())?;
     let settings_path = claude_dir.join("settings.json");
@@ -98,9 +96,7 @@ pub(crate) fn ensure_claude_hooks(_state: Arc<Mutex<AppState>>, port: u16) -> Re
 }
 
 pub(crate) fn uninstall_claude_hooks() -> Result<Option<PathBuf>, String> {
-    let home = env::var_os("USERPROFILE")
-        .or_else(|| env::var_os("HOME"))
-        .ok_or_else(|| "USERPROFILE/HOME is not set".to_string())?;
+    let home = env::var_os("USERPROFILE").ok_or_else(|| "USERPROFILE is not set".to_string())?;
     let settings_path = PathBuf::from(home).join(".claude").join("settings.json");
     if !settings_path.exists() {
         return Ok(None);

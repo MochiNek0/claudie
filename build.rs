@@ -9,7 +9,7 @@ fn main() {
 
     let target = env::var("TARGET").unwrap_or_default();
     if !target.contains("windows") {
-        return;
+        panic!("claudie is Windows-only; build with a Windows target");
     }
 
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));

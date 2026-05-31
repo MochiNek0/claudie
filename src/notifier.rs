@@ -1,4 +1,3 @@
-#[cfg(windows)]
 pub(crate) fn notify_user(title: &str, message: &str, error: bool) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MessageBoxW,
@@ -20,12 +19,5 @@ pub(crate) fn notify_user(title: &str, message: &str, error: bool) {
             title.as_ptr(),
             MB_OK | icon,
         );
-    }
-}
-
-#[cfg(not(windows))]
-pub(crate) fn notify_user(title: &str, message: &str, error: bool) {
-    if error {
-        eprintln!("{title}: {message}");
     }
 }

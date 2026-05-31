@@ -1,5 +1,8 @@
 ﻿#![allow(unsafe_op_in_unsafe_fn)]
-#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+#[cfg(not(windows))]
+compile_error!("claudie is Windows-only; build with a Windows target.");
 
 mod app;
 mod config;
@@ -9,7 +12,6 @@ mod notifier;
 mod proxy;
 mod proxy_optimizer;
 mod settings;
-#[cfg(windows)]
 mod ui;
 mod util;
 
@@ -25,7 +27,6 @@ use hooks::{
 };
 use notifier::notify_user;
 use proxy::start_openai_proxy_server;
-#[cfg(windows)]
 use ui::{init_animation_store, run_window};
 use util::parse_port;
 
@@ -114,7 +115,6 @@ fn print_help() {
     println!("  claudie --print-claude-settings [--port 17387]");
 }
 
-#[cfg(windows)]
 fn run_app(state: Arc<Mutex<AppState>>, port: u16) {
     init_animation_store();
     let hooks_installed = start_runtime_hooks(state.clone(), port);
@@ -123,17 +123,6 @@ fn run_app(state: Arc<Mutex<AppState>>, port: u16) {
     }
     if hooks_installed {
         cleanup_runtime_hooks();
-    }
-}
-
-#[cfg(not(windows))]
-fn run_app(state: Arc<Mutex<AppState>>, port: u16) {
-    if start_runtime_hooks(state, port) {
-        println!("claudie hook server is running at http://127.0.0.1:{port}/hook");
-        println!("Desktop pet UI is currently available on Windows; press Ctrl+C to stop.");
-        loop {
-            std::thread::park();
-        }
     }
 }
 

@@ -4,11 +4,11 @@ Quick-start notes for AI coding agents working on `claudie`.
 
 ## Project Summary
 
-`claudie` is a lightweight Rust desktop pet for Claude Code. On Windows it runs a native Win32/GDI+ always-on-top pet window, listens for Claude Code HTTP hook events, switches GIF animations based on activity, and lets the user answer permission or choice requests from the pet UI.
+`claudie` is a Windows-only lightweight Rust desktop pet for Claude Code. It runs a native Win32/GDI+ always-on-top pet window, listens for Claude Code HTTP hook events, switches GIF animations based on activity, and lets the user answer permission or choice requests from the pet UI.
 
 The project intentionally avoids Electron, WebView, async runtimes, and web frameworks. Runtime code is mostly a Win32 UI thread, a small synchronous `std::net::TcpListener` hook server, and a local Anthropic Messages compatible proxy that forwards to OpenAI Chat Completions style providers.
 
-Windows has the full UI. macOS/Linux builds run the hook/proxy services and CLI hook management only; permission requests are denied immediately because there is no desktop interaction UI.
+Non-Windows builds are not supported.
 
 ## Common Commands
 
@@ -40,10 +40,10 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 
 ## Directory Map
 
-- `src/main.rs`: CLI flags, shared `AppState`, hook/proxy startup, automatic hook ensure/cleanup, and platform entrypoint.
+- `src/main.rs`: CLI flags, shared `AppState`, hook/proxy startup, automatic hook ensure/cleanup, and Windows UI entrypoint.
 - `src/config.rs`: ports, window dimensions, menu IDs, overlay geometry, scale limits, permission timeout, and UI constants.
 - `src/globals.rs`: process-wide `OnceLock` handles for shared app state and pet renderer.
-- `src/notifier.rs`: platform notification/message-box wrapper.
+- `src/notifier.rs`: Win32 message-box notification wrapper.
 - `src/util.rs`: argument parsing, path helpers, text shortening, and UTF-16 conversion.
 - `src/app/`: core domain state.
 - `src/app/mod.rs`: `AppState`, `PetMood`, sessions, pending permissions/choices, quota snapshots, pomodoro, stats, and mood decay.
@@ -83,7 +83,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `src/ui/prompt_popup.rs`: Slint permission/choice popup snapshots and callbacks.
 - `src/ui/window_icon.rs`: Slint/Winit/Win32 icon bridge for auxiliary windows.
 - `assets/claudie/`: bundled GIF pet moods.
-- `packaging/`: Windows installer and Unix user-level install helpers.
+- `packaging/`: Windows installer helpers.
 
 ## Runtime Files
 
@@ -101,7 +101,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 ## Architecture Notes
 
 - `AppState` is the central mutable model. Access it through `Arc<Mutex<AppState>>` or `APP_STATE`.
-- Normal startup starts the hook server on `DEFAULT_PORT` (`17387`), starts the OpenAI proxy on `DEFAULT_PROXY_PORT` (`17388`), then ensures Claude Code hooks point at the selected hook port. On Windows, exiting the UI uninstalls claudie-managed hooks.
+- Normal startup starts the hook server on `DEFAULT_PORT` (`17387`), starts the OpenAI proxy on `DEFAULT_PROXY_PORT` (`17388`), then ensures Claude Code hooks point at the selected hook port. Exiting the UI uninstalls claudie-managed hooks.
 - Installed hook events are defined in `src/hooks/claude_settings.rs`; event semantics belong in `src/hooks/events.rs`. The event handler also tolerates common camelCase field variants and some compatibility event names.
 - Mood transitions should go through `AppState::set_mood`, `set_resting_mood`, `start_tool_activity`, `finish_tool_activity`, `start_subagent`, `finish_subagent`, or `decay_mood` so timestamps and renderer priority stay correct.
 - `PreToolUse` mood classification treats edit/write tools as `Typing`, shell tools as `Building`, read/search tools as `Search`, and `Task` based on task text.
@@ -151,7 +151,7 @@ Manual checks worth doing for relevant changes:
 - GIF resources load from configured or bundled assets.
 - Short left-click plays an interaction animation; click-and-move still drags the window.
 - `POST /hook` updates mood/events and stats.
-- Permission requests show Allow, Always, and Deny controls on Windows.
+- Permission requests show Allow, Always, and Deny controls.
 - Choice requests show options plus Submit and Cancel controls.
 - LLM Profiles can save/use/import/delete profiles and switch from the right-click menu.
 - OpenAI-format profiles route Claude Code through `http://127.0.0.1:17388`, forward `OpenAI body`, stream correctly when requested, and compress/summarize long conversations without losing recent messages.

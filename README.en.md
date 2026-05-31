@@ -2,7 +2,7 @@
 
 [中文](README.md) | English
 
-`claudie` is a lightweight desktop pet for Claude Code. The Windows version is built with Rust and a native Win32/GDI+ window. At runtime it runs the desktop UI, a synchronous `std::net::TcpListener` hook server, and a local Anthropic Messages compatible proxy that forwards Claude Code requests to OpenAI Chat Completions style providers.
+`claudie` is a Windows-only lightweight desktop pet for Claude Code, built with Rust and a native Win32/GDI+ window. At runtime it runs the desktop UI, a synchronous `std::net::TcpListener` hook server, and a local Anthropic Messages compatible proxy that forwards Claude Code requests to OpenAI Chat Completions style providers.
 
 The project intentionally avoids Electron, WebView, async runtimes, and web frameworks. Pet assets use a lightweight GIF directory, with one GIF mapped to each mood.
 
@@ -42,7 +42,7 @@ claudie is inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerz
 - **LLM Profiles**: save official or custom LLM profiles, write the active profile to Claude Code settings, and switch quickly from the right-click menu.
 - **Session ledger**: records daily prompts, tool categories, permission/choice counts, errors, completed focus sessions, and token usage; Stats shows today and the last 7 days.
 - **OpenAI-compatible proxy**: converts Claude Code Anthropic Messages requests to OpenAI Chat Completions with tools, streaming, image forwarding, reasoning output, parallel tool calls, tool-history fallback, context compression, summaries, and capability caching.
-- **Cross-platform**: Windows has the full desktop UI; macOS/Linux currently run only headless hook/proxy services and CLI hook management. Permission requests are denied immediately because there is no desktop interaction UI.
+- **Windows-only**: ships the desktop pet UI, hook/proxy services, Settings panel, and permission/choice interactions for Windows.
 
 ## Quick Start
 
@@ -52,7 +52,7 @@ Run in development:
 cargo run --release
 ```
 
-Normal startup listens on hook URL `http://127.0.0.1:17387/hook` and local proxy `http://127.0.0.1:17388`, then ensures Claude Code hooks point at the selected claudie port. On Windows, exiting the UI removes claudie-managed hooks.
+Normal startup listens on hook URL `http://127.0.0.1:17387/hook` and local proxy `http://127.0.0.1:17388`, then ensures Claude Code hooks point at the selected claudie port. Exiting the UI removes claudie-managed hooks.
 
 Useful commands:
 
@@ -135,10 +135,10 @@ The default `CLAUDIE_PROXY_SUMMARY_MODE=local` uses local extractive summaries a
 
 ```text
 src/
-  main.rs                  CLI, startup flow, hook/proxy initialization, platform entrypoint
+  main.rs                  CLI, startup flow, hook/proxy initialization, Windows UI entrypoint
   config.rs                Ports, window dimensions, menu IDs, overlay geometry, constants
   globals.rs               Process-wide OnceLock handles
-  notifier.rs              Platform notification / message-box wrapper
+  notifier.rs              Win32 message-box notification wrapper
   util.rs                  Arg parsing, paths, text shortening, UTF-16 helpers
   app/                     AppState, moods, permissions/choices, Pomodoro, stats domain state
   hooks/                   Claude Code hook server, event semantics, quota extraction, settings merge
@@ -165,7 +165,7 @@ Other directories:
 
 - `assets/claudie/`: bundled pet GIF animations.
 - `assets/icon.*`, `assets/claudie.manifest`: application icons and Windows manifest.
-- `packaging/`: Windows/Unix packaging and install scripts.
+- `packaging/`: Windows packaging scripts.
 
 ## Local Data
 
@@ -207,7 +207,7 @@ The Windows installer template is in `packaging/windows/claudie.iss`:
 powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 ```
 
-The output is `dist\claudie-setup.exe`. Unix user-level install scripts live in `packaging/unix/`.
+The output is `dist\claudie-setup.exe`.
 
 ## Verification
 

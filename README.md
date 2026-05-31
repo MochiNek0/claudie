@@ -2,7 +2,7 @@
 
 中文 | [English](README.en.md)
 
-`claudie` 是一个为 Claude Code 设计的轻量桌面宠物。Windows 版本使用 Rust + Win32/GDI+ 原生窗口实现；运行时由桌面 UI、同步 `std::net::TcpListener` hook server，以及本地 Anthropic Messages 兼容代理组成。代理会把 Claude Code 请求转换到 OpenAI Chat Completions 风格的上游服务。
+`claudie` 是一个 Windows-only 的 Claude Code 轻量桌面宠物，使用 Rust + Win32/GDI+ 原生窗口实现。运行时由桌面 UI、同步 `std::net::TcpListener` hook server，以及本地 Anthropic Messages 兼容代理组成。代理会把 Claude Code 请求转换到 OpenAI Chat Completions 风格的上游服务。
 
 项目刻意避免 Electron、WebView、async runtime 和 Web 框架。宠物资源使用轻量 GIF 目录，每种 mood 映射一个 GIF。
 
@@ -42,7 +42,7 @@ claudie 受 [rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/cla
 - **LLM Profiles**：保存官方或自定义 LLM profile，可写入 Claude Code settings，并可从右键菜单快速切换。
 - **会话小账本**：按天记录 prompts、工具分类、权限/选择、错误、番茄钟完成数和 token 用量；Stats 页展示今日与最近 7 天。
 - **OpenAI 兼容代理**：把 Claude Code 的 Anthropic Messages 请求转换到 OpenAI Chat Completions，支持工具调用、流式响应、图片转发、reasoning 输出、并行工具调用、工具历史降级、上下文压缩、历史总结和能力缓存。
-- **跨平台**：Windows 提供完整桌面 UI；macOS/Linux 当前只运行 headless hook/proxy 和 CLI hook 管理，没有桌面交互 UI，权限请求会直接拒绝。
+- **Windows-only**：应用只支持 Windows，包含桌面宠物 UI、hook/proxy 服务、Settings 面板和权限/选择交互。
 
 ## 快速开始
 
@@ -52,7 +52,7 @@ claudie 受 [rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/cla
 cargo run --release
 ```
 
-正常启动会监听 hook 地址 `http://127.0.0.1:17387/hook` 和本地代理 `http://127.0.0.1:17388`，并确保 Claude Code hooks 指向当前 claudie 端口。Windows UI 退出时会清理 claudie 管理的 hooks。
+正常启动会监听 hook 地址 `http://127.0.0.1:17387/hook` 和本地代理 `http://127.0.0.1:17388`，并确保 Claude Code hooks 指向当前 claudie 端口。UI 退出时会清理 claudie 管理的 hooks。
 
 常用命令：
 
@@ -135,10 +135,10 @@ CLAUDIE_PROXY_FORWARD_IMAGES=auto
 
 ```text
 src/
-  main.rs                  CLI、启动流程、hook/proxy 初始化和平台入口
+  main.rs                  CLI、启动流程、hook/proxy 初始化和 Windows UI 入口
   config.rs                端口、窗口尺寸、菜单 ID、overlay 几何和常量
   globals.rs               进程级 OnceLock 全局句柄
-  notifier.rs              平台通知 / 消息框封装
+  notifier.rs              Win32 消息框通知封装
   util.rs                  参数解析、路径、文本截断和 UTF-16 helper
   app/                     AppState、mood、权限/选择、番茄钟、统计等领域状态
   hooks/                   Claude Code hook server、事件语义、配额提取和 settings 合并
@@ -165,7 +165,7 @@ src/
 
 - `assets/claudie/`：内置 GIF 动画资源。
 - `assets/icon.*`、`assets/claudie.manifest`：应用图标和 Windows manifest。
-- `packaging/`：Windows/Unix 打包与安装脚本。
+- `packaging/`：Windows 安装包脚本。
 
 ## 本地数据
 
@@ -207,7 +207,7 @@ Windows 安装包模板位于 `packaging/windows/claudie.iss`：
 powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 ```
 
-输出文件为 `dist\claudie-setup.exe`。Unix 用户级安装脚本在 `packaging/unix/`。
+输出文件为 `dist\claudie-setup.exe`。
 
 ## 验证
 

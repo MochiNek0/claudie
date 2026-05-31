@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-#[cfg(not(windows))]
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use windows_sys::Win32::Foundation::SYSTEMTIME;
+use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 
 use crate::settings::claudie_home;
 use crate::settings::storage::{read_json_or_default, save_pretty_json};
@@ -180,40 +180,9 @@ pub(crate) fn tool_stats_kind(tool_name: &str) -> ToolStatsKind {
 }
 
 fn today_key() -> String {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::SYSTEMTIME;
-        use windows_sys::Win32::System::SystemInformation::GetLocalTime;
-        let mut time = SYSTEMTIME::default();
-        unsafe {
-            GetLocalTime(&mut time);
-        }
-        return format!("{:04}-{:02}-{:02}", time.wYear, time.wMonth, time.wDay);
+    let mut time = SYSTEMTIME::default();
+    unsafe {
+        GetLocalTime(&mut time);
     }
-
-    #[cfg(not(windows))]
-    {
-        let days = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_secs()
-            / 86_400;
-        let (year, month, day) = civil_from_days(days as i64);
-        format!("{year:04}-{month:02}-{day:02}")
-    }
-}
-
-#[cfg(not(windows))]
-fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
-    let z = days_since_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    let year = y + if m <= 2 { 1 } else { 0 };
-    (year as i32, m as u32, d as u32)
+    format!("{:04}-{:02}-{:02}", time.wYear, time.wMonth, time.wDay)
 }

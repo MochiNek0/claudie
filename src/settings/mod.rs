@@ -615,7 +615,6 @@ pub(crate) fn mood_rows() -> &'static [(PetMood, &'static str)] {
 
 pub(crate) fn claudie_home() -> PathBuf {
     env::var_os("USERPROFILE")
-        .or_else(|| env::var_os("HOME"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claudie")
@@ -1002,7 +1001,6 @@ fn expand_home(value: &str) -> PathBuf {
 
 fn home_dir() -> PathBuf {
     env::var_os("USERPROFILE")
-        .or_else(|| env::var_os("HOME"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }

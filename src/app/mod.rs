@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use self::pomodoro::{PomodoroMode, PomodoroState, PomodoroStatus, PomodoroTick};
 use self::stats::{DailyStatsDb, ToolStatsKind, load_daily_stats};
-#[cfg(windows)]
 use crate::globals::PET_RENDERER;
 use crate::settings::{LlmProfileDb, UserSettings, load_llm_profile_db, load_user_settings};
 
@@ -749,7 +748,6 @@ fn normalize_tool_name_key(tool_name: &str) -> String {
     tool_name.trim().to_ascii_lowercase()
 }
 
-#[cfg(windows)]
 fn request_renderer_mood(mood: PetMood) -> bool {
     match PET_RENDERER.get() {
         Some(renderer) => renderer
@@ -758,11 +756,6 @@ fn request_renderer_mood(mood: PetMood) -> bool {
             .request_mood(mood),
         None => true,
     }
-}
-
-#[cfg(not(windows))]
-fn request_renderer_mood(_mood: PetMood) -> bool {
-    true
 }
 
 #[cfg(test)]
