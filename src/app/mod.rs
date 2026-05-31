@@ -1,3 +1,4 @@
+pub(crate) mod fishing;
 pub(crate) mod pomodoro;
 pub(crate) mod stats;
 
@@ -6,6 +7,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use self::fishing::{FishingPhase, FishingState, FishingTick};
 use self::pomodoro::{PomodoroMode, PomodoroState, PomodoroStatus, PomodoroTick};
 use self::stats::{DailyStatsDb, ToolStatsKind, load_daily_stats};
 use crate::globals::PET_RENDERER;
@@ -21,6 +23,7 @@ const RESTING_ACTIVITY_KEY: &str = "resting";
 const SUBAGENT_ACTIVITY_KEY: &str = "subagent";
 const POMODORO_ACTIVITY_KEY: &str = "pomodoro";
 const INTERACTION_ACTIVITY_KEY: &str = "interaction";
+const FISHING_ACTIVITY_KEY: &str = "fishing";
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum PetMood {
@@ -36,6 +39,10 @@ pub(crate) enum PetMood {
     Pomodoro,
     Wave,
     Stretch,
+    Fishing,
+    FishingReel,
+    FishingCaught,
+    FishingMissed,
 }
 
 impl Default for PetMood {
@@ -59,6 +66,10 @@ impl PetMood {
             Self::Pomodoro => "pomodoro",
             Self::Wave => "wave",
             Self::Stretch => "stretch",
+            Self::Fishing => "fishing",
+            Self::FishingReel => "fishing_reel",
+            Self::FishingCaught => "fishing_caught",
+            Self::FishingMissed => "fishing_missed",
         }
     }
 
@@ -77,6 +88,8 @@ impl PetMood {
             Self::Subagent => 65,
             Self::Thinking => 60,
             Self::Pomodoro => 45,
+            Self::Fishing | Self::FishingReel => 47,
+            Self::FishingCaught | Self::FishingMissed => 46,
             Self::Wave | Self::Stretch => 42,
             Self::Happy => 40,
             Self::Sleeping => 20,
@@ -228,6 +241,7 @@ pub(crate) struct AppState {
     pub(crate) settings: UserSettings,
     pub(crate) llm_profiles: LlmProfileDb,
     pub(crate) pomodoro: PomodoroState,
+    pub(crate) fishing: FishingState,
     pub(crate) stats: DailyStatsDb,
     stats_last_total_tokens: u64,
     stats_last_input_tokens: u64,
@@ -263,6 +277,7 @@ impl AppState {
             settings: load_user_settings(),
             llm_profiles: load_llm_profile_db(),
             pomodoro: PomodoroState::default(),
+            fishing: FishingState::default(),
             stats: load_daily_stats(),
             stats_last_total_tokens: 0,
             stats_last_input_tokens: 0,
@@ -294,7 +309,10 @@ impl AppState {
     }
 
     fn force_visual_mood(&mut self, mood: PetMood) {
-        if !matches!(mood, PetMood::Idle | PetMood::Sleeping | PetMood::Pomodoro) {
+        if !matches!(
+            mood,
+            PetMood::Idle | PetMood::Sleeping | PetMood::Pomodoro | PetMood::Fishing
+        ) {
             self.last_non_idle_mood = mood;
         }
         if request_renderer_mood(mood) {
@@ -563,7 +581,10 @@ impl AppState {
     }
 
     fn transition_visual_mood(&mut self, mood: PetMood, now: Instant) {
-        if !matches!(mood, PetMood::Idle | PetMood::Sleeping | PetMood::Pomodoro) {
+        if !matches!(
+            mood,
+            PetMood::Idle | PetMood::Sleeping | PetMood::Pomodoro | PetMood::Fishing
+        ) {
             self.last_non_idle_mood = mood;
         }
         if request_renderer_mood(mood) {
@@ -667,6 +688,19 @@ impl AppState {
         }
     }
 
+    fn sync_fishing_span(&mut self) {
+        if self.fishing.is_active() {
+            let mood = fishing_mood_for_phase(self.fishing.phase);
+            self.activity_spans.insert(
+                FISHING_ACTIVITY_KEY.to_string(),
+                ActivitySpan::new(FISHING_ACTIVITY_KEY, "", ActivityKind::Fishing, mood, true)
+                    .with_priority(PetMood::FishingReel.priority()),
+            );
+        } else {
+            self.activity_spans.remove(FISHING_ACTIVITY_KEY);
+        }
+    }
+
     fn pop_named_tool_key(&mut self, tool_name: &str) -> Option<String> {
         let name_key = normalize_tool_name_key(tool_name);
         let queue = self.active_tool_names.get_mut(&name_key)?;
@@ -742,7 +776,60 @@ impl AppState {
         self.set_mood(self.default_resting_mood());
     }
 
+    pub(crate) fn start_fishing(&mut self) {
+        if !self.pending_permissions.is_empty() || !self.pending_choices.is_empty() {
+            return;
+        }
+        self.fishing.start();
+        self.sync_fishing_span();
+        self.set_mood(PetMood::Fishing);
+    }
+
+    pub(crate) fn stop_fishing(&mut self) {
+        self.fishing.stop();
+        self.sync_fishing_span();
+        self.set_mood(self.default_resting_mood());
+    }
+
+    pub(crate) fn tick_fishing(&mut self) {
+        let event = self.fishing.tick();
+        match event {
+            FishingTick::Bite => {
+                self.sync_fishing_span();
+                self.set_mood(PetMood::FishingReel);
+            }
+            FishingTick::Caught => {
+                self.sync_fishing_span();
+                self.set_mood(PetMood::FishingCaught);
+            }
+            FishingTick::Missed => {
+                self.sync_fishing_span();
+                self.set_mood(PetMood::FishingMissed);
+            }
+            FishingTick::Finished => {
+                self.sync_fishing_span();
+                self.set_mood(self.default_resting_mood());
+            }
+            FishingTick::None => {
+                self.sync_fishing_span();
+            }
+        }
+    }
+
+    pub(crate) fn handle_fishing_input(&mut self) -> bool {
+        let handled = self.fishing.input();
+        if handled {
+            self.last_activity = Instant::now();
+            self.sync_fishing_span();
+            self.refresh_visual_mood();
+        }
+        handled
+    }
+
     pub(crate) fn interact_with_pet(&mut self) {
+        if self.handle_fishing_input() {
+            return;
+        }
         if !self.pending_permissions.is_empty() || !self.pending_choices.is_empty() {
             return;
         }
@@ -811,6 +898,7 @@ impl AppState {
             && self.pending_choices.is_empty()
             && user_idle_for.is_some_and(|idle| idle > sleep_after)
             && !self.has_active_work()
+            && !self.fishing.is_active()
             && !matches!(self.resting_mood, PetMood::Sleeping)
         {
             self.set_resting_mood(PetMood::Sleeping, false);
@@ -836,10 +924,13 @@ impl AppState {
         self.activity_mood().is_some()
             || self.resting_mood.is_active_work()
             || self.is_focus_pomodoro_running()
+            || self.fishing.is_active()
     }
 
     fn default_resting_mood(&self) -> PetMood {
-        if self.is_focus_pomodoro_running() {
+        if self.fishing.is_active() {
+            fishing_mood_for_phase(self.fishing.phase)
+        } else if self.is_focus_pomodoro_running() {
             PetMood::Pomodoro
         } else {
             PetMood::Idle
@@ -1053,9 +1144,25 @@ fn min_visible_for(mood: PetMood) -> Duration {
         PetMood::Typing | PetMood::Building => WORK_MIN_VISIBLE,
         PetMood::Thinking | PetMood::Search => THINKING_MIN_VISIBLE,
         PetMood::Subagent => SUBAGENT_MIN_VISIBLE,
-        PetMood::Pomodoro | PetMood::Wave | PetMood::Stretch => INTERACTION_MIN_VISIBLE,
+        PetMood::Pomodoro
+        | PetMood::Wave
+        | PetMood::Stretch
+        | PetMood::Fishing
+        | PetMood::FishingReel
+        | PetMood::FishingCaught
+        | PetMood::FishingMissed => INTERACTION_MIN_VISIBLE,
         PetMood::Happy => HAPPY_MIN_VISIBLE,
         _ => Duration::ZERO,
+    }
+}
+
+fn fishing_mood_for_phase(phase: FishingPhase) -> PetMood {
+    match phase {
+        FishingPhase::Inactive => PetMood::Idle,
+        FishingPhase::Waiting => PetMood::Fishing,
+        FishingPhase::Reeling => PetMood::FishingReel,
+        FishingPhase::Caught => PetMood::FishingCaught,
+        FishingPhase::Missed => PetMood::FishingMissed,
     }
 }
 

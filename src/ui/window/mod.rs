@@ -166,6 +166,7 @@ unsafe extern "system" fn window_proc(
                 let mut state = state.lock().expect("state poisoned");
                 let user_idle = user_idle_snapshot();
                 state.tick_pomodoro();
+                state.tick_fishing();
                 state.decay_mood(
                     user_idle.map(|snapshot| snapshot.0),
                     user_idle.map(|snapshot| snapshot.1),
@@ -357,9 +358,18 @@ fn desired_timer_interval(state: &AppState) -> u32 {
     let pending = !state.pending_permissions.is_empty() || !state.pending_choices.is_empty();
     if pending
         || state.mood.is_active_work()
+        || state.fishing.is_active()
         || matches!(
             state.mood,
-            PetMood::Happy | PetMood::Error | PetMood::Pomodoro | PetMood::Wave | PetMood::Stretch
+            PetMood::Happy
+                | PetMood::Error
+                | PetMood::Pomodoro
+                | PetMood::Wave
+                | PetMood::Stretch
+                | PetMood::Fishing
+                | PetMood::FishingReel
+                | PetMood::FishingCaught
+                | PetMood::FishingMissed
         )
     {
         ACTIVE_TIMER_MS
@@ -593,6 +603,21 @@ unsafe fn show_context_menu(hwnd: HWND) {
     let skip_label = wide("Skip Pomodoro");
     AppendMenuW(menu, MF_STRING, MENU_POMODORO_SKIP_ID, skip_label.as_ptr());
     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+    let fishing_label = wide("Start Fishing");
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_FISHING_START_ID,
+        fishing_label.as_ptr(),
+    );
+    let stop_fishing_label = wide("Stop Fishing");
+    AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_FISHING_STOP_ID,
+        stop_fishing_label.as_ptr(),
+    );
+    AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
     let exit_label = wide("Exit");
     AppendMenuW(menu, MF_STRING, MENU_EXIT_ID, exit_label.as_ptr());
 
@@ -630,6 +655,10 @@ unsafe fn show_context_menu(hwnd: HWND) {
             });
         } else if command == MENU_POMODORO_SKIP_ID {
             with_app_state(|state| state.skip_pomodoro());
+        } else if command == MENU_FISHING_START_ID {
+            with_app_state(|state| state.start_fishing());
+        } else if command == MENU_FISHING_STOP_ID {
+            with_app_state(|state| state.stop_fishing());
         } else if command == MENU_EXIT_ID {
             DestroyWindow(hwnd);
         }

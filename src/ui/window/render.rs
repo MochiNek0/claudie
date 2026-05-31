@@ -9,6 +9,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     TextOutW,
 };
 
+use crate::app::fishing::{FishingPhase, FishingState};
 use crate::app::pomodoro::{PomodoroMode, PomodoroState, PomodoroStatus, format_remaining};
 use crate::app::{AppState, PendingChoice, PendingPermission, PetMood};
 use crate::config::*;
@@ -114,6 +115,7 @@ pub(super) struct RenderState {
     pending_choice: Option<PendingChoice>,
     pub(super) settings: UserSettings,
     pomodoro: PomodoroState,
+    fishing: FishingState,
 }
 
 pub(super) fn snapshot_state(state: &AppState) -> RenderState {
@@ -123,6 +125,7 @@ pub(super) fn snapshot_state(state: &AppState) -> RenderState {
         pending_choice: state.pending_choices.front().cloned(),
         settings: state.settings.clone(),
         pomodoro: state.pomodoro.clone(),
+        fishing: state.fishing.clone(),
     }
 }
 
@@ -536,6 +539,9 @@ fn choice_content_height(choice: &PendingChoice) -> i32 {
 }
 
 fn draw_status_hud(hdc: HDC, state: &RenderState, pet_x: i32, pet_y: i32, pet_w: i32, pet_h: i32) {
+    if state.fishing.is_active() {
+        draw_fishing_hud(hdc, state, pet_x, pet_y, pet_w, pet_h);
+    }
     if state.pomodoro.status != PomodoroStatus::Stopped {
         let tomato_color = match state.pomodoro.mode {
             PomodoroMode::Focus => rgb(224, 73, 61),
@@ -545,6 +551,175 @@ fn draw_status_hud(hdc: HDC, state: &RenderState, pet_x: i32, pet_y: i32, pet_w:
         let timer = format_remaining(state.pomodoro.remaining(&state.settings.pomodoro));
         draw_pomodoro_badge(hdc, pet_x, pet_y, pet_w, pet_h, &timer, tomato_color);
     }
+}
+
+fn draw_fishing_hud(hdc: HDC, state: &RenderState, pet_x: i32, pet_y: i32, pet_w: i32, pet_h: i32) {
+    const HUD_W: i32 = 246;
+    const HUD_H: i32 = 78;
+    const SCREEN_PAD: i32 = 8;
+    let x = (pet_x + pet_w + 8).clamp(SCREEN_PAD, WINDOW_WIDTH - HUD_W - SCREEN_PAD);
+    let y = (pet_y + pet_h / 2 - HUD_H / 2).clamp(SCREEN_PAD, WINDOW_HEIGHT - HUD_H - SCREEN_PAD);
+    let panel = rgb(27, 43, 58);
+    let panel_border = rgb(63, 92, 113);
+    let ink_on_panel = rgb(248, 252, 255);
+    let soft_on_panel = rgb(174, 202, 218);
+    filled_round_rect(
+        hdc,
+        x,
+        y,
+        HUD_W,
+        HUD_H,
+        theme::RADIUS_FIELD,
+        panel,
+        panel_border,
+    );
+    filled_rect(hdc, x + 8, y + 8, 4, HUD_H - 16, rgb(65, 154, 192));
+    line(
+        hdc,
+        x,
+        y + 34,
+        pet_x + pet_w - 4,
+        pet_y + pet_h / 2,
+        panel_border,
+    );
+    line(
+        hdc,
+        x,
+        y + 44,
+        pet_x + pet_w - 4,
+        pet_y + pet_h / 2,
+        panel_border,
+    );
+
+    match state.fishing.phase {
+        FishingPhase::Waiting => {
+            draw_bobber_icon(hdc, x + 26, y + 23);
+            text_fit(hdc, x + 58, y + 15, HUD_W - 72, "CASTING", ink_on_panel);
+            text_fit(
+                hdc,
+                x + 58,
+                y + 35,
+                HUD_W - 72,
+                "Waiting for a bite",
+                soft_on_panel,
+            );
+            draw_water_waves(hdc, x + 58, y + 58, HUD_W - 82, rgb(65, 154, 192));
+        }
+        FishingPhase::Reeling => {
+            text_fit(hdc, x + 18, y + 10, 88, "FISH ON!", ink_on_panel);
+            text_fit(
+                hdc,
+                x + 112,
+                y + 10,
+                HUD_W - 128,
+                "TAP TO REEL",
+                soft_on_panel,
+            );
+            draw_fishing_meter(hdc, &state.fishing, x + 18, y + 31, HUD_W - 36);
+            draw_catch_progress(hdc, x + 18, y + 58, HUD_W - 36, state.fishing.progress);
+        }
+        FishingPhase::Caught => {
+            filled_rect(hdc, x + 8, y + 8, 4, HUD_H - 16, rgb(72, 173, 121));
+            draw_fish_icon(hdc, x + 24, y + 27, rgb(72, 173, 121));
+            text_fit(hdc, x + 64, y + 18, HUD_W - 82, "CAUGHT!", ink_on_panel);
+            draw_catch_progress(hdc, x + 64, y + 47, HUD_W - 84, 1.0);
+        }
+        FishingPhase::Missed => {
+            filled_rect(hdc, x + 8, y + 8, 4, HUD_H - 16, rgb(222, 86, 80));
+            draw_fish_icon(hdc, x + 24, y + 27, rgb(222, 86, 80));
+            text_fit(hdc, x + 64, y + 18, HUD_W - 82, "ESCAPED", ink_on_panel);
+            text_fit(
+                hdc,
+                x + 64,
+                y + 43,
+                HUD_W - 82,
+                "The line went slack",
+                soft_on_panel,
+            );
+        }
+        FishingPhase::Inactive => {}
+    }
+}
+
+fn draw_fishing_meter(hdc: HDC, fishing: &FishingState, x: i32, y: i32, w: i32) {
+    const BAR_H: i32 = 14;
+    let track = rgb(16, 30, 43);
+    let track_border = rgb(75, 103, 121);
+    filled_round_rect(hdc, x, y, w, BAR_H, theme::RADIUS_CHIP, track, track_border);
+    let (target_min, target_max) = fishing.target_range();
+    let target_x = x + (w as f32 * target_min).round() as i32;
+    let target_w = (w as f32 * (target_max - target_min)).round() as i32;
+    filled_round_rect(
+        hdc,
+        target_x,
+        y + 2,
+        target_w.max(4),
+        BAR_H - 4,
+        theme::RADIUS_CHIP,
+        rgb(96, 191, 123),
+        rgb(96, 191, 123),
+    );
+    let marker_x = x + (w as f32 * fishing.tension).round() as i32;
+    filled_rect(hdc, marker_x - 3, y - 4, 6, BAR_H + 8, rgb(255, 216, 106));
+    line(
+        hdc,
+        marker_x - 7,
+        y - 6,
+        marker_x,
+        y - 1,
+        rgb(255, 216, 106),
+    );
+    line(
+        hdc,
+        marker_x + 7,
+        y - 6,
+        marker_x,
+        y - 1,
+        rgb(255, 216, 106),
+    );
+}
+
+fn draw_catch_progress(hdc: HDC, x: i32, y: i32, w: i32, progress: f32) {
+    let segments = 8;
+    let gap = 3;
+    let segment_w = (w - gap * (segments - 1)) / segments;
+    let filled = ((progress.clamp(0.0, 1.0) * segments as f32).ceil() as i32).clamp(0, segments);
+    for index in 0..segments {
+        let sx = x + index * (segment_w + gap);
+        let color = if index < filled {
+            rgb(10, 132, 255)
+        } else {
+            rgb(55, 75, 91)
+        };
+        filled_round_rect(hdc, sx, y, segment_w, 8, theme::RADIUS_CHIP, color, color);
+    }
+}
+
+fn draw_bobber_icon(hdc: HDC, x: i32, y: i32) {
+    line(hdc, x + 11, y - 15, x + 11, y - 2, rgb(200, 222, 234));
+    filled_ellipse(hdc, x, y, 22, 22, rgb(248, 252, 255));
+    filled_rect(hdc, x + 1, y + 11, 20, 10, rgb(222, 86, 80));
+    filled_ellipse(hdc, x + 7, y + 7, 4, 4, rgb(248, 252, 255));
+}
+
+fn draw_water_waves(hdc: HDC, x: i32, y: i32, w: i32, color: u32) {
+    let wave_w = 30;
+    let mut next_x = x;
+    while next_x + wave_w <= x + w {
+        line(hdc, next_x, y + 5, next_x + 7, y, color);
+        line(hdc, next_x + 7, y, next_x + 15, y + 5, color);
+        line(hdc, next_x + 15, y + 5, next_x + 23, y, color);
+        line(hdc, next_x + 23, y, next_x + 30, y + 5, color);
+        next_x += wave_w + 8;
+    }
+}
+
+fn draw_fish_icon(hdc: HDC, x: i32, y: i32, body: u32) {
+    filled_ellipse(hdc, x, y + 4, 22, 14, body);
+    line(hdc, x + 21, y + 11, x + 30, y + 4, body);
+    line(hdc, x + 21, y + 11, x + 30, y + 18, body);
+    line(hdc, x + 30, y + 4, x + 30, y + 18, body);
+    filled_ellipse(hdc, x + 5, y + 8, 3, 3, theme::SURFACE);
 }
 
 fn draw_pomodoro_badge(
@@ -623,6 +798,10 @@ fn draw_pet_fallback(hdc: HDC, mood: PetMood, x: i32, y: i32, w: i32, h: i32) {
         PetMood::Typing => rgb(92, 178, 191),
         PetMood::Subagent => rgb(143, 108, 207),
         PetMood::Sleeping => rgb(116, 128, 142),
+        PetMood::Fishing => rgb(65, 154, 192),
+        PetMood::FishingReel => rgb(224, 155, 63),
+        PetMood::FishingCaught => rgb(72, 173, 121),
+        PetMood::FishingMissed => rgb(222, 86, 80),
         _ => rgb(78, 163, 170),
     };
     let shade = match mood {
@@ -670,6 +849,26 @@ fn draw_pet_fallback(hdc: HDC, mood: PetMood, x: i32, y: i32, w: i32, h: i32) {
         PetMood::Subagent => {
             filled_ellipse(hdc, px(100), py(8), pw(16), ph(16), rgb(129, 96, 190));
             filled_ellipse(hdc, px(119), py(26), pw(16), ph(16), rgb(129, 96, 190));
+        }
+        PetMood::Fishing => {
+            line(hdc, px(102), py(42), px(142), py(24), shade);
+            line(hdc, px(142), py(24), px(157), py(34), rgb(65, 154, 192));
+            filled_ellipse(hdc, px(150), py(32), pw(14), ph(8), rgb(65, 154, 192));
+        }
+        PetMood::FishingReel => {
+            line(hdc, px(100), py(42), px(150), py(64), shade);
+            line(hdc, px(150), py(64), px(162), py(55), rgb(65, 154, 192));
+            filled_ellipse(hdc, px(158), py(52), pw(18), ph(10), rgb(65, 154, 192));
+            line(hdc, px(57), py(68), px(83), py(68), shade);
+        }
+        PetMood::FishingCaught => {
+            line(hdc, px(61), py(68), px(70), py(76), shade);
+            line(hdc, px(70), py(76), px(83), py(66), shade);
+            filled_ellipse(hdc, px(112), py(28), pw(28), ph(16), rgb(72, 173, 121));
+        }
+        PetMood::FishingMissed => {
+            line(hdc, px(57), py(68), px(83), py(68), shade);
+            line(hdc, px(102), py(42), px(146), py(72), shade);
         }
         _ => {
             filled_rect(hdc, px(60), py(68), pw(20), ph(5), shade);

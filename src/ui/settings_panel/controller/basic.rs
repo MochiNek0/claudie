@@ -25,6 +25,10 @@ impl SettingsController {
         ui.set_anim_pomodoro(shared(&self.settings.animations.pomodoro));
         ui.set_anim_wave(shared(&self.settings.animations.wave));
         ui.set_anim_stretch(shared(&self.settings.animations.stretch));
+        ui.set_anim_fishing(shared(&self.settings.animations.fishing));
+        ui.set_anim_fishing_reel(shared(&self.settings.animations.fishing_reel));
+        ui.set_anim_fishing_caught(shared(&self.settings.animations.fishing_caught));
+        ui.set_anim_fishing_missed(shared(&self.settings.animations.fishing_missed));
     }
 
     fn collect_basic_fields(&mut self) {
@@ -52,6 +56,10 @@ impl SettingsController {
             pomodoro: ui.get_anim_pomodoro().to_string(),
             wave: ui.get_anim_wave().to_string(),
             stretch: ui.get_anim_stretch().to_string(),
+            fishing: ui.get_anim_fishing().to_string(),
+            fishing_reel: ui.get_anim_fishing_reel().to_string(),
+            fishing_caught: ui.get_anim_fishing_caught().to_string(),
+            fishing_missed: ui.get_anim_fishing_missed().to_string(),
         };
     }
 

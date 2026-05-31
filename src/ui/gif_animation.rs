@@ -31,6 +31,10 @@ const MOODS: &[PetMood] = &[
     PetMood::Pomodoro,
     PetMood::Wave,
     PetMood::Stretch,
+    PetMood::Fishing,
+    PetMood::FishingReel,
+    PetMood::FishingCaught,
+    PetMood::FishingMissed,
 ];
 
 struct GifClip {

@@ -372,6 +372,10 @@ slint::slint! {
         in-out property <string> anim_pomodoro;
         in-out property <string> anim_wave;
         in-out property <string> anim_stretch;
+        in-out property <string> anim_fishing;
+        in-out property <string> anim_fishing_reel;
+        in-out property <string> anim_fishing_caught;
+        in-out property <string> anim_fishing_missed;
 
         in-out property <int> focus_minutes: 25;
         in-out property <int> short_break_minutes: 5;
@@ -497,7 +501,7 @@ slint::slint! {
             x: 36px;
             y: 132px;
             width: 808px;
-            height: 508px;
+            height: 540px;
             background: transparent;
 
             Text { x: 12px; y: 0px; text: "Pet renderer"; font-size: 16px; font-weight: 600; color: #111827; }
@@ -552,8 +556,17 @@ slint::slint! {
             Text { x: 612px; y: 364px; text: "Stretch"; color: #6b7280; font-size: 12px; }
             MonoLineEdit { x: 612px; y: 384px; width: 182px; height: 32px; text <=> root.anim_stretch; }
 
-            ActionButton { x: 594px; y: 460px; width: 96px; height: 34px; text: "Save"; clicked => { root.save_basic(); } }
-            ActionButton { x: 702px; y: 460px; width: 96px; height: 34px; text: "Reset"; clicked => { root.reset_basic(); } }
+            Text { x: 12px; y: 432px; text: "Fishing"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 12px; y: 452px; width: 182px; height: 32px; text <=> root.anim_fishing; }
+            Text { x: 212px; y: 432px; text: "Reel"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 212px; y: 452px; width: 182px; height: 32px; text <=> root.anim_fishing_reel; }
+            Text { x: 412px; y: 432px; text: "Caught"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 412px; y: 452px; width: 182px; height: 32px; text <=> root.anim_fishing_caught; }
+            Text { x: 612px; y: 432px; text: "Missed"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 612px; y: 452px; width: 182px; height: 32px; text <=> root.anim_fishing_missed; }
+
+            ActionButton { x: 594px; y: 494px; width: 96px; height: 34px; text: "Save"; clicked => { root.save_basic(); } }
+            ActionButton { x: 702px; y: 494px; width: 96px; height: 34px; text: "Reset"; clicked => { root.reset_basic(); } }
         }
 
         if active_tab == 1: Rectangle {

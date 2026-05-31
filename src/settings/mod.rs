@@ -56,6 +56,10 @@ pub(crate) struct AnimationSettings {
     pub(crate) pomodoro: String,
     pub(crate) wave: String,
     pub(crate) stretch: String,
+    pub(crate) fishing: String,
+    pub(crate) fishing_reel: String,
+    pub(crate) fishing_caught: String,
+    pub(crate) fishing_missed: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -120,6 +124,10 @@ impl Default for AnimationSettings {
             pomodoro: "pomodoro".to_string(),
             wave: "wave".to_string(),
             stretch: "stretch".to_string(),
+            fishing: "pomodoro".to_string(),
+            fishing_reel: "building".to_string(),
+            fishing_caught: "happy".to_string(),
+            fishing_missed: "error".to_string(),
         }
     }
 }
@@ -158,6 +166,10 @@ impl UserSettings {
             PetMood::Pomodoro => &self.animations.pomodoro,
             PetMood::Wave => &self.animations.wave,
             PetMood::Stretch => &self.animations.stretch,
+            PetMood::Fishing => &self.animations.fishing,
+            PetMood::FishingReel => &self.animations.fishing_reel,
+            PetMood::FishingCaught => &self.animations.fishing_caught,
+            PetMood::FishingMissed => &self.animations.fishing_missed,
         }
     }
 
@@ -622,6 +634,10 @@ pub(crate) fn mood_rows() -> &'static [(PetMood, &'static str)] {
         (PetMood::Pomodoro, "Pomodoro"),
         (PetMood::Wave, "Wave"),
         (PetMood::Stretch, "Stretch"),
+        (PetMood::Fishing, "Fishing"),
+        (PetMood::FishingReel, "Fishing reel"),
+        (PetMood::FishingCaught, "Fishing caught"),
+        (PetMood::FishingMissed, "Fishing missed"),
     ]
 }
 
