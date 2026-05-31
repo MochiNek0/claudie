@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex};
 use crate::app::AppState;
 use crate::settings::storage::write_text_atomic;
 
+const CLAUDIE_HOOK_TIMEOUT_SECS: u64 = 86_400;
+
 pub(crate) fn settings_snippet(port: u16) -> String {
     serde_json::to_string_pretty(&hooks_value(port)).expect("valid settings")
 }
@@ -25,7 +27,7 @@ fn hooks_value(port: u16) -> Value {
                 "hooks": [{
                     "type": "http",
                     "url": hook_url(port),
-                    "timeout": 600
+                    "timeout": CLAUDIE_HOOK_TIMEOUT_SECS
                 }]
             })]),
         );
@@ -154,7 +156,7 @@ fn merge_hooks(settings: &mut Value, port: u16) -> Result<(), String> {
             "hooks": [{
                 "type": "http",
                 "url": url,
-                "timeout": 600
+                "timeout": CLAUDIE_HOOK_TIMEOUT_SECS
             }]
         }));
     }

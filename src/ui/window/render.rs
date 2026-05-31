@@ -121,8 +121,8 @@ pub(super) struct RenderState {
 pub(super) fn snapshot_state(state: &AppState) -> RenderState {
     RenderState {
         mood: state.mood,
-        pending_permission: state.pending_permissions.front().cloned(),
-        pending_choice: state.pending_choices.front().cloned(),
+        pending_permission: state.current_pending_permission().cloned(),
+        pending_choice: state.current_pending_choice().cloned(),
         settings: state.settings.clone(),
         pomodoro: state.pomodoro.clone(),
         fishing: state.fishing.clone(),

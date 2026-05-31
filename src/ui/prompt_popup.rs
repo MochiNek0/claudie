@@ -159,10 +159,10 @@ struct OptionView {
 fn prompt_snapshot() -> Option<PromptSnapshot> {
     let state = APP_STATE.get()?;
     let state = state.lock().expect("state poisoned");
-    if let Some(choice) = state.pending_choices.front() {
+    if let Some(choice) = state.current_pending_choice() {
         return Some(choice_snapshot(choice));
     }
-    state.pending_permissions.front().map(permission_snapshot)
+    state.current_pending_permission().map(permission_snapshot)
 }
 
 fn permission_snapshot(permission: &PendingPermission) -> PromptSnapshot {
@@ -340,7 +340,7 @@ fn refresh_submit_state() {
             return;
         };
         let state = state.lock().expect("state poisoned");
-        let Some(choice) = state.pending_choices.front() else {
+        let Some(choice) = state.current_pending_choice() else {
             return;
         };
         let enabled = choice.is_submittable();

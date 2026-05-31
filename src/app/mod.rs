@@ -135,6 +135,7 @@ pub(crate) struct ChoiceWaiter {
 #[derive(Clone)]
 pub(crate) struct PendingPermission {
     pub(crate) id: u64,
+    pub(crate) interaction_sequence: u64,
     pub(crate) session_id: String,
     pub(crate) tool_name: String,
     pub(crate) summary: String,
@@ -161,6 +162,7 @@ pub(crate) struct ChoiceQuestion {
 #[derive(Clone)]
 pub(crate) struct PendingChoice {
     pub(crate) id: u64,
+    pub(crate) interaction_sequence: u64,
     pub(crate) session_id: String,
     pub(crate) kind: ChoiceKind,
     pub(crate) title: String,
@@ -195,6 +197,12 @@ impl PendingChoice {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingInteractionKind {
+    Permission,
+    Choice,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct QuotaStats {
     pub(crate) input_tokens: u64,
@@ -227,6 +235,7 @@ pub(crate) struct AppState {
     pub(crate) last_activity: Instant,
     pub(crate) last_user_input_tick: Option<u32>,
     pub(crate) last_error: String,
+    pub(crate) next_interaction_sequence: u64,
     pub(crate) next_permission_id: u64,
     pub(crate) next_choice_id: u64,
     pub(crate) active_tools: usize,
@@ -263,6 +272,7 @@ impl AppState {
             last_activity: now,
             last_user_input_tick: None,
             last_error: String::new(),
+            next_interaction_sequence: 1,
             next_permission_id: 1,
             next_choice_id: 1,
             active_tools: 0,
@@ -402,6 +412,52 @@ impl AppState {
 
     pub(crate) fn finish_choice_activity(&mut self, id: u64) {
         self.end_activity_span(&choice_activity_key(id));
+    }
+
+    pub(crate) fn current_pending_interaction(&self) -> Option<PendingInteractionKind> {
+        match (
+            self.pending_permissions.front(),
+            self.pending_choices.front(),
+        ) {
+            (Some(permission), Some(choice)) => {
+                if permission.interaction_sequence <= choice.interaction_sequence {
+                    Some(PendingInteractionKind::Permission)
+                } else {
+                    Some(PendingInteractionKind::Choice)
+                }
+            }
+            (Some(_), None) => Some(PendingInteractionKind::Permission),
+            (None, Some(_)) => Some(PendingInteractionKind::Choice),
+            (None, None) => None,
+        }
+    }
+
+    pub(crate) fn current_pending_permission(&self) -> Option<&PendingPermission> {
+        matches!(
+            self.current_pending_interaction(),
+            Some(PendingInteractionKind::Permission)
+        )
+        .then(|| self.pending_permissions.front())
+        .flatten()
+    }
+
+    pub(crate) fn current_pending_choice(&self) -> Option<&PendingChoice> {
+        matches!(
+            self.current_pending_interaction(),
+            Some(PendingInteractionKind::Choice)
+        )
+        .then(|| self.pending_choices.front())
+        .flatten()
+    }
+
+    pub(crate) fn current_pending_choice_mut(&mut self) -> Option<&mut PendingChoice> {
+        if !matches!(
+            self.current_pending_interaction(),
+            Some(PendingInteractionKind::Choice)
+        ) {
+            return None;
+        }
+        self.pending_choices.front_mut()
     }
 
     pub(crate) fn start_tool_activity(
@@ -1241,6 +1297,48 @@ mod tests {
         assert!(!state.activity_spans.contains_key("fish:s1"));
         assert!(state.activity_spans.contains_key("choice:s2"));
         assert!(state.activity_spans.contains_key(RESTING_ACTIVITY_KEY));
+    }
+
+    #[test]
+    fn current_pending_interaction_uses_arrival_order_across_types() {
+        let mut state = AppState::new();
+
+        state.pending_permissions.push_back(PendingPermission {
+            id: 1,
+            interaction_sequence: 1,
+            session_id: "s1".to_string(),
+            tool_name: "Edit".to_string(),
+            summary: String::new(),
+            cwd: String::new(),
+            suggestions: Vec::new(),
+            waiter: Arc::new(PermissionWaiter {
+                decision: Mutex::new(None),
+                ready: Condvar::new(),
+            }),
+        });
+        state.pending_choices.push_back(PendingChoice {
+            id: 1,
+            interaction_sequence: 2,
+            session_id: "s1".to_string(),
+            kind: ChoiceKind::AskUserQuestion,
+            title: String::new(),
+            detail: String::new(),
+            questions: Vec::new(),
+            selected: Vec::new(),
+            other_text: Vec::new(),
+            tool_input: Value::Null,
+            waiter: Arc::new(ChoiceWaiter {
+                decision: Mutex::new(None),
+                ready: Condvar::new(),
+            }),
+        });
+
+        assert_eq!(
+            state.current_pending_interaction(),
+            Some(PendingInteractionKind::Permission)
+        );
+        assert!(state.current_pending_permission().is_some());
+        assert!(state.current_pending_choice().is_none());
     }
 
     #[test]

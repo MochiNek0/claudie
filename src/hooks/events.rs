@@ -10,13 +10,13 @@ use crate::app::{
     AppState, ChoiceDecision, ChoiceKind, ChoiceOption, ChoiceQuestion, ChoiceWaiter,
     PendingChoice, PendingPermission, PermissionDecision, PermissionWaiter, PetMood,
 };
-use crate::config::PERMISSION_WAIT;
 use crate::globals::APP_STATE;
 use crate::util::shorten;
 
 use super::quota::{scan_transcript_usage, update_quota_from_value};
 
 const PAYLOAD_SUMMARY_MAX_CHARS: usize = 2_000;
+const TRANSCRIPT_DENIAL_POLL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HookActivity {
@@ -154,8 +154,11 @@ fn handle_permission_request(
         let mut state = state.lock().expect("state poisoned");
         let id = state.next_permission_id;
         state.next_permission_id += 1;
+        let interaction_sequence = state.next_interaction_sequence;
+        state.next_interaction_sequence += 1;
         let permission = PendingPermission {
             id,
+            interaction_sequence,
             session_id,
             tool_name: if tool_name.is_empty() {
                 "tool".to_string()
@@ -178,7 +181,6 @@ fn handle_permission_request(
     };
 
     let decision = {
-        let deadline = Instant::now() + PERMISSION_WAIT;
         let mut guard = waiter.decision.lock().expect("permission waiter poisoned");
         loop {
             if guard.is_some() {
@@ -190,14 +192,9 @@ fn handle_permission_request(
             {
                 break Some(PermissionDecision::Ignore);
             }
-            let now = Instant::now();
-            if now >= deadline {
-                break None;
-            }
-            let wait_for = (deadline - now).min(Duration::from_millis(250));
             let (next_guard, _) = waiter
                 .ready
-                .wait_timeout(guard, wait_for)
+                .wait_timeout(guard, TRANSCRIPT_DENIAL_POLL)
                 .expect("permission waiter poisoned");
             guard = next_guard;
         }
@@ -209,9 +206,9 @@ fn handle_permission_request(
         state
             .pending_permissions
             .retain(|pending| pending.id != permission.id);
-        if state.pending_permissions.is_empty() {
+        if state.pending_permissions.is_empty() && state.pending_choices.is_empty() {
             let mood = match decision {
-                Some(PermissionDecision::Deny) | None => PetMood::Error,
+                Some(PermissionDecision::Deny) => PetMood::Error,
                 Some(PermissionDecision::Ignore) => state.activity_mood().unwrap_or(PetMood::Idle),
                 _ => state.activity_mood().unwrap_or(PetMood::Happy),
             };
@@ -320,10 +317,13 @@ fn handle_choice_request(
         let mut state = state.lock().expect("state poisoned");
         let id = state.next_choice_id;
         state.next_choice_id += 1;
+        let interaction_sequence = state.next_interaction_sequence;
+        state.next_interaction_sequence += 1;
         let selected = vec![Vec::new(); questions.len()];
         let other_text = vec![String::new(); questions.len()];
         let choice = PendingChoice {
             id,
+            interaction_sequence,
             session_id,
             kind,
             title,
@@ -345,11 +345,10 @@ fn handle_choice_request(
     };
 
     let decision = {
-        let guard = waiter.decision.lock().expect("choice waiter poisoned");
-        let (guard, _) = waiter
-            .ready
-            .wait_timeout_while(guard, PERMISSION_WAIT, |decision| decision.is_none())
-            .expect("choice waiter poisoned");
+        let mut guard = waiter.decision.lock().expect("choice waiter poisoned");
+        while guard.is_none() {
+            guard = waiter.ready.wait(guard).expect("choice waiter poisoned");
+        }
         guard.clone()
     };
 
@@ -592,7 +591,14 @@ pub(crate) fn decide_current_permission(decision: PermissionDecision) {
     if let Some(state) = APP_STATE.get() {
         let pending = {
             let mut state = state.lock().expect("state poisoned");
-            let pending = state.pending_permissions.pop_front();
+            let pending = state.current_pending_permission().map(|pending| pending.id);
+            let pending = pending.and_then(|id| {
+                state
+                    .pending_permissions
+                    .iter()
+                    .position(|pending| pending.id == id)
+                    .and_then(|index| state.pending_permissions.remove(index))
+            });
             if let Some(pending) = pending.as_ref() {
                 state.finish_permission_activity(pending.id);
             }
@@ -615,7 +621,7 @@ pub(crate) fn decide_current_permission(decision: PermissionDecision) {
 pub(crate) fn toggle_current_choice_option(question_index: usize, option_index: usize) {
     if let Some(state) = APP_STATE.get() {
         let mut state = state.lock().expect("state poisoned");
-        let Some(choice) = state.pending_choices.front_mut() else {
+        let Some(choice) = state.current_pending_choice_mut() else {
             return;
         };
         let Some(question) = choice.questions.get(question_index) else {
@@ -642,24 +648,30 @@ pub(crate) fn submit_current_choice() {
     if let Some(state) = APP_STATE.get() {
         let pending = {
             let mut state = state.lock().expect("state poisoned");
-            let Some(choice) = state.pending_choices.front() else {
+            let Some(choice) = state.current_pending_choice() else {
                 return;
             };
             if !choice.is_submittable() {
                 return;
             }
+            let id = choice.id;
             let selected = choice.selected.clone();
             let other_text = choice.other_text.clone();
-            state.pending_choices.pop_front().map(|pending| {
-                state.finish_choice_activity(pending.id);
-                (
-                    pending,
-                    ChoiceDecision::Submit {
-                        selected,
-                        other_text,
-                    },
-                )
-            })
+            state
+                .pending_choices
+                .iter()
+                .position(|pending| pending.id == id)
+                .and_then(|index| state.pending_choices.remove(index))
+                .map(|pending| {
+                    state.finish_choice_activity(pending.id);
+                    (
+                        pending,
+                        ChoiceDecision::Submit {
+                            selected,
+                            other_text,
+                        },
+                    )
+                })
         };
         if let Some((pending, decision)) = pending {
             let mut slot = pending
@@ -683,7 +695,14 @@ fn decide_current_choice(decision: ChoiceDecision) {
     if let Some(state) = APP_STATE.get() {
         let pending = {
             let mut state = state.lock().expect("state poisoned");
-            let pending = state.pending_choices.pop_front();
+            let pending = state.current_pending_choice().map(|pending| pending.id);
+            let pending = pending.and_then(|id| {
+                state
+                    .pending_choices
+                    .iter()
+                    .position(|pending| pending.id == id)
+                    .and_then(|index| state.pending_choices.remove(index))
+            });
             if let Some(pending) = pending.as_ref() {
                 state.finish_choice_activity(pending.id);
             }
@@ -706,7 +725,7 @@ fn decide_current_choice(decision: ChoiceDecision) {
 pub(crate) fn set_current_choice_other_text(question_index: usize, text: String) {
     if let Some(state) = APP_STATE.get() {
         let mut state = state.lock().expect("state poisoned");
-        let Some(choice) = state.pending_choices.front_mut() else {
+        let Some(choice) = state.current_pending_choice_mut() else {
             return;
         };
         if let Some(slot) = choice.other_text.get_mut(question_index) {
@@ -1205,6 +1224,7 @@ mod tests {
         let mut state = AppState::new();
         state.pending_permissions.push_back(PendingPermission {
             id: 1,
+            interaction_sequence: 1,
             session_id: "s1".to_string(),
             tool_name: "Edit".to_string(),
             summary: "edit file".to_string(),
@@ -1447,6 +1467,7 @@ mod tests {
         let len = questions.len();
         PendingChoice {
             id: 1,
+            interaction_sequence: 1,
             session_id: "s1".to_string(),
             kind,
             title: "t".to_string(),

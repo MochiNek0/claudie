@@ -783,28 +783,28 @@ fn with_app_state(action: impl FnOnce(&mut AppState)) {
 
 fn has_pending_choice() -> bool {
     APP_STATE.get().is_some_and(|state| {
-        !state
+        state
             .lock()
             .expect("state poisoned")
-            .pending_choices
-            .is_empty()
+            .current_pending_choice()
+            .is_some()
     })
 }
 
 fn has_pending_permission() -> bool {
     APP_STATE.get().is_some_and(|state| {
-        !state
+        state
             .lock()
             .expect("state poisoned")
-            .pending_permissions
-            .is_empty()
+            .current_pending_permission()
+            .is_some()
     })
 }
 
 fn choice_option_at(px: i32, py: i32) -> Option<(usize, usize)> {
     APP_STATE.get().and_then(|state| {
         let state = state.lock().expect("state poisoned");
-        let choice = state.pending_choices.front()?;
+        let choice = state.current_pending_choice()?;
         choice_option_at_point(choice, px, py)
     })
 }
