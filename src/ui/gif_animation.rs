@@ -5,12 +5,12 @@ use std::time::Instant;
 
 use windows_sys::Win32::Graphics::Gdi::HDC;
 use windows_sys::Win32::Graphics::GdiPlus::{
-    FrameDimensionTime, GdipCreateFromHDC, GdipDeleteGraphics, GdipDisposeImage,
-    GdipDrawImageRectRectI, GdipGetImageHeight, GdipGetImageWidth, GdipGetPropertyItem,
-    GdipGetPropertyItemSize, GdipImageGetFrameCount, GdipImageSelectActiveFrame,
-    GdipLoadImageFromFile, GdipSetInterpolationMode, GdiplusShutdown, GdiplusStartup,
-    GdiplusStartupInput, GpGraphics, GpImage, InterpolationModeNearestNeighbor, PropertyItem,
-    PropertyTagFrameDelay,
+    BitmapData, FrameDimensionTime, GdipBitmapLockBits, GdipBitmapUnlockBits, GdipCreateFromHDC,
+    GdipDeleteGraphics, GdipDisposeImage, GdipDrawImageRectRectI, GdipGetImageHeight,
+    GdipGetImageWidth, GdipGetPropertyItem, GdipGetPropertyItemSize, GdipImageGetFrameCount,
+    GdipImageSelectActiveFrame, GdipLoadImageFromFile, GdipSetInterpolationMode, GdiplusShutdown,
+    GdiplusStartup, GdiplusStartupInput, GpBitmap, GpGraphics, GpImage, ImageLockModeRead,
+    InterpolationModeNearestNeighbor, PropertyItem, PropertyTagFrameDelay, Rect,
 };
 
 use crate::app::PetMood;
@@ -36,6 +36,17 @@ const MOODS: &[PetMood] = &[
     PetMood::FishingCaught,
     PetMood::FishingMissed,
 ];
+const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026_200A;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GifVisibleBounds {
+    pub(crate) source_width: u32,
+    pub(crate) source_height: u32,
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
 
 struct GifClip {
     image: *mut GpImage,
@@ -44,6 +55,7 @@ struct GifClip {
     total_ms: u32,
     width: u32,
     height: u32,
+    visible_bounds: GifVisibleBounds,
 }
 
 unsafe impl Send for GifClip {}
@@ -81,6 +93,15 @@ impl GifClip {
             frame_count = 1;
         }
 
+        let visible_bounds =
+            scan_visible_bounds(image, frame_count, width, height).unwrap_or(GifVisibleBounds {
+                source_width: width,
+                source_height: height,
+                x: 0,
+                y: 0,
+                width: width.max(1),
+                height: height.max(1),
+            });
         let delays_ms = load_frame_delays(image, frame_count as usize);
         let mut cumulative_ms = Vec::with_capacity(delays_ms.len());
         let mut acc: u32 = 0;
@@ -97,6 +118,7 @@ impl GifClip {
             total_ms,
             width,
             height,
+            visible_bounds,
         })
     }
 
@@ -112,6 +134,120 @@ impl GifClip {
         }
         self.delays_ms.len() - 1
     }
+}
+
+unsafe fn scan_visible_bounds(
+    image: *mut GpImage,
+    frame_count: u32,
+    width: u32,
+    height: u32,
+) -> Option<GifVisibleBounds> {
+    if image.is_null() || width == 0 || height == 0 {
+        return None;
+    }
+
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0_u32;
+    let mut max_y = 0_u32;
+    let mut found = false;
+
+    for frame_idx in 0..frame_count.max(1) {
+        if GdipImageSelectActiveFrame(image, &FrameDimensionTime, frame_idx) != 0 {
+            return None;
+        }
+        let frame_bounds = lock_and_scan_frame(image as *mut GpBitmap, width, height)?;
+        let Some(frame_bounds) = frame_bounds else {
+            continue;
+        };
+        min_x = min_x.min(frame_bounds.x);
+        min_y = min_y.min(frame_bounds.y);
+        max_x = max_x.max(frame_bounds.x + frame_bounds.width - 1);
+        max_y = max_y.max(frame_bounds.y + frame_bounds.height - 1);
+        found = true;
+    }
+
+    found.then_some(GifVisibleBounds {
+        source_width: width,
+        source_height: height,
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x + 1,
+        height: max_y - min_y + 1,
+    })
+}
+
+unsafe fn lock_and_scan_frame(
+    bitmap: *mut GpBitmap,
+    width: u32,
+    height: u32,
+) -> Option<Option<GifVisibleBounds>> {
+    let rect = Rect {
+        X: 0,
+        Y: 0,
+        Width: width as i32,
+        Height: height as i32,
+    };
+    let mut data = BitmapData::default();
+    if GdipBitmapLockBits(
+        bitmap,
+        &rect,
+        ImageLockModeRead as u32,
+        PIXEL_FORMAT_32BPP_ARGB,
+        &mut data,
+    ) != 0
+        || data.Scan0.is_null()
+    {
+        return None;
+    }
+
+    let bounds = scan_locked_argb(&data, width, height);
+    GdipBitmapUnlockBits(bitmap, &mut data);
+    Some(bounds.map(|(x, y, w, h)| GifVisibleBounds {
+        source_width: width,
+        source_height: height,
+        x,
+        y,
+        width: w,
+        height: h,
+    }))
+}
+
+unsafe fn scan_locked_argb(
+    data: &BitmapData,
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let scan0 = data.Scan0 as *const u8;
+    let stride = data.Stride;
+    if scan0.is_null() || stride == 0 {
+        return None;
+    }
+
+    let row_stride = stride.unsigned_abs() as usize;
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0_u32;
+    let mut max_y = 0_u32;
+    let mut found = false;
+
+    for y in 0..height {
+        let source_y = if stride > 0 { y } else { height - 1 - y };
+        let row = scan0.add(source_y as usize * row_stride);
+        for x in 0..width {
+            let alpha = *row.add(x as usize * 4 + 3);
+            if alpha == 0 {
+                continue;
+            }
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+            found = true;
+        }
+    }
+
+    found.then_some((min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
 }
 
 unsafe fn load_frame_delays(image: *mut GpImage, frame_count: usize) -> Vec<u32> {
@@ -259,6 +395,10 @@ impl GifAnimation {
         GdipDeleteGraphics(graphics);
         status == 0
     }
+
+    fn visible_bounds(&self, mood: PetMood) -> Option<GifVisibleBounds> {
+        self.clips.get(&mood).map(|clip| clip.visible_bounds)
+    }
 }
 
 fn fit_into(src_w: u32, src_h: u32, max_w: i32, max_h: i32) -> (i32, i32) {
@@ -346,6 +486,10 @@ impl AnimationStore {
         max_h: i32,
     ) -> bool {
         self.animation.draw(hdc, mood, x, y, max_w, max_h)
+    }
+
+    pub(crate) fn visible_bounds(&self, mood: PetMood) -> Option<GifVisibleBounds> {
+        self.animation.visible_bounds(mood)
     }
 }
 

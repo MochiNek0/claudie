@@ -562,6 +562,29 @@ impl AppState {
         self.refresh_visual_mood();
     }
 
+    pub(crate) fn finish_session_tools(&mut self, session_id: &str) {
+        let keys = self
+            .active_tool_keys
+            .keys()
+            .filter(|key| tool_session_from_key(key) == session_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if keys.is_empty() {
+            return;
+        }
+
+        for key in keys {
+            if let Some(tool) = self.active_tool_keys.remove(&key) {
+                self.remove_tool_name_key(&tool.tool_name, &key);
+                self.active_tools = self.active_tools.saturating_sub(1);
+                self.decrement_active_tool_mood(tool.mood);
+            }
+        }
+        self.clear_session_activities(session_id);
+        self.last_activity = Instant::now();
+        self.refresh_visual_mood();
+    }
+
     pub(crate) fn clear_activity(&mut self) {
         self.finish_all_tools();
         self.active_subagents = 0;
@@ -1297,6 +1320,28 @@ mod tests {
         assert!(!state.activity_spans.contains_key("fish:s1"));
         assert!(state.activity_spans.contains_key("choice:s2"));
         assert!(state.activity_spans.contains_key(RESTING_ACTIVITY_KEY));
+    }
+
+    #[test]
+    fn finish_session_tools_preserves_other_sessions() {
+        let mut state = AppState::new();
+        state.start_tool_activity(
+            "s1:id:write-1".to_string(),
+            "Write".to_string(),
+            PetMood::Typing,
+        );
+        state.start_tool_activity(
+            "s2:id:bash-1".to_string(),
+            "Bash".to_string(),
+            PetMood::Building,
+        );
+
+        state.finish_session_tools("s1");
+
+        assert_eq!(state.active_tools, 1);
+        assert!(state.active_tool_keys.contains_key("s2:id:bash-1"));
+        assert!(!state.active_tool_keys.contains_key("s1:id:write-1"));
+        assert_eq!(state.activity_mood(), Some(PetMood::Building));
     }
 
     #[test]

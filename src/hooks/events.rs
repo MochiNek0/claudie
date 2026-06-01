@@ -26,11 +26,16 @@ enum HookActivity {
     FinishTool(PetMood),
     FinishToolBatch,
     Error,
+    PermissionDenied,
     StartSubagent,
     FinishSubagent,
-    Notification,
     Done,
     EndSession,
+}
+
+enum PermissionResponseKind {
+    PermissionRequest,
+    PreToolUse { tool_input: Value },
 }
 
 pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value {
@@ -44,7 +49,14 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
         .unwrap_or_default();
 
     if event == "PermissionRequest" {
-        return handle_permission_request(payload, state, session_id, cwd, tool_name);
+        return handle_permission_request(
+            payload,
+            state,
+            session_id,
+            cwd,
+            tool_name,
+            PermissionResponseKind::PermissionRequest,
+        );
     }
     if event == "PreToolUse" {
         if let Some(response) =
@@ -130,6 +142,7 @@ fn handle_permission_request(
     session_id: String,
     cwd: String,
     tool_name: String,
+    response_kind: PermissionResponseKind,
 ) -> Value {
     let transcript_path = string_field(&payload, "transcript_path")
         .or_else(|| string_field(&payload, "transcriptPath"));
@@ -216,10 +229,32 @@ fn handle_permission_request(
         }
     }
 
-    permission_response(decision.unwrap_or(PermissionDecision::Ignore), &permission)
+    permission_response(
+        decision.unwrap_or(PermissionDecision::Ignore),
+        &permission,
+        response_kind,
+    )
 }
 
-fn permission_response(decision: PermissionDecision, permission: &PendingPermission) -> Value {
+fn permission_response(
+    decision: PermissionDecision,
+    permission: &PendingPermission,
+    response_kind: PermissionResponseKind,
+) -> Value {
+    match response_kind {
+        PermissionResponseKind::PermissionRequest => {
+            permission_request_response(decision, permission)
+        }
+        PermissionResponseKind::PreToolUse { tool_input } => {
+            pre_tool_permission_response(decision, tool_input)
+        }
+    }
+}
+
+fn permission_request_response(
+    decision: PermissionDecision,
+    permission: &PendingPermission,
+) -> Value {
     match decision {
         PermissionDecision::AllowOnce => json!({
             "hookSpecificOutput": {
@@ -259,11 +294,21 @@ fn permission_response(decision: PermissionDecision, permission: &PendingPermiss
     }
 }
 
+fn pre_tool_permission_response(decision: PermissionDecision, tool_input: Value) -> Value {
+    match decision {
+        PermissionDecision::AllowOnce | PermissionDecision::AllowAlways => {
+            pre_tool_allow(tool_input, "Approved in claudie")
+        }
+        PermissionDecision::Deny => pre_tool_deny("Denied in claudie"),
+        PermissionDecision::Ignore => json!({}),
+    }
+}
+
 fn handle_interactive_pre_tool_use(
     payload: &Value,
     state: Arc<Mutex<AppState>>,
     session_id: &str,
-    _cwd: &str,
+    cwd: &str,
     tool_name: &str,
 ) -> Option<Value> {
     let tool_input = payload
@@ -290,6 +335,14 @@ fn handle_interactive_pre_tool_use(
             summarize_exit_plan(&tool_input),
             exit_plan_questions(&tool_input),
             tool_input,
+        )),
+        _ if is_web_search_tool(tool_name) => Some(handle_permission_request(
+            payload.clone(),
+            state,
+            session_id.to_string(),
+            cwd.to_string(),
+            tool_name.to_string(),
+            PermissionResponseKind::PreToolUse { tool_input },
         )),
         _ => None,
     }
@@ -831,12 +884,13 @@ fn hook_activity(event: &str, tool_name: &str, payload: &Value) -> Option<HookAc
         "PreToolUse" => Some(HookActivity::StartTool(tool_mood)),
         "PostToolUse" => Some(HookActivity::FinishTool(tool_mood)),
         "PostToolBatch" => Some(HookActivity::FinishToolBatch),
-        "PostToolUseFailure" | "StopFailure" | "PermissionDenied" => Some(HookActivity::Error),
+        "PermissionDenied" => Some(HookActivity::PermissionDenied),
+        "PostToolUseFailure" | "StopFailure" => Some(HookActivity::Error),
         "SubagentStart" | "TaskCreated" => Some(HookActivity::StartSubagent),
         "SubagentStop" | "TaskCompleted" => Some(HookActivity::FinishSubagent),
         "PreCompact" => Some(HookActivity::Thinking),
         "PostCompact" => Some(HookActivity::Done),
-        "Notification" | "Elicitation" => Some(HookActivity::Notification),
+        "Notification" | "Elicitation" => None,
         "WorktreeCreate" => Some(HookActivity::StartTool(PetMood::Building)),
         "Stop" => Some(HookActivity::Done),
         "SessionEnd" => Some(HookActivity::EndSession),
@@ -863,12 +917,18 @@ fn apply_hook_activity(state: &mut AppState, activity: HookActivity, payload: &V
             );
         }
         HookActivity::FinishToolBatch => {
-            state.finish_all_tools();
+            state.finish_session_tools(&session_id_from_payload(payload));
         }
         HookActivity::Error => {
             state.clear_activity();
             state.last_error = summarize_payload(payload);
             state.set_resting_mood(PetMood::Error, true);
+        }
+        HookActivity::PermissionDenied => {
+            state.finish_session_tools(&session_id_from_payload(payload));
+            if state.activity_mood().is_none() {
+                state.set_resting_mood(PetMood::Thinking, false);
+            }
         }
         HookActivity::StartSubagent => {
             state.start_subagent();
@@ -876,16 +936,17 @@ fn apply_hook_activity(state: &mut AppState, activity: HookActivity, payload: &V
         HookActivity::FinishSubagent => {
             state.finish_subagent();
         }
-        HookActivity::Notification => {
-            state.set_resting_mood(PetMood::Thinking, true);
-        }
         HookActivity::Done => {
-            state.clear_activity();
-            state.set_resting_mood(PetMood::Happy, false);
+            state.finish_session_tools(&session_id_from_payload(payload));
+            if state.activity_mood().is_none() {
+                state.set_resting_mood(PetMood::Happy, false);
+            }
         }
         HookActivity::EndSession => {
-            state.clear_activity();
-            state.set_resting_mood(PetMood::Idle, false);
+            state.finish_session_tools(&session_id_from_payload(payload));
+            if state.activity_mood().is_none() {
+                state.set_resting_mood(PetMood::Idle, false);
+            }
         }
     }
 }
@@ -894,7 +955,7 @@ fn record_daily_stats(state: &mut AppState, event: &str, tool_name: &str) {
     match event {
         "UserPromptSubmit" => state.record_prompt_stats(),
         "PreToolUse" => state.record_tool_stats(tool_stats_kind(tool_name)),
-        "PostToolUseFailure" | "StopFailure" | "PermissionDenied" => state.record_error_stats(),
+        "PostToolUseFailure" | "StopFailure" => state.record_error_stats(),
         _ => {}
     }
 }
@@ -934,6 +995,19 @@ fn mood_for_tool(tool_name: &str) -> PetMood {
         }
         _ => PetMood::Thinking,
     }
+}
+
+fn is_web_search_tool(tool_name: &str) -> bool {
+    let normalized = compact_tool_name(tool_name);
+    normalized == "websearch" || normalized.ends_with("websearch")
+}
+
+fn compact_tool_name(tool_name: &str) -> String {
+    tool_name
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect()
 }
 
 fn mood_for_tool_use(tool_name: &str, payload: &Value) -> PetMood {
@@ -986,7 +1060,7 @@ fn task_tool_text(payload: &Value) -> String {
 }
 
 fn tool_key(payload: &Value) -> String {
-    let session_id = string_field(payload, "session_id").unwrap_or_else(|| "default".to_string());
+    let session_id = session_id_from_payload(payload);
     let tool_name = tool_name_from_payload(payload);
     if let Some(id) = string_field(payload, "tool_use_id")
         .or_else(|| string_field(payload, "toolUseId"))
@@ -997,6 +1071,10 @@ fn tool_key(payload: &Value) -> String {
     }
     let fingerprint = tool_input_fingerprint(payload).unwrap_or_default();
     format!("{session_id}:tool:{tool_name}:{fingerprint}")
+}
+
+fn session_id_from_payload(payload: &Value) -> String {
+    string_field(payload, "session_id").unwrap_or_else(|| "default".to_string())
 }
 
 fn candidate_tool_keys(payload: &Value) -> Vec<String> {
@@ -1189,6 +1267,11 @@ mod tests {
             hook_activity("PostToolUse", "Task", &json!({})),
             Some(HookActivity::FinishTool(PetMood::Thinking))
         );
+        assert_eq!(hook_activity("Notification", "", &json!({})), None);
+        assert_eq!(
+            hook_activity("PermissionDenied", "Write", &json!({})),
+            Some(HookActivity::PermissionDenied)
+        );
         assert_eq!(
             hook_activity("SessionEnd", "", &json!({ "reason": "clear" })),
             Some(HookActivity::EndSession)
@@ -1243,19 +1326,43 @@ mod tests {
     }
 
     #[test]
-    fn session_end_clears_activity_and_returns_idle() {
+    fn session_end_clears_matching_session_and_preserves_other_work() {
         let mut state = AppState::new();
-        state.start_tool_mood(PetMood::Typing);
+        let s1_payload = json!({
+            "session_id": "s1",
+            "tool_name": "Write",
+            "tool_use_id": "write-1",
+        });
+        let s2_payload = json!({
+            "session_id": "s2",
+            "tool_name": "Bash",
+            "tool_use_id": "bash-1",
+        });
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PreToolUse", "Write", &s1_payload).unwrap(),
+            &s1_payload,
+        );
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PreToolUse", "Bash", &s2_payload).unwrap(),
+            &s2_payload,
+        );
         state.start_subagent();
-        assert_eq!(state.active_tools, 1);
+        assert_eq!(state.active_tools, 2);
         assert_eq!(state.active_subagents, 1);
 
-        apply_hook_activity(&mut state, HookActivity::EndSession, &json!({}));
+        apply_hook_activity(
+            &mut state,
+            HookActivity::EndSession,
+            &json!({ "session_id": "s1" }),
+        );
 
-        assert_eq!(state.active_tools, 0);
-        assert_eq!(state.active_subagents, 0);
-        assert_eq!(state.resting_mood, PetMood::Idle);
-        assert_ne!(state.mood, PetMood::Sleeping);
+        assert_eq!(state.active_tools, 1);
+        assert_eq!(state.active_subagents, 1);
+        assert_eq!(state.activity_mood(), Some(PetMood::Building));
+        assert_ne!(state.mood, PetMood::Idle);
+        assert_ne!(state.mood, PetMood::Error);
     }
 
     #[test]
@@ -1265,6 +1372,44 @@ mod tests {
         apply_hook_activity(&mut state, HookActivity::Done, &json!({}));
 
         assert_eq!(state.resting_mood, PetMood::Happy);
+        assert_eq!(state.mood, PetMood::Happy);
+    }
+
+    #[test]
+    fn permission_denied_does_not_force_error() {
+        let mut state = AppState::new();
+        let payload = json!({
+            "session_id": "s1",
+            "tool_name": "Write",
+            "tool_use_id": "write-1",
+        });
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PreToolUse", "Write", &payload).unwrap(),
+            &payload,
+        );
+
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PermissionDenied", "Write", &payload).unwrap(),
+            &payload,
+        );
+
+        assert_eq!(state.active_tools, 0);
+        assert_eq!(state.resting_mood, PetMood::Thinking);
+        assert_ne!(state.mood, PetMood::Error);
+    }
+
+    #[test]
+    fn notification_does_not_pull_completed_work_back_to_thinking() {
+        let mut state = AppState::new();
+        apply_hook_activity(&mut state, HookActivity::Done, &json!({}));
+        assert_eq!(state.mood, PetMood::Happy);
+
+        if let Some(activity) = hook_activity("Notification", "", &json!({})) {
+            apply_hook_activity(&mut state, activity, &json!({}));
+        }
+
         assert_eq!(state.mood, PetMood::Happy);
     }
 
@@ -1461,6 +1606,77 @@ mod tests {
         state.active_subagents = 1;
 
         assert_eq!(state.activity_mood(), Some(PetMood::Building));
+    }
+
+    #[test]
+    fn web_search_tool_names_use_pre_tool_permission_popup() {
+        assert!(is_web_search_tool("WebSearch"));
+        assert!(is_web_search_tool("Web Search"));
+        assert!(is_web_search_tool("web_search"));
+        assert!(is_web_search_tool("mcp__browser__web_search"));
+        assert!(!is_web_search_tool("WebFetch"));
+    }
+
+    #[test]
+    fn pre_tool_permission_response_allows_or_denies_web_search() {
+        let permission = build_permission("WebSearch");
+        let tool_input = json!({ "query": "claude code hooks" });
+
+        let allow = permission_response(
+            PermissionDecision::AllowOnce,
+            &permission,
+            PermissionResponseKind::PreToolUse {
+                tool_input: tool_input.clone(),
+            },
+        );
+        assert_eq!(
+            allow
+                .get("hookSpecificOutput")
+                .and_then(|h| h.get("hookEventName"))
+                .and_then(Value::as_str),
+            Some("PreToolUse")
+        );
+        assert_eq!(
+            allow
+                .get("hookSpecificOutput")
+                .and_then(|h| h.get("permissionDecision"))
+                .and_then(Value::as_str),
+            Some("allow")
+        );
+        assert_eq!(
+            allow
+                .get("hookSpecificOutput")
+                .and_then(|h| h.get("updatedInput")),
+            Some(&tool_input)
+        );
+
+        let deny = permission_response(
+            PermissionDecision::Deny,
+            &permission,
+            PermissionResponseKind::PreToolUse { tool_input },
+        );
+        assert_eq!(
+            deny.get("hookSpecificOutput")
+                .and_then(|h| h.get("permissionDecision"))
+                .and_then(Value::as_str),
+            Some("deny")
+        );
+    }
+
+    fn build_permission(tool_name: &str) -> PendingPermission {
+        PendingPermission {
+            id: 1,
+            interaction_sequence: 1,
+            session_id: "s1".to_string(),
+            tool_name: tool_name.to_string(),
+            summary: String::new(),
+            cwd: String::new(),
+            suggestions: Vec::new(),
+            waiter: Arc::new(PermissionWaiter {
+                decision: Mutex::new(None),
+                ready: Condvar::new(),
+            }),
+        }
     }
 
     fn build_choice(questions: Vec<ChoiceQuestion>, kind: ChoiceKind) -> PendingChoice {

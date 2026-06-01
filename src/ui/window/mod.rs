@@ -21,22 +21,22 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GWLP_USERDATA, GetClientRect,
-    GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HTCAPTION, HWND_TOPMOST,
-    IDC_ARROW, IDC_HAND, LWA_COLORKEY, LoadCursorW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, IDC_ARROW,
+    IDC_HAND, LWA_COLORKEY, LoadCursorW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
     RegisterClassW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_SHOWWINDOW, SendMessageW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TPM_TOPALIGN, TrackPopupMenu, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCLBUTTONDOWN, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN,
+    TrackPopupMenu, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_VISIBLE,
 };
 
 use crate::app::pomodoro::PomodoroStatus;
 use crate::app::{AppState, PermissionDecision, PetMood};
 use crate::config::*;
-use crate::globals::APP_STATE;
+use crate::globals::{APP_STATE, PET_RENDERER};
 use crate::hooks::{
     decide_current_permission, deny_current_choice, submit_current_choice,
     toggle_current_choice_option,
@@ -52,8 +52,10 @@ use crate::util::wide;
 static CONTEXT_MENU_OPEN: AtomicBool = AtomicBool::new(false);
 static LEFT_BUTTON_CAPTURED: AtomicBool = AtomicBool::new(false);
 static LEFT_BUTTON_DRAGGING: AtomicBool = AtomicBool::new(false);
-static LEFT_BUTTON_DOWN_X: AtomicI32 = AtomicI32::new(0);
-static LEFT_BUTTON_DOWN_Y: AtomicI32 = AtomicI32::new(0);
+static LEFT_BUTTON_SCREEN_X: AtomicI32 = AtomicI32::new(0);
+static LEFT_BUTTON_SCREEN_Y: AtomicI32 = AtomicI32::new(0);
+static DRAG_WINDOW_X: AtomicI32 = AtomicI32::new(0);
+static DRAG_WINDOW_Y: AtomicI32 = AtomicI32::new(0);
 static RIGHT_BUTTON_CAPTURED: AtomicBool = AtomicBool::new(false);
 static CURRENT_TIMER_MS: AtomicU32 = AtomicU32::new(ACTIVE_TIMER_MS);
 static LAST_TOPMOST_TICK: AtomicU32 = AtomicU32::new(0);
@@ -202,31 +204,50 @@ unsafe extern "system" fn window_proc(
             if x < 0 || y < 0 {
                 return 0;
             }
+            let mut cursor = POINT { x: 0, y: 0 };
+            let mut rect = RECT::default();
+            if GetCursorPos(&mut cursor) == 0 || GetWindowRect(hwnd, &mut rect) == 0 {
+                return 0;
+            }
             LEFT_BUTTON_CAPTURED.store(true, Ordering::Relaxed);
             LEFT_BUTTON_DRAGGING.store(false, Ordering::Relaxed);
-            LEFT_BUTTON_DOWN_X.store(x, Ordering::Relaxed);
-            LEFT_BUTTON_DOWN_Y.store(y, Ordering::Relaxed);
+            LEFT_BUTTON_SCREEN_X.store(cursor.x, Ordering::Relaxed);
+            LEFT_BUTTON_SCREEN_Y.store(cursor.y, Ordering::Relaxed);
+            DRAG_WINDOW_X.store(rect.left, Ordering::Relaxed);
+            DRAG_WINDOW_Y.store(rect.top, Ordering::Relaxed);
             SetCapture(hwnd);
             0
         }
         WM_MOUSEMOVE => {
-            if !LEFT_BUTTON_CAPTURED.load(Ordering::Relaxed)
-                || LEFT_BUTTON_DRAGGING.load(Ordering::Relaxed)
-            {
+            if !LEFT_BUTTON_CAPTURED.load(Ordering::Relaxed) {
                 return DefWindowProcW(hwnd, msg, wparam, lparam);
             }
-            let (x, y) = base_point_from_client(
-                hwnd,
-                loword(lparam as u32) as i32,
-                hiword(lparam as u32) as i32,
-            );
-            let dx = x - LEFT_BUTTON_DOWN_X.load(Ordering::Relaxed);
-            let dy = y - LEFT_BUTTON_DOWN_Y.load(Ordering::Relaxed);
-            if dx.abs().max(dy.abs()) >= CLICK_DRAG_THRESHOLD_PX {
+            let mut cursor = POINT { x: 0, y: 0 };
+            if GetCursorPos(&mut cursor) == 0 {
+                return 0;
+            }
+            let dx = cursor.x - LEFT_BUTTON_SCREEN_X.load(Ordering::Relaxed);
+            let dy = cursor.y - LEFT_BUTTON_SCREEN_Y.load(Ordering::Relaxed);
+            if !LEFT_BUTTON_DRAGGING.load(Ordering::Relaxed)
+                && dx.abs().max(dy.abs()) >= CLICK_DRAG_THRESHOLD_PX
+            {
                 LEFT_BUTTON_DRAGGING.store(true, Ordering::Relaxed);
-                LEFT_BUTTON_CAPTURED.store(false, Ordering::Relaxed);
-                ReleaseCapture();
-                SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
+            }
+            if LEFT_BUTTON_DRAGGING.load(Ordering::Relaxed) {
+                let (x, y) = clamp_window_position(
+                    DRAG_WINDOW_X.load(Ordering::Relaxed) + dx,
+                    DRAG_WINDOW_Y.load(Ordering::Relaxed) + dy,
+                    current_pet_rect_in_window(),
+                );
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    x,
+                    y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
             }
             0
         }
@@ -237,6 +258,8 @@ unsafe extern "system" fn window_proc(
             if was_captured && !was_dragging {
                 with_app_state(|state| state.interact_with_pet());
                 InvalidateRect(hwnd, std::ptr::null(), 0);
+            } else if was_dragging {
+                persist_pet_window_position(hwnd);
             }
             0
         }
@@ -287,10 +310,14 @@ unsafe fn initial_pet_position(settings: &UserSettings) -> (i32, i32) {
     let Some(position) = settings.window_position else {
         return (CW_USEDEFAULT, CW_USEDEFAULT);
     };
-    clamp_window_position(position.x, position.y, WINDOW_WIDTH, WINDOW_HEIGHT)
+    clamp_window_position(
+        position.x,
+        position.y,
+        visible_pet_rect_in_window(settings, PetMood::Idle),
+    )
 }
 
-unsafe fn clamp_window_position(x: i32, y: i32, width: i32, height: i32) -> (i32, i32) {
+unsafe fn clamp_window_position(x: i32, y: i32, visible_rect: (i32, i32, i32, i32)) -> (i32, i32) {
     let mut min_x = GetSystemMetrics(SM_XVIRTUALSCREEN);
     let mut min_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
     let mut screen_w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -301,11 +328,82 @@ unsafe fn clamp_window_position(x: i32, y: i32, width: i32, height: i32) -> (i32
         screen_w = GetSystemMetrics(SM_CXSCREEN);
         screen_h = GetSystemMetrics(SM_CYSCREEN);
     }
-    let screen_w = screen_w.max(width);
-    let screen_h = screen_h.max(height);
-    let max_x = (min_x + screen_w - width).max(min_x);
-    let max_y = (min_y + screen_h - height).max(min_y);
-    (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
+    let (visible_x, visible_y, visible_w, visible_h) = visible_rect;
+    let screen_w = screen_w.max(visible_w);
+    let screen_h = screen_h.max(visible_h);
+    let min_window_x = min_x - visible_x;
+    let min_window_y = min_y - visible_y;
+    let max_window_x = (min_x + screen_w - visible_x - visible_w).max(min_window_x);
+    let max_window_y = (min_y + screen_h - visible_y - visible_h).max(min_window_y);
+    (
+        x.clamp(min_window_x, max_window_x),
+        y.clamp(min_window_y, max_window_y),
+    )
+}
+
+fn current_pet_rect_in_window() -> (i32, i32, i32, i32) {
+    let (settings, mood) = current_pet_settings_and_mood();
+    visible_pet_rect_in_window(&settings, mood)
+}
+
+fn current_pet_settings_and_mood() -> (UserSettings, PetMood) {
+    APP_STATE
+        .get()
+        .map(|state| {
+            let state = state.lock().expect("state poisoned");
+            (state.settings.clone(), state.mood)
+        })
+        .unwrap_or_else(|| (load_user_settings(), PetMood::Idle))
+}
+
+fn nominal_pet_rect_in_window(settings: &UserSettings) -> (i32, i32, i32, i32) {
+    let scale = settings.pet_scale_percent() as i32;
+    let w = (PET_W * scale + 50) / 100;
+    let h = (PET_H * scale + 50) / 100;
+    let center_x = PET_X + PET_W / 2;
+    let bottom_y = PET_Y + PET_H;
+    (center_x - w / 2, bottom_y - h, w.max(1), h.max(1))
+}
+
+fn visible_pet_rect_in_window(settings: &UserSettings, mood: PetMood) -> (i32, i32, i32, i32) {
+    let nominal_rect = nominal_pet_rect_in_window(settings);
+    let Some(bounds) = PET_RENDERER.get().and_then(|store| {
+        store
+            .lock()
+            .expect("pet renderer poisoned")
+            .visible_bounds(mood)
+    }) else {
+        return nominal_rect;
+    };
+
+    let (pet_x, pet_y, pet_w, pet_h) = nominal_rect;
+    let (draw_w, draw_h) = fit_source_into(bounds.source_width, bounds.source_height, pet_w, pet_h);
+    let draw_x = pet_x + (pet_w - draw_w) / 2;
+    let draw_y = pet_y + (pet_h - draw_h);
+    let source_w = bounds.source_width.max(1) as i64;
+    let source_h = bounds.source_height.max(1) as i64;
+    let draw_w = draw_w as i64;
+    let draw_h = draw_h as i64;
+
+    let left = draw_x + ((bounds.x as i64 * draw_w) / source_w) as i32;
+    let top = draw_y + ((bounds.y as i64 * draw_h) / source_h) as i32;
+    let right =
+        draw_x + (((bounds.x + bounds.width) as i64 * draw_w + source_w - 1) / source_w) as i32;
+    let bottom =
+        draw_y + (((bounds.y + bounds.height) as i64 * draw_h + source_h - 1) / source_h) as i32;
+    (left, top, (right - left).max(1), (bottom - top).max(1))
+}
+
+fn fit_source_into(src_w: u32, src_h: u32, max_w: i32, max_h: i32) -> (i32, i32) {
+    if src_w == 0 || src_h == 0 || max_w <= 0 || max_h <= 0 {
+        return (max_w.max(1), max_h.max(1));
+    }
+    let scale_w = max_w as f32 / src_w as f32;
+    let scale_h = max_h as f32 / src_h as f32;
+    let scale = scale_w.min(scale_h).max(0.01);
+    let w = ((src_w as f32) * scale).round() as i32;
+    let h = ((src_h as f32) * scale).round() as i32;
+    (w.max(1), h.max(1))
 }
 
 unsafe fn ensure_pet_topmost(hwnd: HWND) {
@@ -418,13 +516,8 @@ unsafe fn cursor_over_pet(hwnd: HWND) -> bool {
     if GetCursorPos(&mut point) == 0 || ScreenToClient(hwnd, &mut point) == 0 {
         return false;
     }
-    let settings = current_user_settings();
-    let scale = settings.pet_scale_percent() as i32;
-    let pet_w = (PET_W * scale + 50) / 100;
-    let pet_h = (PET_H * scale + 50) / 100;
-    let center_x = PET_X + PET_W / 2;
-    let pet_x = center_x - pet_w / 2;
-    let pet_y = PET_Y + PET_H - pet_h;
+    let (settings, mood) = current_pet_settings_and_mood();
+    let (pet_x, pet_y, pet_w, pet_h) = visible_pet_rect_in_window(&settings, mood);
     point.x >= pet_x && point.x <= pet_x + pet_w && point.y >= pet_y && point.y <= pet_y + pet_h
 }
 
