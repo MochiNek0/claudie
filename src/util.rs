@@ -23,6 +23,26 @@ pub(crate) fn shorten(text: &str, max_chars: usize) -> String {
     out
 }
 
+/// Like `shorten`, but keeps newlines so multi-line markdown survives.
+pub(crate) fn shorten_block(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for ch in text.chars().take(max_chars) {
+        if ch == '\n' {
+            out.push(ch);
+        } else if ch == '\r' {
+            // Dropped; `\r\n` becomes `\n`.
+        } else if ch.is_control() {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    if text.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
+}
+
 pub(crate) fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -80,6 +100,177 @@ impl ConnectionLimiter {
 impl Drop for ConnectionPermit {
     fn drop(&mut self) {
         self.active.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// Block kinds produced by `markdown_blocks` for styled rendering in Slint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MarkdownBlockKind {
+    Paragraph,
+    /// Level clamped to 1..=3.
+    Heading(u8),
+    Bullet,
+    Code,
+    Quote,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MarkdownBlock {
+    pub(crate) kind: MarkdownBlockKind,
+    pub(crate) text: String,
+    /// Nesting depth for list items (2 spaces per level, capped).
+    pub(crate) indent: u8,
+}
+
+/// Parse markdown into display blocks: headings, bullets, fenced code,
+/// quotes, and plain paragraphs. Inline markup is stripped; code blocks
+/// keep their text verbatim with one block per fence.
+pub(crate) fn markdown_blocks(input: &str) -> Vec<MarkdownBlock> {
+    let mut blocks = Vec::new();
+    let mut code_lines: Option<Vec<String>> = None;
+    for raw_line in input.replace("\r\n", "\n").replace('\r', "\n").lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.starts_with("```") {
+            match code_lines.take() {
+                Some(lines) => blocks.push(MarkdownBlock {
+                    kind: MarkdownBlockKind::Code,
+                    text: lines.join("\n"),
+                    indent: 0,
+                }),
+                None => code_lines = Some(Vec::new()),
+            }
+            continue;
+        }
+        if let Some(lines) = code_lines.as_mut() {
+            lines.push(raw_line.trim_end().to_string());
+            continue;
+        }
+        if trimmed.is_empty() || is_horizontal_rule(trimmed) {
+            continue;
+        }
+
+        let indent = line_indent(raw_line);
+        if let Some((level, rest)) = heading_text(trimmed) {
+            blocks.push(MarkdownBlock {
+                kind: MarkdownBlockKind::Heading(level),
+                text: strip_inline_markdown(rest),
+                indent: 0,
+            });
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix('>') {
+            blocks.push(MarkdownBlock {
+                kind: MarkdownBlockKind::Quote,
+                text: strip_inline_markdown(rest.trim_start()),
+                indent,
+            });
+            continue;
+        }
+        if let Some((prefix, rest)) = block_bullet_prefix(trimmed) {
+            blocks.push(MarkdownBlock {
+                kind: MarkdownBlockKind::Bullet,
+                text: format!("{prefix}{}", strip_inline_markdown(rest)),
+                indent,
+            });
+            continue;
+        }
+        blocks.push(MarkdownBlock {
+            kind: MarkdownBlockKind::Paragraph,
+            text: strip_inline_markdown(trimmed),
+            indent,
+        });
+    }
+    if let Some(lines) = code_lines.take() {
+        blocks.push(MarkdownBlock {
+            kind: MarkdownBlockKind::Code,
+            text: lines.join("\n"),
+            indent: 0,
+        });
+    }
+    blocks
+}
+
+fn heading_text(line: &str) -> Option<(u8, &str)> {
+    let hashes = line.bytes().take_while(|b| *b == b'#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = line[hashes..].strip_prefix(' ')?;
+    Some((hashes.min(3) as u8, rest.trim()))
+}
+
+fn block_bullet_prefix(line: &str) -> Option<(String, &str)> {
+    if let Some((prefix, rest)) = markdown_bullet_prefix(line) {
+        let marker = match prefix {
+            "[ ] " => "\u{2610} ",
+            "[x] " => "\u{2611} ",
+            _ => "\u{2022} ",
+        };
+        return Some((marker.to_string(), rest));
+    }
+    // Numbered list: "1. text" or "1) text".
+    let digits = line.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 || digits > 3 {
+        return None;
+    }
+    let rest = &line[digits..];
+    let rest = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')'))?;
+    let rest = rest.strip_prefix(' ')?;
+    Some((format!("{}. ", &line[..digits]), rest))
+}
+
+fn is_horizontal_rule(line: &str) -> bool {
+    line.len() >= 3
+        && (line.bytes().all(|b| b == b'-')
+            || line.bytes().all(|b| b == b'*')
+            || line.bytes().all(|b| b == b'_'))
+}
+
+fn line_indent(raw_line: &str) -> u8 {
+    let spaces: usize = raw_line
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .map(|c| if c == '\t' { 2 } else { 1 })
+        .sum();
+    (spaces / 2).min(4) as u8
+}
+
+/// Estimate how many lines `text` occupies when word-wrapped into
+/// `avail_px` at `font_px`. Slint's `Text` does not grow with wrapping,
+/// so the UI sizes rows from this estimate; it leans slightly generous.
+pub(crate) fn estimate_wrapped_lines(text: &str, font_px: f32, avail_px: f32, mono: bool) -> u32 {
+    let avail_px = avail_px.max(font_px);
+    text.split('\n')
+        .map(|line| {
+            let units: f32 = line.chars().map(|c| char_width_units(c, mono)).sum();
+            let px = units * font_px * 1.06;
+            (px / avail_px).ceil().max(1.0) as u32
+        })
+        .sum()
+}
+
+fn char_width_units(c: char, mono: bool) -> f32 {
+    let wide = matches!(c,
+        '\u{1100}'..='\u{115F}'
+            | '\u{2E80}'..='\u{A4CF}'
+            | '\u{AC00}'..='\u{D7A3}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{FE30}'..='\u{FE4F}'
+            | '\u{FF00}'..='\u{FF60}'
+            | '\u{FFE0}'..='\u{FFE6}'
+            | '\u{20000}'..='\u{2FFFD}');
+    if wide {
+        return 1.0;
+    }
+    if mono {
+        return 0.62;
+    }
+    match c {
+        'i' | 'l' | 'j' | 'I' | '.' | ',' | ':' | ';' | '\'' | '!' | '|' | '(' | ')' | '['
+        | ']' | 'f' | 't' | 'r' | ' ' => 0.34,
+        'm' | 'w' | 'M' | 'W' | '@' => 0.92,
+        'A'..='Z' | '0'..='9' => 0.66,
+        _ => 0.52,
     }
 }
 
@@ -179,6 +370,50 @@ fn strip_markdown_links(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_blocks_classifies_common_structures() {
+        let text = "# Title\n\n## Step 1\nDo **this** first.\n- item one\n  - nested\n1. numbered\n- [x] done\n> note\n---\n```rs\nlet x = 1;\nlet y = 2;\n```";
+        let blocks = markdown_blocks(text);
+        assert_eq!(blocks[0].kind, MarkdownBlockKind::Heading(1));
+        assert_eq!(blocks[0].text, "Title");
+        assert_eq!(blocks[1].kind, MarkdownBlockKind::Heading(2));
+        assert_eq!(blocks[2].kind, MarkdownBlockKind::Paragraph);
+        assert_eq!(blocks[2].text, "Do this first.");
+        assert_eq!(blocks[3].kind, MarkdownBlockKind::Bullet);
+        assert_eq!(blocks[3].text, "\u{2022} item one");
+        assert_eq!(blocks[3].indent, 0);
+        assert_eq!(blocks[4].kind, MarkdownBlockKind::Bullet);
+        assert_eq!(blocks[4].indent, 1);
+        assert_eq!(blocks[5].text, "1. numbered");
+        assert_eq!(blocks[6].text, "\u{2611} done");
+        assert_eq!(blocks[7].kind, MarkdownBlockKind::Quote);
+        assert_eq!(blocks[7].text, "note");
+        // The horizontal rule is dropped; the fence becomes one code block.
+        assert_eq!(blocks[8].kind, MarkdownBlockKind::Code);
+        assert_eq!(blocks[8].text, "let x = 1;\nlet y = 2;");
+        assert_eq!(blocks.len(), 9);
+    }
+
+    #[test]
+    fn markdown_blocks_keeps_unclosed_fence() {
+        let blocks = markdown_blocks("```\ncargo test");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, MarkdownBlockKind::Code);
+        assert_eq!(blocks[0].text, "cargo test");
+    }
+
+    #[test]
+    fn estimate_wrapped_lines_grows_with_text() {
+        assert_eq!(estimate_wrapped_lines("short", 13.0, 500.0, false), 1);
+        let long = "word ".repeat(60);
+        assert!(estimate_wrapped_lines(&long, 13.0, 500.0, false) >= 3);
+        // CJK counts as full-width.
+        let cjk = "\u{4e2d}".repeat(80);
+        assert!(estimate_wrapped_lines(&cjk, 13.0, 500.0, false) >= 2);
+        // Explicit newlines always count.
+        assert_eq!(estimate_wrapped_lines("a\nb\nc", 13.0, 500.0, true), 3);
+    }
 
     #[test]
     fn markdown_to_display_text_removes_common_markup() {
