@@ -3,15 +3,22 @@ use std::rc::Rc;
 
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
-use crate::app::{PendingChoice, PendingPermission, PermissionDecision};
+use crate::app::{ChoiceKind, PendingChoice, PendingPermission, PermissionDecision};
 use crate::globals::APP_STATE;
 use crate::hooks::{
     decide_current_permission, deny_current_choice, set_current_choice_other_text,
     submit_current_choice, toggle_current_choice_option,
 };
-use crate::ui::slint_views::{ChoiceOptionData, PromptWindow};
+use crate::ui::slint_views::{ChoiceOptionData, MarkdownBlockData, PromptWindow};
 use crate::ui::window_icon::{apply_slint_window_icons, schedule_prompt_window_icon_refresh};
-use crate::util::markdown_to_display_text;
+use crate::util::{MarkdownBlock, MarkdownBlockKind, estimate_wrapped_lines, markdown_blocks};
+
+// Text widths in logical px available for wrapping. Keep in sync with the
+// PromptWindow geometry in slint_views.rs (window width is fixed at 640).
+const DETAIL_TEXT_PX: f32 = 530.0;
+const DETAIL_CODE_TEXT_PX: f32 = 510.0;
+const OPTION_TEXT_PX: f32 = 500.0;
+const HEADER_TEXT_PX: f32 = 540.0;
 
 thread_local! {
     static PROMPT: RefCell<Option<PromptWindow>> = const { RefCell::new(None) };
@@ -134,12 +141,21 @@ fn wire_prompt_callbacks(window: &PromptWindow) {
 struct PromptSnapshot {
     title: String,
     subtitle: String,
-    detail: String,
+    detail: Vec<BlockView>,
+    detail_dominant: bool,
     meta: String,
     is_choice: bool,
     submit_enabled: bool,
     submit_hint: String,
     options: Vec<OptionView>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct BlockView {
+    kind: u8,
+    text: String,
+    indent: u8,
+    lines: u32,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -153,7 +169,36 @@ struct OptionView {
     other_text: String,
     multi_select: bool,
     is_question_header: bool,
-    header: String,
+    label_lines: u32,
+    desc_lines: u32,
+}
+
+fn detail_blocks(markdown: &str) -> Vec<BlockView> {
+    markdown_blocks(markdown).iter().map(block_view).collect()
+}
+
+fn block_view(block: &MarkdownBlock) -> BlockView {
+    let (kind, font_px) = match block.kind {
+        MarkdownBlockKind::Paragraph => (0, 13.0),
+        MarkdownBlockKind::Heading(1) => (1, 17.0),
+        MarkdownBlockKind::Heading(2) => (2, 15.0),
+        MarkdownBlockKind::Heading(level) => (level, 14.0),
+        MarkdownBlockKind::Bullet => (4, 13.0),
+        MarkdownBlockKind::Code => (5, 12.0),
+        MarkdownBlockKind::Quote => (6, 13.0),
+    };
+    let mono = block.kind == MarkdownBlockKind::Code;
+    let avail = if mono {
+        DETAIL_CODE_TEXT_PX
+    } else {
+        DETAIL_TEXT_PX - f32::from(block.indent) * 14.0
+    };
+    BlockView {
+        kind,
+        text: block.text.clone(),
+        indent: block.indent,
+        lines: estimate_wrapped_lines(&block.text, font_px, avail, mono),
+    }
 }
 
 fn prompt_snapshot() -> Option<PromptSnapshot> {
@@ -169,7 +214,8 @@ fn permission_snapshot(permission: &PendingPermission) -> PromptSnapshot {
     PromptSnapshot {
         title: "Permission request".to_string(),
         subtitle: format!("{} wants access", permission.tool_name.trim()),
-        detail: markdown_to_display_text(&permission.summary),
+        detail: detail_blocks(&permission.summary),
+        detail_dominant: true,
         meta: prompt_meta(&permission.session_id, &permission.cwd),
         is_choice: false,
         submit_enabled: false,
@@ -179,7 +225,7 @@ fn permission_snapshot(permission: &PendingPermission) -> PromptSnapshot {
 }
 
 fn choice_snapshot(choice: &PendingChoice) -> PromptSnapshot {
-    let mut detail = markdown_to_display_text(choice.detail.trim());
+    let mut detail = detail_blocks(choice.detail.trim());
     if detail.is_empty() {
         let questions = choice
             .questions
@@ -187,27 +233,28 @@ fn choice_snapshot(choice: &PendingChoice) -> PromptSnapshot {
             .map(|question| question.question.clone())
             .collect::<Vec<_>>()
             .join("\n\n");
-        detail = markdown_to_display_text(&questions);
+        detail = detail_blocks(&questions);
     }
 
     let mut options = Vec::new();
     for (question_index, question) in choice.questions.iter().enumerate() {
-        let header_label = if question.header.trim().is_empty() {
-            String::new()
+        let header_text = if question.header.trim().is_empty() {
+            question.question.clone()
         } else {
-            question.header.clone()
+            format!("{} — {}", question.header, question.question)
         };
         options.push(OptionView {
             question_index,
             option_index: 0,
             label: String::new(),
-            description: question.question.clone(),
+            desc_lines: estimate_wrapped_lines(&header_text, 12.0, HEADER_TEXT_PX, false),
+            description: header_text,
             selected: false,
             is_other: false,
             other_text: String::new(),
             multi_select: question.multi_select,
             is_question_header: true,
-            header: header_label,
+            label_lines: 0,
         });
         for (option_index, option) in question.options.iter().enumerate() {
             let selected = choice
@@ -226,6 +273,13 @@ fn choice_snapshot(choice: &PendingChoice) -> PromptSnapshot {
             options.push(OptionView {
                 question_index,
                 option_index,
+                label_lines: estimate_wrapped_lines(&option.label, 13.0, OPTION_TEXT_PX, false),
+                desc_lines: estimate_wrapped_lines(
+                    &option.description,
+                    12.0,
+                    OPTION_TEXT_PX,
+                    false,
+                ),
                 label: option.label.clone(),
                 description: option.description.clone(),
                 selected,
@@ -233,7 +287,6 @@ fn choice_snapshot(choice: &PendingChoice) -> PromptSnapshot {
                 other_text,
                 multi_select: question.multi_select,
                 is_question_header: false,
-                header: String::new(),
             });
         }
     }
@@ -249,6 +302,7 @@ fn choice_snapshot(choice: &PendingChoice) -> PromptSnapshot {
         title: choice.title.clone(),
         subtitle: "Claude Code is asking for input.".to_string(),
         detail,
+        detail_dominant: choice.kind == ChoiceKind::ExitPlanMode,
         meta: prompt_meta(&choice.session_id, ""),
         is_choice: true,
         submit_enabled,
@@ -292,10 +346,23 @@ fn apply_prompt_snapshot(window: &PromptWindow, snapshot: &PromptSnapshot) {
     window.set_is_choice(snapshot.is_choice);
     window.set_title_text(shared(&snapshot.title));
     window.set_subtitle_text(shared(&snapshot.subtitle));
-    window.set_detail_text(shared(&snapshot.detail));
+    window.set_detail_dominant(snapshot.detail_dominant);
     window.set_meta_text(shared(&snapshot.meta));
     window.set_submit_enabled(snapshot.submit_enabled);
     window.set_submit_hint(shared(&snapshot.submit_hint));
+
+    let block_data: Vec<MarkdownBlockData> = snapshot
+        .detail
+        .iter()
+        .map(|block| MarkdownBlockData {
+            kind: i32::from(block.kind),
+            text: shared(&block.text),
+            indent: i32::from(block.indent),
+            lines: block.lines as i32,
+        })
+        .collect();
+    let blocks: ModelRc<MarkdownBlockData> = ModelRc::from(Rc::new(VecModel::from(block_data)));
+    window.set_detail_blocks(blocks);
 
     let model_data: Vec<ChoiceOptionData> = snapshot
         .options
@@ -310,7 +377,8 @@ fn apply_prompt_snapshot(window: &PromptWindow, snapshot: &PromptSnapshot) {
             other_text: shared(&opt.other_text),
             multi_select: opt.multi_select,
             is_question_header: opt.is_question_header,
-            header: shared(&opt.header),
+            label_lines: opt.label_lines as i32,
+            desc_lines: opt.desc_lines as i32,
         })
         .collect();
     let model: ModelRc<ChoiceOptionData> = ModelRc::from(Rc::new(VecModel::from(model_data)));

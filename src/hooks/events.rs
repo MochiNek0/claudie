@@ -11,7 +11,7 @@ use crate::app::{
     PendingChoice, PendingPermission, PermissionDecision, PermissionWaiter, PetMood,
 };
 use crate::globals::APP_STATE;
-use crate::util::shorten;
+use crate::util::{shorten, shorten_block};
 
 use super::quota::{scan_transcript_usage, update_quota_from_value};
 
@@ -593,7 +593,7 @@ fn summarize_exit_plan(tool_input: &Value) -> String {
     if plan.is_empty() {
         return path;
     }
-    let plan_text = shorten(&plan, 16_000);
+    let plan_text = shorten_block(&plan, 16_000);
     let mut detail = if path.is_empty() {
         plan_text
     } else {
@@ -1855,6 +1855,13 @@ mod tests {
         let detail = summarize_exit_plan(&input);
         assert!(detail.len() >= 800);
         assert!(detail.starts_with("xxxx"));
+    }
+
+    #[test]
+    fn summarize_exit_plan_preserves_markdown_newlines() {
+        let input = json!({"plan": "# Title\r\n\r\n## Step\n- item"});
+        let detail = summarize_exit_plan(&input);
+        assert_eq!(detail, "# Title\n\n## Step\n- item");
     }
 }
 

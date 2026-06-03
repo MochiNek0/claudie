@@ -724,7 +724,60 @@ slint::slint! {
         other_text: string,
         multi_select: bool,
         is_question_header: bool,
-        header: string,
+        // Wrapped line counts estimated in Rust; Slint Text does not
+        // grow with word-wrap, so row heights derive from these.
+        label_lines: int,
+        desc_lines: int,
+    }
+
+    struct MarkdownBlockData {
+        // 0 paragraph, 1-3 heading level, 4 bullet, 5 code, 6 quote.
+        kind: int,
+        text: string,
+        indent: int,
+        lines: int,
+    }
+
+    component MarkdownBlockRow inherits Rectangle {
+        in property <MarkdownBlockData> data;
+
+        property <bool> is_heading: data.kind >= 1 && data.kind <= 3;
+        property <length> line_h: data.kind == 1 ? 25px
+            : (data.kind == 2 ? 22px
+            : (data.kind == 3 ? 20px
+            : (data.kind == 5 ? 17px : 19px)));
+
+        height: data.lines * self.line_h
+            + (data.kind == 5 ? 16px : 0px)
+            + (self.is_heading ? 6px : 0px);
+        background: data.kind == 5 ? #e9eef5 : transparent;
+        border-radius: 6px;
+
+        if data.kind == 5: Text {
+            x: 10px; y: 8px;
+            width: parent.width - 20px;
+            height: parent.height - 16px;
+            text: data.text;
+            wrap: word-wrap;
+            font-family: "Cascadia Mono, Consolas";
+            font-size: 12px;
+            color: #111827;
+        }
+
+        if data.kind != 5: Text {
+            x: data.indent * 14px;
+            y: root.is_heading ? 6px : 0px;
+            width: parent.width - data.indent * 14px;
+            height: parent.height - (root.is_heading ? 6px : 0px);
+            text: data.text;
+            wrap: word-wrap;
+            font-size: data.kind == 1 ? 17px
+                : (data.kind == 2 ? 15px
+                : (data.kind == 3 ? 14px : 13px));
+            font-weight: root.is_heading ? 700 : 400;
+            font-italic: data.kind == 6;
+            color: data.kind == 6 ? #6b7280 : #111827;
+        }
     }
 
     component ChoiceOptionRow inherits Rectangle {
@@ -732,10 +785,14 @@ slint::slint! {
         callback toggle();
         callback other_text_changed(string);
 
+        property <length> label_h: data.label_lines * 19px;
+        property <length> desc_h: data.description == "" ? 0px : data.desc_lines * 17px + 4px;
+        property <bool> show_other: data.selected && data.is_other;
+
         width: 100%;
         height: data.is_question_header
-            ? 32px
-            : (data.selected && data.is_other ? 88px : 56px);
+            ? data.desc_lines * 17px + 14px
+            : 16px + self.label_h + self.desc_h + (self.show_other ? 38px : 0px);
         background: data.is_question_header
             ? transparent
             : (data.selected ? #eef6ff : #ffffff);
@@ -743,19 +800,26 @@ slint::slint! {
         border-width: data.is_question_header ? 0px : 1px;
         border-color: data.selected ? #0a84ff : #dae0ea;
 
+        if !data.is_question_header: TouchArea {
+            width: 100%;
+            height: 100%;
+            mouse-cursor: pointer;
+            clicked => { root.toggle(); }
+        }
+
         if data.is_question_header: Text {
             x: 4px; y: 8px;
             width: parent.width - 8px;
-            height: 20px;
-            text: data.header == "" ? data.description : data.header + " — " + data.description;
+            height: parent.height - 10px;
+            text: data.description;
             font-size: 12px;
             font-weight: 600;
             color: #475569;
-            overflow: elide;
+            wrap: word-wrap;
         }
 
         if !data.is_question_header: Text {
-            x: 12px; y: 8px;
+            x: 12px; y: 6px;
             width: 24px; height: 22px;
             text: data.multi_select
                 ? (data.selected ? "☑" : "☐")
@@ -767,52 +831,43 @@ slint::slint! {
         }
 
         if !data.is_question_header: Text {
-            x: 40px; y: 6px;
+            x: 40px; y: 8px;
             width: parent.width - 52px;
-            height: 20px;
+            height: root.label_h;
             text: data.label;
             font-size: 13px;
             font-weight: 600;
             color: #111827;
-            overflow: elide;
+            wrap: word-wrap;
         }
 
         if !data.is_question_header && data.description != "": Text {
-            x: 40px; y: 26px;
+            x: 40px; y: 8px + root.label_h + 4px;
             width: parent.width - 52px;
-            height: 22px;
+            height: data.desc_lines * 17px;
             text: data.description;
             font-size: 12px;
             color: #6b7280;
             wrap: word-wrap;
-            overflow: elide;
         }
 
-        if !data.is_question_header && data.selected && data.is_other: LineEdit {
-            x: 40px; y: 54px;
+        if !data.is_question_header && root.show_other: LineEdit {
+            x: 40px; y: 8px + root.label_h + root.desc_h + 4px;
             width: parent.width - 52px;
-            height: 28px;
+            height: 30px;
             text: data.other_text;
             placeholder-text: "Type your answer...";
             edited(text) => { root.other_text_changed(text); }
         }
-
-        if !data.is_question_header: TouchArea {
-            x: 0px; y: 0px;
-            width: parent.width;
-            height: data.selected && data.is_other ? 52px : parent.height;
-            mouse-cursor: pointer;
-            clicked => { root.toggle(); }
-        }
     }
 
     export component PromptWindow inherits Window {
-        preferred-width: 640px;
-        preferred-height: 480px;
+        // Width is fixed: the Rust side estimates wrapped line counts
+        // against this width. Height is user-resizable.
         min-width: 640px;
         max-width: 640px;
+        preferred-height: 620px;
         min-height: 480px;
-        max-height: 480px;
         title: "claudie request";
         icon: @image-url("../../assets/icon.ico");
         background: #f4f7fc;
@@ -820,7 +875,9 @@ slint::slint! {
         in property <bool> is_choice: false;
         in property <string> title_text;
         in property <string> subtitle_text;
-        in property <string> detail_text;
+        in property <[MarkdownBlockData]> detail_blocks;
+        // Plans get most of the space; question lists give it to options.
+        in property <bool> detail_dominant: false;
         in property <string> meta_text;
         in property <bool> submit_enabled: false;
         in property <string> submit_hint;
@@ -838,77 +895,95 @@ slint::slint! {
             x: 12px;
             y: 12px;
             width: 616px;
-            height: 456px;
+            height: root.height - 24px;
             background: white;
             border-radius: 8px;
             border-width: 1px;
             border-color: #e4e8f0;
         }
 
-        Text { x: 32px; y: 28px; width: 576px; text: root.title_text; font-size: 19px; font-weight: 600; color: #111827; overflow: elide; }
-        Text { x: 32px; y: 58px; width: 576px; text: root.subtitle_text; font-size: 13px; color: #6b7280; overflow: elide; }
+        VerticalLayout {
+            x: 32px;
+            y: 26px;
+            width: 576px;
+            height: root.height - 52px;
+            spacing: 10px;
 
-        Rectangle {
-            x: 32px; y: 86px; width: 576px; height: 116px;
-            background: #f2f5fa;
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: #dae0ea;
-        }
-        ScrollView {
-            x: 44px; y: 98px; width: 552px; height: 74px;
-            VerticalLayout {
-                padding: 0px;
-                Text {
-                    text: root.detail_text;
-                    wrap: word-wrap;
-                    font-size: 13px;
-                    color: #111827;
+            Text { height: 26px; text: root.title_text; font-size: 19px; font-weight: 600; color: #111827; overflow: elide; }
+            Text { height: 18px; text: root.subtitle_text; font-size: 13px; color: #6b7280; overflow: elide; }
+
+            Rectangle {
+                vertical-stretch: root.detail_dominant ? 3 : 1;
+                min-height: 96px;
+                background: #f2f5fa;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: #dae0ea;
+
+                ScrollView {
+                    x: 12px; y: 12px;
+                    width: parent.width - 24px;
+                    height: parent.height - 24px;
+                    VerticalLayout {
+                        padding: 0px;
+                        spacing: 4px;
+                        for block in root.detail_blocks: MarkdownBlockRow {
+                            data: block;
+                        }
+                    }
                 }
             }
-        }
-        Text {
-            x: 44px; y: 176px; width: 552px; height: 18px;
-            text: root.meta_text;
-            font-size: 12px;
-            color: #9ca3af;
-            overflow: elide;
-        }
 
-        if is_choice: ScrollView {
-            x: 32px; y: 216px; width: 576px; height: 176px;
-            VerticalLayout {
-                padding: 4px;
-                spacing: 8px;
-                for opt[idx] in root.options_model: ChoiceOptionRow {
-                    data: opt;
-                    toggle => { root.toggle_option(idx); }
-                    other_text_changed(t) => { root.set_other_text(idx, t); }
+            Text {
+                height: 16px;
+                text: root.meta_text;
+                font-size: 12px;
+                color: #9ca3af;
+                overflow: elide;
+            }
+
+            if is_choice: ScrollView {
+                vertical-stretch: root.detail_dominant ? 1 : 3;
+                min-height: 110px;
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 8px;
+                    for opt[idx] in root.options_model: ChoiceOptionRow {
+                        data: opt;
+                        toggle => { root.toggle_option(idx); }
+                        other_text_changed(t) => { root.set_other_text(idx, t); }
+                    }
                 }
             }
+
+            if !is_choice: Text {
+                height: 16px;
+                text: "Use Ctrl+Shift+Y for Allow and Ctrl+Shift+N for Deny.";
+                font-size: 12px;
+                color: #6b7280;
+            }
+
+            if is_choice && !submit_enabled: Text {
+                height: 16px;
+                text: root.submit_hint;
+                font-size: 12px;
+                color: #d97706;
+                horizontal-alignment: center;
+                overflow: elide;
+            }
+
+            HorizontalLayout {
+                height: 32px;
+                spacing: 10px;
+                alignment: end;
+
+                if !is_choice: ActionButton { width: 88px; text: "Allow"; clicked => { root.allow_once(); } }
+                if !is_choice: ActionButton { width: 100px; text: "Always"; clicked => { root.allow_always(); } }
+                if !is_choice: ActionButton { width: 88px; text: "Deny"; clicked => { root.deny(); } }
+
+                if is_choice: ActionButton { width: 100px; text: "Submit"; enabled: root.submit_enabled; clicked => { root.submit_choice(); } }
+                if is_choice: ActionButton { width: 88px; text: "Cancel"; clicked => { root.cancel_choice(); } }
+            }
         }
-
-        if !is_choice: Text {
-            x: 32px; y: 222px; width: 576px;
-            text: "Use Ctrl+Shift+Y for Allow and Ctrl+Shift+N for Deny.";
-            font-size: 12px;
-            color: #6b7280;
-        }
-
-        if is_choice && !submit_enabled: Text {
-            x: 32px; y: 402px; width: 576px; height: 18px;
-            text: root.submit_hint;
-            font-size: 12px;
-            color: #d97706;
-            horizontal-alignment: center;
-            overflow: elide;
-        }
-
-        if !is_choice: ActionButton { x: 304px; y: 424px; width: 88px; height: 32px; text: "Allow"; clicked => { root.allow_once(); } }
-        if !is_choice: ActionButton { x: 402px; y: 424px; width: 100px; height: 32px; text: "Always"; clicked => { root.allow_always(); } }
-        if !is_choice: ActionButton { x: 512px; y: 424px; width: 88px; height: 32px; text: "Deny"; clicked => { root.deny(); } }
-
-        if is_choice: ActionButton { x: 402px; y: 424px; width: 100px; height: 32px; text: "Submit"; enabled: root.submit_enabled; clicked => { root.submit_choice(); } }
-        if is_choice: ActionButton { x: 512px; y: 424px; width: 88px; height: 32px; text: "Cancel"; clicked => { root.cancel_choice(); } }
     }
 }
