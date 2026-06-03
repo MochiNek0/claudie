@@ -11,11 +11,13 @@ use crate::app::{
     PendingChoice, PendingPermission, PermissionDecision, PermissionWaiter, PetMood,
 };
 use crate::globals::APP_STATE;
-use crate::util::{shorten, shorten_block};
+use crate::util::{diff_lines_text, shorten, shorten_block};
 
 use super::quota::{scan_transcript_usage, update_quota_from_value};
 
 const PAYLOAD_SUMMARY_MAX_CHARS: usize = 2_000;
+const WRITE_CONTENT_MAX_LINES: usize = 80;
+const MAX_MULTIEDIT_EDITS: usize = 6;
 const TRANSCRIPT_DENIAL_POLL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1863,6 +1865,44 @@ mod tests {
         let detail = summarize_exit_plan(&input);
         assert_eq!(detail, "# Title\n\n## Step\n- item");
     }
+
+    #[test]
+    fn summarize_tool_input_wraps_command_in_code_block() {
+        let input = json!({ "command": "cargo test", "description": "Run the suite" });
+        let summary = summarize_tool_input(&input).unwrap();
+        assert!(summary.starts_with("Run the suite\n\n```"));
+        assert!(summary.contains("cargo test"));
+    }
+
+    #[test]
+    fn summarize_tool_input_renders_edit_as_diff() {
+        let input = json!({
+            "file_path": "src/lib_x.rs",
+            "old_string": "let a = 1;",
+            "new_string": "let a = 2;",
+        });
+        let summary = summarize_tool_input(&input).unwrap();
+        assert!(summary.starts_with("```diff"));
+        // A file path with underscores survives verbatim inside the fence.
+        assert!(summary.contains("src/lib_x.rs"));
+        assert!(summary.contains("-let a = 1;"));
+        assert!(summary.contains("+let a = 2;"));
+    }
+
+    #[test]
+    fn summarize_tool_input_renders_write_as_added_lines() {
+        let input = json!({ "file_path": "new.rs", "content": "fn main() {}\n" });
+        let summary = summarize_tool_input(&input).unwrap();
+        assert!(summary.starts_with("```diff"));
+        assert!(summary.contains("+fn main() {}"));
+    }
+
+    #[test]
+    fn summarize_tool_input_shows_read_target_verbatim() {
+        let input = json!({ "file_path": "src/main_app.rs" });
+        let summary = summarize_tool_input(&input).unwrap();
+        assert_eq!(summary, "```\nsrc/main_app.rs\n```");
+    }
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
@@ -1874,13 +1914,8 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
 
 fn summarize_payload(value: &Value) -> String {
     if let Some(tool_input) = value.get("tool_input").or_else(|| value.get("toolInput")) {
-        if let Some(command) = string_field(tool_input, "command") {
-            return shorten(&command, PAYLOAD_SUMMARY_MAX_CHARS);
-        }
-        for key in ["file_path", "path", "pattern", "url", "prompt"] {
-            if let Some(text) = string_field(tool_input, key) {
-                return shorten(&text, PAYLOAD_SUMMARY_MAX_CHARS);
-            }
+        if let Some(summary) = summarize_tool_input(tool_input) {
+            return summary;
         }
     }
     if let Some(message) = string_field(value, "message")
@@ -1890,4 +1925,112 @@ fn summarize_payload(value: &Value) -> String {
         return shorten(&message, PAYLOAD_SUMMARY_MAX_CHARS);
     }
     shorten(&value.to_string(), PAYLOAD_SUMMARY_MAX_CHARS)
+}
+
+/// Build a markdown summary of a tool call for the permission popup. Commands
+/// render as fenced code and edits as ```diff blocks so the user sees the
+/// actual change being requested, not just the file name.
+fn summarize_tool_input(tool_input: &Value) -> Option<String> {
+    // Shell command (Bash and similar): optional description + the command.
+    if let Some(command) = string_field(tool_input, "command") {
+        let mut out = String::new();
+        if let Some(description) = string_field(tool_input, "description") {
+            let description = description.trim();
+            if !description.is_empty() {
+                out.push_str(&shorten(description, 200));
+                out.push_str("\n\n");
+            }
+        }
+        out.push_str(&fenced(
+            "",
+            &shorten_block(command.trim_end_matches('\n'), PAYLOAD_SUMMARY_MAX_CHARS),
+        ));
+        return Some(out);
+    }
+
+    let path = tool_file_path(tool_input);
+
+    // MultiEdit: one diff per edit under a shared file header.
+    if let Some(edits) = tool_input.get("edits").and_then(Value::as_array) {
+        let mut body = String::new();
+        if let Some(path) = &path {
+            body.push_str(&format!(" {path}\n"));
+        }
+        for (index, edit) in edits.iter().take(MAX_MULTIEDIT_EDITS).enumerate() {
+            if index > 0 {
+                body.push_str(" @@\n");
+            }
+            let old = string_field(edit, "old_string").unwrap_or_default();
+            let new = string_field(edit, "new_string").unwrap_or_default();
+            body.push_str(&diff_lines_text(&old, &new));
+            body.push('\n');
+        }
+        if edits.len() > MAX_MULTIEDIT_EDITS {
+            body.push_str(&format!(
+                " … {} more edit(s)\n",
+                edits.len() - MAX_MULTIEDIT_EDITS
+            ));
+        }
+        return Some(fenced("diff", body.trim_end_matches('\n')));
+    }
+
+    // Single edit.
+    if tool_input.get("old_string").is_some() || tool_input.get("new_string").is_some() {
+        let old = string_field(tool_input, "old_string").unwrap_or_default();
+        let new = string_field(tool_input, "new_string").unwrap_or_default();
+        let mut body = String::new();
+        if let Some(path) = &path {
+            body.push_str(&format!(" {path}\n"));
+        }
+        body.push_str(&diff_lines_text(&old, &new));
+        return Some(fenced("diff", &body));
+    }
+
+    // Write / create file: show the new content as added lines.
+    if let Some(content) = string_field(tool_input, "content") {
+        let mut body = String::new();
+        if let Some(path) = &path {
+            body.push_str(&format!(" {path}\n"));
+        }
+        body.push_str(&added_lines(&content));
+        return Some(fenced("diff", body.trim_end_matches('\n')));
+    }
+
+    // Read/search style tools: surface the target verbatim in a code chip.
+    for key in ["file_path", "path", "pattern", "url"] {
+        if let Some(text) = string_field(tool_input, key) {
+            return Some(fenced("", &shorten_block(&text, PAYLOAD_SUMMARY_MAX_CHARS)));
+        }
+    }
+    // Prose-style input (e.g. prompts) reads better as plain text.
+    string_field(tool_input, "prompt").map(|text| shorten(&text, PAYLOAD_SUMMARY_MAX_CHARS))
+}
+
+fn fenced(lang: &str, body: &str) -> String {
+    format!("```{lang}\n{body}\n```")
+}
+
+/// Render `content` as `+` added diff lines, capped for long files.
+fn added_lines(content: &str) -> String {
+    let trimmed = content.trim_end_matches('\n');
+    let total = trimmed.split('\n').count();
+    let mut out: Vec<String> = trimmed
+        .split('\n')
+        .take(WRITE_CONTENT_MAX_LINES)
+        .map(|line| format!("+{line}"))
+        .collect();
+    if total > WRITE_CONTENT_MAX_LINES {
+        out.push(format!(
+            "+… {} more line(s)",
+            total - WRITE_CONTENT_MAX_LINES
+        ));
+    }
+    out.join("\n")
+}
+
+fn tool_file_path(tool_input: &Value) -> Option<String> {
+    ["file_path", "path", "notebook_path", "filePath"]
+        .into_iter()
+        .find_map(|key| string_field(tool_input, key))
+        .filter(|value| !value.trim().is_empty())
 }

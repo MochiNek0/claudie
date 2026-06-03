@@ -112,6 +112,9 @@ pub(crate) enum MarkdownBlockKind {
     Bullet,
     Code,
     Quote,
+    /// Unified-diff body (``` fenced with the `diff` language). Each line is
+    /// tinted by its leading `+`/`-`/space marker when rendered.
+    Diff,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,22 +130,23 @@ pub(crate) struct MarkdownBlock {
 /// keep their text verbatim with one block per fence.
 pub(crate) fn markdown_blocks(input: &str) -> Vec<MarkdownBlock> {
     let mut blocks = Vec::new();
-    let mut code_lines: Option<Vec<String>> = None;
+    // Tracks an open fenced block: (collected lines, is the language `diff`).
+    let mut code: Option<(Vec<String>, bool)> = None;
     for raw_line in input.replace("\r\n", "\n").replace('\r', "\n").lines() {
         let trimmed = raw_line.trim();
-        if trimmed.starts_with("```") {
-            match code_lines.take() {
-                Some(lines) => blocks.push(MarkdownBlock {
-                    kind: MarkdownBlockKind::Code,
-                    text: lines.join("\n"),
-                    indent: 0,
-                }),
-                None => code_lines = Some(Vec::new()),
+        // Inside a fence: only an all-backtick line closes it, so `+`/`-`
+        // prefixed diff content (and code containing fences) survives intact.
+        if let Some((lines, is_diff)) = code.as_mut() {
+            if is_fence_close(trimmed) {
+                blocks.push(finish_code_block(std::mem::take(lines), *is_diff));
+                code = None;
+            } else {
+                lines.push(raw_line.trim_end().to_string());
             }
             continue;
         }
-        if let Some(lines) = code_lines.as_mut() {
-            lines.push(raw_line.trim_end().to_string());
+        if let Some(info) = trimmed.strip_prefix("```") {
+            code = Some((Vec::new(), info.trim().eq_ignore_ascii_case("diff")));
             continue;
         }
         if trimmed.is_empty() || is_horizontal_rule(trimmed) {
@@ -180,14 +184,28 @@ pub(crate) fn markdown_blocks(input: &str) -> Vec<MarkdownBlock> {
             indent,
         });
     }
-    if let Some(lines) = code_lines.take() {
-        blocks.push(MarkdownBlock {
-            kind: MarkdownBlockKind::Code,
-            text: lines.join("\n"),
-            indent: 0,
-        });
+    if let Some((lines, is_diff)) = code.take() {
+        blocks.push(finish_code_block(lines, is_diff));
     }
     blocks
+}
+
+/// A fence is closed only by a line made entirely of backticks (```` ``` ````),
+/// so opening info strings and prefixed diff content never close it by accident.
+fn is_fence_close(trimmed: &str) -> bool {
+    trimmed.len() >= 3 && trimmed.bytes().all(|b| b == b'`')
+}
+
+fn finish_code_block(lines: Vec<String>, is_diff: bool) -> MarkdownBlock {
+    MarkdownBlock {
+        kind: if is_diff {
+            MarkdownBlockKind::Diff
+        } else {
+            MarkdownBlockKind::Code
+        },
+        text: lines.join("\n"),
+        indent: 0,
+    }
 }
 
 fn heading_text(line: &str) -> Option<(u8, &str)> {
@@ -367,6 +385,72 @@ fn strip_markdown_links(input: &str) -> String {
     out
 }
 
+/// Render a unified-diff body comparing `old` to `new`, line by line.
+///
+/// Unchanged leading/trailing lines are collapsed to a few lines of context
+/// (with a `…` hunk marker when more were trimmed); changed runs are emitted as
+/// `-` removed then `+` added lines, each capped so a huge edit stays readable.
+/// Context lines keep a single-space gutter so a literal `+`/`-` in the source
+/// is never mistaken for a change marker.
+pub(crate) fn diff_lines_text(old: &str, new: &str) -> String {
+    const CONTEXT: usize = 2;
+    const MAX_CHANGED: usize = 60;
+
+    let old_lines: Vec<&str> = old.split('\n').collect();
+    let new_lines: Vec<&str> = new.split('\n').collect();
+
+    let mut prefix = 0;
+    while prefix < old_lines.len()
+        && prefix < new_lines.len()
+        && old_lines[prefix] == new_lines[prefix]
+    {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < old_lines.len() - prefix
+        && suffix < new_lines.len() - prefix
+        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let removed = &old_lines[prefix..old_lines.len() - suffix];
+    let added = &new_lines[prefix..new_lines.len() - suffix];
+
+    let mut out: Vec<String> = Vec::new();
+    let lead_start = prefix.saturating_sub(CONTEXT);
+    if lead_start > 0 {
+        out.push(" …".to_string());
+    }
+    for line in &old_lines[lead_start..prefix] {
+        out.push(format!(" {line}"));
+    }
+    push_changed_lines(&mut out, removed, '-', MAX_CHANGED);
+    push_changed_lines(&mut out, added, '+', MAX_CHANGED);
+    let trail_start = old_lines.len() - suffix;
+    let trail_end = (trail_start + CONTEXT).min(old_lines.len());
+    for line in &old_lines[trail_start..trail_end] {
+        out.push(format!(" {line}"));
+    }
+    if trail_end < old_lines.len() {
+        out.push(" …".to_string());
+    }
+    out.join("\n")
+}
+
+fn push_changed_lines(out: &mut Vec<String>, lines: &[&str], sign: char, max: usize) {
+    if lines.len() > max {
+        for line in &lines[..max] {
+            out.push(format!("{sign}{line}"));
+        }
+        out.push(format!("{sign}… {} more line(s)", lines.len() - max));
+    } else {
+        for line in lines {
+            out.push(format!("{sign}{line}"));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +485,37 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].kind, MarkdownBlockKind::Code);
         assert_eq!(blocks[0].text, "cargo test");
+    }
+
+    #[test]
+    fn markdown_blocks_reads_diff_language_and_protects_content() {
+        // A `-` prefixed line that contains a fence must not close the block.
+        let blocks = markdown_blocks("path.rs\n```diff\n-let a = `1`;\n+let a = 2;\n```");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].kind, MarkdownBlockKind::Paragraph);
+        assert_eq!(blocks[1].kind, MarkdownBlockKind::Diff);
+        assert_eq!(blocks[1].text, "-let a = `1`;\n+let a = 2;");
+    }
+
+    #[test]
+    fn diff_lines_text_trims_common_context_and_marks_changes() {
+        let old = "a\nb\nc\nd\ne";
+        let new = "a\nb\nX\nd\ne";
+        let diff = diff_lines_text(old, new);
+        assert_eq!(diff, " a\n b\n-c\n+X\n d\n e");
+    }
+
+    #[test]
+    fn diff_lines_text_caps_huge_changes() {
+        let old = String::new();
+        let new = (0..200)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let diff = diff_lines_text(&old, &new);
+        assert!(diff.lines().any(|line| line.contains("more line(s)")));
+        // 60 added lines + the truncation marker.
+        assert_eq!(diff.lines().filter(|l| l.starts_with('+')).count(), 61);
     }
 
     #[test]

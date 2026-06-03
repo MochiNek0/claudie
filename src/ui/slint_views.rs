@@ -4,15 +4,17 @@ slint::slint! {
     component ActionButton inherits Rectangle {
         in property <string> text;
         in property <bool> enabled: true;
+        // Filled accent treatment, used for the selected settings tab.
+        in property <bool> active: false;
         callback clicked();
 
         border-radius: 8px;
         border-width: 1px;
-        border-color: root.enabled ? #cfd8e6 : #e5e7eb;
-        background: root.enabled ? #ffffff : #f3f4f6;
+        border-color: root.active ? #0a84ff : (root.enabled ? #cfd8e6 : #e5e7eb);
+        background: root.active ? #0a84ff : (root.enabled ? #ffffff : #f3f4f6);
 
         states [
-            hover when touch.has-hover && root.enabled : {
+            hover when touch.has-hover && root.enabled && !root.active : {
                 background: #eef6ff;
                 border-color: #0a84ff;
             }
@@ -40,7 +42,7 @@ slint::slint! {
             vertical-alignment: center;
             font-size: 13px;
             font-weight: 600;
-            color: root.enabled ? #111827 : #9ca3af;
+            color: root.active ? #ffffff : (root.enabled ? #111827 : #9ca3af);
         }
     }
 
@@ -350,7 +352,7 @@ slint::slint! {
 
     export component SettingsWindow inherits Window {
         width: 880px;
-        height: 700px;
+        height: 760px;
         title: "claudie Settings";
         icon: @image-url("../../assets/icon.ico");
         background: #f4f7fc;
@@ -463,250 +465,255 @@ slint::slint! {
         callback skip_pomodoro();
         callback stop_pomodoro();
 
+        // Frosted card: 16px window margin, 8pt-grid radius.
         Rectangle {
             x: 16px;
             y: 16px;
             width: 848px;
-            height: 668px;
+            height: 728px;
             background: white;
-            border-radius: 18px;
+            border-radius: 16px;
             border-width: 1px;
             border-color: #e4e8f0;
         }
 
+        // H1 (modular scale, base 13 * 1.25^3 ≈ 24).
         Text {
-            x: 36px;
+            x: 40px;
             y: 28px;
             text: "claudie Settings";
-            font-size: 22px;
+            font-size: 24px;
             font-weight: 600;
             color: #111827;
         }
 
         Text {
-            x: 36px;
-            y: 57px;
-            width: 720px;
+            x: 40px;
+            y: 64px;
+            width: 760px;
             text: "Keep the pet light, tune the local runtime, and manage Claude Code profiles.";
             font-size: 13px;
             color: #6b7280;
         }
 
-        ActionButton { x: 36px; y: 84px; width: 104px; height: 34px; text: "Basic"; clicked => { root.active_tab = 0; } }
-        ActionButton { x: 148px; y: 84px; width: 124px; height: 34px; text: "Pomodoro"; clicked => { root.active_tab = 1; } }
-        ActionButton { x: 280px; y: 84px; width: 140px; height: 34px; text: "LLM Profiles"; clicked => { root.active_tab = 2; } }
-        ActionButton { x: 428px; y: 84px; width: 96px; height: 34px; text: "Stats"; clicked => { root.active_tab = 3; } }
+        // Tab bar: 40px (8*5) buttons, 8px gutters, active tab filled.
+        ActionButton { x: 40px; y: 104px; width: 104px; height: 40px; text: "Basic"; active: root.active_tab == 0; clicked => { root.active_tab = 0; } }
+        ActionButton { x: 152px; y: 104px; width: 120px; height: 40px; text: "Pomodoro"; active: root.active_tab == 1; clicked => { root.active_tab = 1; } }
+        ActionButton { x: 280px; y: 104px; width: 140px; height: 40px; text: "LLM Profiles"; active: root.active_tab == 2; clicked => { root.active_tab = 2; } }
+        ActionButton { x: 428px; y: 104px; width: 96px; height: 40px; text: "Stats"; active: root.active_tab == 3; clicked => { root.active_tab = 3; } }
 
+        // Content region: x 40, width 800 (8*100), 4-column field grid
+        // (col 188 + 16 gutter), row pitch 64, fields 32 high.
         if active_tab == 0: Rectangle {
-            x: 36px;
-            y: 132px;
-            width: 808px;
-            height: 540px;
+            x: 40px;
+            y: 160px;
+            width: 800px;
+            height: 556px;
             background: transparent;
 
-            Text { x: 12px; y: 0px; text: "Pet renderer"; font-size: 16px; font-weight: 600; color: #111827; }
-            Text { x: 12px; y: 28px; width: 700px; text: "Tune the desktop pet size and map each mood to a GIF filename."; font-size: 13px; color: #6b7280; }
+            Text { x: 0px; y: 0px; text: "Pet renderer"; font-size: 16px; font-weight: 600; color: #111827; }
+            Text { x: 0px; y: 26px; width: 760px; text: "Tune the desktop pet size and map each mood to a GIF filename."; font-size: 13px; color: #6b7280; }
 
-            Text { x: 12px; y: 72px; text: "Pet size"; color: #6b7280; font-size: 12px; }
+            Text { x: 0px; y: 64px; text: "Pet size"; color: #6b7280; font-size: 12px; }
             PointerSlider {
-                x: 12px; y: 94px; width: 342px; height: 38px;
+                x: 0px; y: 84px; width: 300px; height: 32px;
                 minimum: 50; maximum: 150; step: 1;
                 value <=> root.pet_scale;
                 changed(value) => { root.pet_scale_changed(value); }
             }
-            Text { x: 370px; y: 103px; width: 64px; text: Math.round(root.pet_scale) + "%"; color: #111827; font-size: 13px; }
-            Text { x: 444px; y: 72px; text: "Sleep after"; color: #6b7280; font-size: 12px; }
+            Text { x: 312px; y: 90px; width: 80px; text: Math.round(root.pet_scale) + "%"; color: #111827; font-size: 13px; }
+            Text { x: 408px; y: 64px; text: "Sleep after"; color: #6b7280; font-size: 12px; }
             PointerSlider {
-                x: 444px; y: 94px; width: 294px; height: 38px;
+                x: 408px; y: 84px; width: 300px; height: 32px;
                 minimum: 15; maximum: 1800; step: 15;
                 value <=> root.sleep_after;
                 changed(value) => { root.sleep_after_changed(value); }
             }
-            Text { x: 752px; y: 103px; width: 70px; text: Math.round(root.sleep_after) + "s"; color: #111827; font-size: 13px; }
+            Text { x: 720px; y: 90px; width: 80px; text: Math.round(root.sleep_after) + "s"; color: #111827; font-size: 13px; }
 
-            Text { x: 12px; y: 150px; text: "Pet asset directory"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 12px; y: 172px; width: 382px; height: 34px; text <=> root.pet_dir; }
-            Text { x: 412px; y: 150px; text: "GIF directory"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 412px; y: 172px; width: 382px; height: 34px; text <=> root.gif_dir; }
+            Text { x: 0px; y: 128px; text: "Pet asset directory"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 0px; y: 148px; width: 392px; height: 32px; text <=> root.pet_dir; }
+            Text { x: 408px; y: 128px; text: "GIF directory"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 408px; y: 148px; width: 392px; height: 32px; text <=> root.gif_dir; }
 
-            Text { x: 12px; y: 228px; text: "Idle"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 12px; y: 248px; width: 182px; height: 32px; text <=> root.anim_idle; }
-            Text { x: 212px; y: 228px; text: "Thinking"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 212px; y: 248px; width: 182px; height: 32px; text <=> root.anim_thinking; }
-            Text { x: 412px; y: 228px; text: "Typing"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 412px; y: 248px; width: 182px; height: 32px; text <=> root.anim_typing; }
-            Text { x: 612px; y: 228px; text: "Building"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 612px; y: 248px; width: 182px; height: 32px; text <=> root.anim_building; }
+            Text { x: 0px; y: 192px; text: "Idle"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 0px; y: 212px; width: 188px; height: 32px; text <=> root.anim_idle; }
+            Text { x: 204px; y: 192px; text: "Thinking"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 204px; y: 212px; width: 188px; height: 32px; text <=> root.anim_thinking; }
+            Text { x: 408px; y: 192px; text: "Typing"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 408px; y: 212px; width: 188px; height: 32px; text <=> root.anim_typing; }
+            Text { x: 612px; y: 192px; text: "Building"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 612px; y: 212px; width: 188px; height: 32px; text <=> root.anim_building; }
 
-            Text { x: 12px; y: 296px; text: "Search"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 12px; y: 316px; width: 182px; height: 32px; text <=> root.anim_search; }
-            Text { x: 212px; y: 296px; text: "Happy"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 212px; y: 316px; width: 182px; height: 32px; text <=> root.anim_happy; }
-            Text { x: 412px; y: 296px; text: "Error"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 412px; y: 316px; width: 182px; height: 32px; text <=> root.anim_error; }
-            Text { x: 612px; y: 296px; text: "Sleeping"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 612px; y: 316px; width: 182px; height: 32px; text <=> root.anim_sleeping; }
+            Text { x: 0px; y: 256px; text: "Search"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 0px; y: 276px; width: 188px; height: 32px; text <=> root.anim_search; }
+            Text { x: 204px; y: 256px; text: "Happy"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 204px; y: 276px; width: 188px; height: 32px; text <=> root.anim_happy; }
+            Text { x: 408px; y: 256px; text: "Error"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 408px; y: 276px; width: 188px; height: 32px; text <=> root.anim_error; }
+            Text { x: 612px; y: 256px; text: "Sleeping"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 612px; y: 276px; width: 188px; height: 32px; text <=> root.anim_sleeping; }
 
-            Text { x: 12px; y: 364px; text: "Subagent"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 12px; y: 384px; width: 182px; height: 32px; text <=> root.anim_subagent; }
-            Text { x: 212px; y: 364px; text: "Pomodoro"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 212px; y: 384px; width: 182px; height: 32px; text <=> root.anim_pomodoro; }
-            Text { x: 412px; y: 364px; text: "Wave"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 412px; y: 384px; width: 182px; height: 32px; text <=> root.anim_wave; }
-            Text { x: 612px; y: 364px; text: "Stretch"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 612px; y: 384px; width: 182px; height: 32px; text <=> root.anim_stretch; }
+            Text { x: 0px; y: 320px; text: "Subagent"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 0px; y: 340px; width: 188px; height: 32px; text <=> root.anim_subagent; }
+            Text { x: 204px; y: 320px; text: "Pomodoro"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 204px; y: 340px; width: 188px; height: 32px; text <=> root.anim_pomodoro; }
+            Text { x: 408px; y: 320px; text: "Wave"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 408px; y: 340px; width: 188px; height: 32px; text <=> root.anim_wave; }
+            Text { x: 612px; y: 320px; text: "Stretch"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 612px; y: 340px; width: 188px; height: 32px; text <=> root.anim_stretch; }
 
-            Text { x: 12px; y: 432px; text: "Fishing"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 12px; y: 452px; width: 182px; height: 32px; text <=> root.anim_fishing; }
-            Text { x: 212px; y: 432px; text: "Reel"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 212px; y: 452px; width: 182px; height: 32px; text <=> root.anim_fishing_reel; }
-            Text { x: 412px; y: 432px; text: "Caught"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 412px; y: 452px; width: 182px; height: 32px; text <=> root.anim_fishing_caught; }
-            Text { x: 612px; y: 432px; text: "Missed"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 612px; y: 452px; width: 182px; height: 32px; text <=> root.anim_fishing_missed; }
+            Text { x: 0px; y: 384px; text: "Fishing"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 0px; y: 404px; width: 188px; height: 32px; text <=> root.anim_fishing; }
+            Text { x: 204px; y: 384px; text: "Reel"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 204px; y: 404px; width: 188px; height: 32px; text <=> root.anim_fishing_reel; }
+            Text { x: 408px; y: 384px; text: "Caught"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 408px; y: 404px; width: 188px; height: 32px; text <=> root.anim_fishing_caught; }
+            Text { x: 612px; y: 384px; text: "Missed"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 612px; y: 404px; width: 188px; height: 32px; text <=> root.anim_fishing_missed; }
 
-            ActionButton { x: 594px; y: 494px; width: 96px; height: 34px; text: "Save"; clicked => { root.save_basic(); } }
-            ActionButton { x: 702px; y: 494px; width: 96px; height: 34px; text: "Reset"; clicked => { root.reset_basic(); } }
+            ActionButton { x: 592px; y: 464px; width: 96px; height: 40px; text: "Save"; clicked => { root.save_basic(); } }
+            ActionButton { x: 704px; y: 464px; width: 96px; height: 40px; text: "Reset"; clicked => { root.reset_basic(); } }
         }
 
         if active_tab == 1: Rectangle {
-            x: 36px;
-            y: 132px;
-            width: 808px;
-            height: 508px;
+            x: 40px;
+            y: 160px;
+            width: 800px;
+            height: 556px;
             background: transparent;
 
-            Text { x: 12px; y: 0px; text: "Pomodoro"; font-size: 16px; font-weight: 600; color: #111827; }
-            Text { x: 12px; y: 28px; width: 700px; text: "Set focus and break lengths, then control the active timer."; font-size: 13px; color: #6b7280; }
+            Text { x: 0px; y: 0px; text: "Pomodoro"; font-size: 16px; font-weight: 600; color: #111827; }
+            Text { x: 0px; y: 26px; width: 760px; text: "Set focus and break lengths, then control the active timer."; font-size: 13px; color: #6b7280; }
 
-            Text { x: 12px; y: 82px; text: "Focus min"; color: #6b7280; font-size: 12px; }
+            Text { x: 0px; y: 72px; text: "Focus min"; color: #6b7280; font-size: 12px; }
             PointerSpinBox {
-                x: 12px; y: 104px; width: 120px; height: 34px;
+                x: 0px; y: 92px; width: 120px; height: 32px;
                 minimum: 1; maximum: 240; value <=> root.focus_minutes;
             }
-            Text { x: 150px; y: 82px; text: "Short break"; color: #6b7280; font-size: 12px; }
+            Text { x: 136px; y: 72px; text: "Short break"; color: #6b7280; font-size: 12px; }
             PointerSpinBox {
-                x: 150px; y: 104px; width: 120px; height: 34px;
+                x: 136px; y: 92px; width: 120px; height: 32px;
                 minimum: 1; maximum: 240; value <=> root.short_break_minutes;
             }
-            Text { x: 288px; y: 82px; text: "Long break"; color: #6b7280; font-size: 12px; }
+            Text { x: 272px; y: 72px; text: "Long break"; color: #6b7280; font-size: 12px; }
             PointerSpinBox {
-                x: 288px; y: 104px; width: 120px; height: 34px;
+                x: 272px; y: 92px; width: 120px; height: 32px;
                 minimum: 1; maximum: 240; value <=> root.long_break_minutes;
             }
-            ActionButton { x: 430px; y: 104px; width: 96px; height: 34px; text: "Save"; clicked => { root.save_pomodoro(); } }
+            ActionButton { x: 408px; y: 92px; width: 112px; height: 32px; text: "Save"; clicked => { root.save_pomodoro(); } }
 
-            Rectangle { x: 12px; y: 178px; width: 520px; height: 96px; background: #f2f5fa; border-radius: 10px; border-width: 1px; border-color: #dae0ea; }
-            Text { x: 32px; y: 198px; width: 480px; text: root.pomodoro_status; color: #111827; font-size: 14px; }
+            Rectangle { x: 0px; y: 176px; width: 520px; height: 96px; background: #f2f5fa; border-radius: 12px; border-width: 1px; border-color: #dae0ea; }
+            Text { x: 24px; y: 200px; width: 472px; text: root.pomodoro_status; color: #111827; font-size: 14px; }
 
-            ActionButton { x: 12px; y: 312px; width: 110px; height: 34px; text: "Start"; clicked => { root.start_pomodoro(); } }
-            ActionButton { x: 132px; y: 312px; width: 110px; height: 34px; text: root.pause_resume_label; clicked => { root.pause_resume_pomodoro(); } }
-            ActionButton { x: 252px; y: 312px; width: 110px; height: 34px; text: "Skip"; clicked => { root.skip_pomodoro(); } }
-            ActionButton { x: 372px; y: 312px; width: 110px; height: 34px; text: "Stop"; clicked => { root.stop_pomodoro(); } }
+            ActionButton { x: 0px; y: 312px; width: 112px; height: 40px; text: "Start"; clicked => { root.start_pomodoro(); } }
+            ActionButton { x: 128px; y: 312px; width: 112px; height: 40px; text: root.pause_resume_label; clicked => { root.pause_resume_pomodoro(); } }
+            ActionButton { x: 256px; y: 312px; width: 112px; height: 40px; text: "Skip"; clicked => { root.skip_pomodoro(); } }
+            ActionButton { x: 384px; y: 312px; width: 112px; height: 40px; text: "Stop"; clicked => { root.stop_pomodoro(); } }
         }
 
         if active_tab == 2: Rectangle {
-            x: 36px;
-            y: 132px;
-            width: 808px;
-            height: 508px;
+            x: 40px;
+            y: 160px;
+            width: 800px;
+            height: 556px;
             background: transparent;
 
-            Text { x: 12px; y: 0px; text: "Provider profiles"; font-size: 16px; font-weight: 600; color: #111827; }
-            Text { x: 12px; y: 28px; width: 700px; text: "Keep Claude Code provider settings tidy without leaving the pet."; font-size: 13px; color: #6b7280; }
+            Text { x: 0px; y: 0px; text: "Provider profiles"; font-size: 16px; font-weight: 600; color: #111827; }
+            Text { x: 0px; y: 26px; width: 760px; text: "Keep Claude Code provider settings tidy without leaving the pet."; font-size: 13px; color: #6b7280; }
 
-            Text { x: 12px; y: 72px; text: "Profile"; color: #6b7280; font-size: 12px; }
+            Text { x: 0px; y: 72px; text: "Profile"; color: #6b7280; font-size: 12px; }
             PointerComboBox {
-                x: 12px; y: 94px; width: 340px; height: 34px;
+                x: 0px; y: 92px; width: 340px; height: 32px;
                 model: root.profile_model;
                 current-index <=> root.selected_profile_index;
                 selected(index) => { root.select_profile(index); }
             }
-            Text { x: 364px; y: 101px; width: 116px; text: root.profile_position; color: #6b7280; font-size: 12px; }
-            ActionButton { x: 500px; y: 94px; width: 72px; height: 32px; text: "New"; clicked => { root.new_profile(); } }
-            ActionButton { x: 584px; y: 94px; width: 128px; height: 32px; text: "Import Current"; clicked => { root.import_profile(); } }
-            ActionButton { x: 724px; y: 94px; width: 70px; height: 32px; text: "Delete"; clicked => { root.delete_profile(); } }
+            Text { x: 352px; y: 98px; width: 110px; text: root.profile_position; color: #6b7280; font-size: 12px; }
+            ActionButton { x: 472px; y: 92px; width: 72px; height: 32px; text: "New"; clicked => { root.new_profile(); } }
+            ActionButton { x: 552px; y: 92px; width: 130px; height: 32px; text: "Import Current"; clicked => { root.import_profile(); } }
+            ActionButton { x: 690px; y: 92px; width: 110px; height: 32px; text: "Delete"; clicked => { root.delete_profile(); } }
 
-            Text { x: 12px; y: 144px; text: "Profile ID"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 12px; y: 164px; width: 382px; height: 34px; text <=> root.profile_id; }
-            Text { x: 412px; y: 144px; text: "Name"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 412px; y: 164px; width: 382px; height: 34px; text <=> root.profile_name; }
+            Text { x: 0px; y: 136px; text: "Profile ID"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 0px; y: 156px; width: 392px; height: 32px; text <=> root.profile_id; }
+            Text { x: 408px; y: 136px; text: "Name"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 408px; y: 156px; width: 392px; height: 32px; text <=> root.profile_name; }
 
-            Text { x: 12px; y: 208px; text: "Model"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 12px; y: 228px; width: 382px; height: 34px; text <=> root.model; }
-            Text { x: 412px; y: 208px; text: "Base URL"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 412px; y: 228px; width: 382px; height: 34px; text <=> root.base_url; }
+            Text { x: 0px; y: 200px; text: "Model"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 0px; y: 220px; width: 392px; height: 32px; text <=> root.model; }
+            Text { x: 408px; y: 200px; text: "Base URL"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 408px; y: 220px; width: 392px; height: 32px; text <=> root.base_url; }
 
-            Text { x: 12px; y: 272px; text: "API key"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 12px; y: 292px; width: 382px; height: 34px; input-type: InputType.password; text <=> root.api_key; }
-            Text { x: 412px; y: 272px; text: "Auth token (proxy)"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 412px; y: 292px; width: 382px; height: 34px; input-type: InputType.password; text <=> root.auth_token; }
+            Text { x: 0px; y: 264px; text: "API key"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 0px; y: 284px; width: 392px; height: 32px; input-type: InputType.password; text <=> root.api_key; }
+            Text { x: 408px; y: 264px; text: "Auth token (proxy)"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 408px; y: 284px; width: 392px; height: 32px; input-type: InputType.password; text <=> root.auth_token; }
 
-            Text { x: 12px; y: 336px; text: "Opus"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 12px; y: 356px; width: 248px; height: 34px; text <=> root.opus_model; }
-            Text { x: 280px; y: 336px; text: "Sonnet"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 280px; y: 356px; width: 248px; height: 34px; text <=> root.sonnet_model; }
-            Text { x: 548px; y: 336px; text: "Haiku"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 548px; y: 356px; width: 246px; height: 34px; text <=> root.haiku_model; }
+            Text { x: 0px; y: 328px; text: "Opus"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 0px; y: 348px; width: 256px; height: 32px; text <=> root.opus_model; }
+            Text { x: 272px; y: 328px; text: "Sonnet"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 272px; y: 348px; width: 256px; height: 32px; text <=> root.sonnet_model; }
+            Text { x: 544px; y: 328px; text: "Haiku"; color: #6b7280; font-size: 12px; }
+            MonoLineEdit { x: 544px; y: 348px; width: 256px; height: 32px; text <=> root.haiku_model; }
 
-            Text { x: 12px; y: 400px; text: "Extra env"; color: #6b7280; font-size: 12px; }
-            MonoTextEdit { x: 12px; y: 420px; width: 382px; height: 64px; text <=> root.extra_env; }
-            Text { x: 412px; y: 400px; text: "OpenAI body"; color: #6b7280; font-size: 12px; }
-            MonoTextEdit { x: 412px; y: 420px; width: 382px; height: 64px; text <=> root.openai_extra_body; }
+            Text { x: 0px; y: 392px; text: "Extra env"; color: #6b7280; font-size: 12px; }
+            MonoTextEdit { x: 0px; y: 412px; width: 392px; height: 72px; text <=> root.extra_env; }
+            Text { x: 408px; y: 392px; text: "OpenAI body"; color: #6b7280; font-size: 12px; }
+            MonoTextEdit { x: 408px; y: 412px; width: 392px; height: 72px; text <=> root.openai_extra_body; }
 
-            ActionButton { x: 594px; y: 500px; width: 96px; height: 34px; text: "Save"; clicked => { root.save_profile(); } }
-            ActionButton { x: 702px; y: 500px; width: 96px; height: 34px; text: "Use"; clicked => { root.use_profile(); } }
+            ActionButton { x: 592px; y: 504px; width: 96px; height: 40px; text: "Save"; clicked => { root.save_profile(); } }
+            ActionButton { x: 704px; y: 504px; width: 96px; height: 40px; text: "Use"; clicked => { root.use_profile(); } }
         }
 
         if active_tab == 3: Rectangle {
-            x: 36px;
-            y: 132px;
-            width: 808px;
-            height: 508px;
+            x: 40px;
+            y: 160px;
+            width: 800px;
+            height: 556px;
             background: transparent;
 
-            Text { x: 12px; y: 0px; text: "Session ledger"; font-size: 16px; font-weight: 600; color: #111827; }
-            Text { x: 12px; y: 26px; width: 700px; text: "A quiet local record of Claude Code activity observed by claudie."; font-size: 13px; color: #6b7280; }
+            Text { x: 0px; y: 0px; text: "Session ledger"; font-size: 16px; font-weight: 600; color: #111827; }
+            Text { x: 0px; y: 26px; width: 760px; text: "A quiet local record of Claude Code activity observed by claudie."; font-size: 13px; color: #6b7280; }
 
-            Rectangle { x: 12px; y: 64px; width: 378px; height: 236px; background: #f2f5fa; border-radius: 10px; border-width: 1px; border-color: #dae0ea; }
-            Text { x: 32px; y: 82px; width: 330px; text: root.stats_today_title; color: #111827; font-size: 14px; font-weight: 600; }
-            Text { x: 32px; y: 108px; width: 330px; height: 28px; text: root.stats_today_summary; overflow: elide; color: #111827; font-size: 12px; }
-            StatBarRow { x: 32px; y: 144px; width: 330px; height: 18px; label: "Write"; value: root.stats_today_write_value; bar: root.stats_today_write_bar; accent: #2a9d8f; }
-            StatBarRow { x: 32px; y: 168px; width: 330px; height: 18px; label: "Bash"; value: root.stats_today_bash_value; bar: root.stats_today_bash_bar; accent: #4577c3; }
-            StatBarRow { x: 32px; y: 192px; width: 330px; height: 18px; label: "Search"; value: root.stats_today_search_value; bar: root.stats_today_search_bar; accent: #d88a24; }
-            StatBarRow { x: 32px; y: 216px; width: 330px; height: 18px; label: "Agent"; value: root.stats_today_subagent_value; bar: root.stats_today_subagent_bar; accent: #7c5cc4; }
-            StatBarRow { x: 32px; y: 240px; width: 330px; height: 18px; label: "Perm"; value: root.stats_today_permission_value; bar: root.stats_today_permission_bar; accent: #0a84ff; }
-            StatBarRow { x: 32px; y: 264px; width: 330px; height: 18px; label: "Choice"; value: root.stats_today_choice_value; bar: root.stats_today_choice_bar; accent: #6b8f3f; }
+            Rectangle { x: 0px; y: 72px; width: 392px; height: 240px; background: #f2f5fa; border-radius: 12px; border-width: 1px; border-color: #dae0ea; }
+            Text { x: 24px; y: 92px; width: 344px; text: root.stats_today_title; color: #111827; font-size: 14px; font-weight: 600; }
+            Text { x: 24px; y: 116px; width: 344px; height: 28px; text: root.stats_today_summary; overflow: elide; color: #111827; font-size: 12px; }
+            StatBarRow { x: 24px; y: 152px; width: 344px; height: 20px; label: "Write"; value: root.stats_today_write_value; bar: root.stats_today_write_bar; accent: #2a9d8f; }
+            StatBarRow { x: 24px; y: 176px; width: 344px; height: 20px; label: "Bash"; value: root.stats_today_bash_value; bar: root.stats_today_bash_bar; accent: #4577c3; }
+            StatBarRow { x: 24px; y: 200px; width: 344px; height: 20px; label: "Search"; value: root.stats_today_search_value; bar: root.stats_today_search_bar; accent: #d88a24; }
+            StatBarRow { x: 24px; y: 224px; width: 344px; height: 20px; label: "Agent"; value: root.stats_today_subagent_value; bar: root.stats_today_subagent_bar; accent: #7c5cc4; }
+            StatBarRow { x: 24px; y: 248px; width: 344px; height: 20px; label: "Perm"; value: root.stats_today_permission_value; bar: root.stats_today_permission_bar; accent: #0a84ff; }
+            StatBarRow { x: 24px; y: 272px; width: 344px; height: 20px; label: "Choice"; value: root.stats_today_choice_value; bar: root.stats_today_choice_bar; accent: #6b8f3f; }
 
-            Rectangle { x: 418px; y: 64px; width: 378px; height: 236px; background: #f2f5fa; border-radius: 10px; border-width: 1px; border-color: #dae0ea; }
-            Text { x: 438px; y: 82px; width: 330px; text: root.stats_recent_title; color: #111827; font-size: 14px; font-weight: 600; }
-            Text { x: 438px; y: 108px; width: 330px; height: 28px; text: root.stats_recent_summary; overflow: elide; color: #111827; font-size: 12px; }
-            StatBarRow { x: 438px; y: 144px; width: 330px; height: 18px; label: "Write"; value: root.stats_recent_write_value; bar: root.stats_recent_write_bar; accent: #2a9d8f; }
-            StatBarRow { x: 438px; y: 168px; width: 330px; height: 18px; label: "Bash"; value: root.stats_recent_bash_value; bar: root.stats_recent_bash_bar; accent: #4577c3; }
-            StatBarRow { x: 438px; y: 192px; width: 330px; height: 18px; label: "Search"; value: root.stats_recent_search_value; bar: root.stats_recent_search_bar; accent: #d88a24; }
-            StatBarRow { x: 438px; y: 216px; width: 330px; height: 18px; label: "Agent"; value: root.stats_recent_subagent_value; bar: root.stats_recent_subagent_bar; accent: #7c5cc4; }
-            StatBarRow { x: 438px; y: 240px; width: 330px; height: 18px; label: "Perm"; value: root.stats_recent_permission_value; bar: root.stats_recent_permission_bar; accent: #0a84ff; }
-            StatBarRow { x: 438px; y: 264px; width: 330px; height: 18px; label: "Choice"; value: root.stats_recent_choice_value; bar: root.stats_recent_choice_bar; accent: #6b8f3f; }
+            Rectangle { x: 408px; y: 72px; width: 392px; height: 240px; background: #f2f5fa; border-radius: 12px; border-width: 1px; border-color: #dae0ea; }
+            Text { x: 432px; y: 92px; width: 344px; text: root.stats_recent_title; color: #111827; font-size: 14px; font-weight: 600; }
+            Text { x: 432px; y: 116px; width: 344px; height: 28px; text: root.stats_recent_summary; overflow: elide; color: #111827; font-size: 12px; }
+            StatBarRow { x: 432px; y: 152px; width: 344px; height: 20px; label: "Write"; value: root.stats_recent_write_value; bar: root.stats_recent_write_bar; accent: #2a9d8f; }
+            StatBarRow { x: 432px; y: 176px; width: 344px; height: 20px; label: "Bash"; value: root.stats_recent_bash_value; bar: root.stats_recent_bash_bar; accent: #4577c3; }
+            StatBarRow { x: 432px; y: 200px; width: 344px; height: 20px; label: "Search"; value: root.stats_recent_search_value; bar: root.stats_recent_search_bar; accent: #d88a24; }
+            StatBarRow { x: 432px; y: 224px; width: 344px; height: 20px; label: "Agent"; value: root.stats_recent_subagent_value; bar: root.stats_recent_subagent_bar; accent: #7c5cc4; }
+            StatBarRow { x: 432px; y: 248px; width: 344px; height: 20px; label: "Perm"; value: root.stats_recent_permission_value; bar: root.stats_recent_permission_bar; accent: #0a84ff; }
+            StatBarRow { x: 432px; y: 272px; width: 344px; height: 20px; label: "Choice"; value: root.stats_recent_choice_value; bar: root.stats_recent_choice_bar; accent: #6b8f3f; }
 
-            Rectangle { x: 12px; y: 322px; width: 378px; height: 150px; background: #ffffff; border-radius: 10px; border-width: 1px; border-color: #dae0ea; }
-            Text { x: 32px; y: 340px; width: 330px; text: "Tokens today"; color: #111827; font-size: 14px; font-weight: 600; }
-            StatBarRow { x: 32px; y: 370px; width: 330px; height: 17px; label: "Input"; value: root.stats_today_input_value; bar: root.stats_today_input_bar; accent: #2a9d8f; }
-            StatBarRow { x: 32px; y: 392px; width: 330px; height: 17px; label: "Output"; value: root.stats_today_output_value; bar: root.stats_today_output_bar; accent: #4577c3; }
-            StatBarRow { x: 32px; y: 414px; width: 330px; height: 17px; label: "Cache W"; value: root.stats_today_cache_write_value; bar: root.stats_today_cache_write_bar; accent: #d88a24; }
-            StatBarRow { x: 32px; y: 436px; width: 330px; height: 17px; label: "Cache R"; value: root.stats_today_cache_read_value; bar: root.stats_today_cache_read_bar; accent: #7c5cc4; }
+            Rectangle { x: 0px; y: 328px; width: 392px; height: 160px; background: #ffffff; border-radius: 12px; border-width: 1px; border-color: #dae0ea; }
+            Text { x: 24px; y: 348px; width: 344px; text: "Tokens today"; color: #111827; font-size: 14px; font-weight: 600; }
+            StatBarRow { x: 24px; y: 378px; width: 344px; height: 18px; label: "Input"; value: root.stats_today_input_value; bar: root.stats_today_input_bar; accent: #2a9d8f; }
+            StatBarRow { x: 24px; y: 400px; width: 344px; height: 18px; label: "Output"; value: root.stats_today_output_value; bar: root.stats_today_output_bar; accent: #4577c3; }
+            StatBarRow { x: 24px; y: 422px; width: 344px; height: 18px; label: "Cache W"; value: root.stats_today_cache_write_value; bar: root.stats_today_cache_write_bar; accent: #d88a24; }
+            StatBarRow { x: 24px; y: 444px; width: 344px; height: 18px; label: "Cache R"; value: root.stats_today_cache_read_value; bar: root.stats_today_cache_read_bar; accent: #7c5cc4; }
 
-            Rectangle { x: 418px; y: 322px; width: 378px; height: 150px; background: #ffffff; border-radius: 10px; border-width: 1px; border-color: #dae0ea; }
-            Text { x: 438px; y: 340px; width: 330px; text: "Tokens last 7 days"; color: #111827; font-size: 14px; font-weight: 600; }
-            StatBarRow { x: 438px; y: 370px; width: 330px; height: 17px; label: "Input"; value: root.stats_recent_input_value; bar: root.stats_recent_input_bar; accent: #2a9d8f; }
-            StatBarRow { x: 438px; y: 392px; width: 330px; height: 17px; label: "Output"; value: root.stats_recent_output_value; bar: root.stats_recent_output_bar; accent: #4577c3; }
-            StatBarRow { x: 438px; y: 414px; width: 330px; height: 17px; label: "Cache W"; value: root.stats_recent_cache_write_value; bar: root.stats_recent_cache_write_bar; accent: #d88a24; }
-            StatBarRow { x: 438px; y: 436px; width: 330px; height: 17px; label: "Cache R"; value: root.stats_recent_cache_read_value; bar: root.stats_recent_cache_read_bar; accent: #7c5cc4; }
+            Rectangle { x: 408px; y: 328px; width: 392px; height: 160px; background: #ffffff; border-radius: 12px; border-width: 1px; border-color: #dae0ea; }
+            Text { x: 432px; y: 348px; width: 344px; text: "Tokens last 7 days"; color: #111827; font-size: 14px; font-weight: 600; }
+            StatBarRow { x: 432px; y: 378px; width: 344px; height: 18px; label: "Input"; value: root.stats_recent_input_value; bar: root.stats_recent_input_bar; accent: #2a9d8f; }
+            StatBarRow { x: 432px; y: 400px; width: 344px; height: 18px; label: "Output"; value: root.stats_recent_output_value; bar: root.stats_recent_output_bar; accent: #4577c3; }
+            StatBarRow { x: 432px; y: 422px; width: 344px; height: 18px; label: "Cache W"; value: root.stats_recent_cache_write_value; bar: root.stats_recent_cache_write_bar; accent: #d88a24; }
+            StatBarRow { x: 432px; y: 444px; width: 344px; height: 18px; label: "Cache R"; value: root.stats_recent_cache_read_value; bar: root.stats_recent_cache_read_bar; accent: #7c5cc4; }
         }
 
         Text {
-            x: 36px;
-            y: 652px;
-            width: 808px;
+            x: 40px;
+            y: 724px;
+            width: 800px;
             height: 20px;
             text: root.status_message;
             color: #6b7280;
@@ -730,28 +737,67 @@ slint::slint! {
         desc_lines: int,
     }
 
+    struct DiffLine {
+        text: string,
+        // 0 context, 1 added, 2 removed.
+        tone: int,
+        // Wrapped line count estimated in Rust (Slint Text does not grow).
+        lines: int,
+    }
+
     struct MarkdownBlockData {
-        // 0 paragraph, 1-3 heading level, 4 bullet, 5 code, 6 quote.
+        // 0 paragraph, 1-3 heading level, 4 bullet, 5 code, 6 quote, 7 diff.
         kind: int,
         text: string,
         indent: int,
         lines: int,
+        // Populated only for diff blocks (kind 7).
+        diff_lines: [DiffLine],
     }
 
     component MarkdownBlockRow inherits Rectangle {
         in property <MarkdownBlockData> data;
 
         property <bool> is_heading: data.kind >= 1 && data.kind <= 3;
+        property <bool> is_code: data.kind == 5 || data.kind == 7;
         property <length> line_h: data.kind == 1 ? 25px
             : (data.kind == 2 ? 22px
             : (data.kind == 3 ? 20px
-            : (data.kind == 5 ? 17px : 19px)));
+            : (self.is_code ? 17px : 19px)));
 
         height: data.lines * self.line_h
-            + (data.kind == 5 ? 16px : 0px)
+            + (self.is_code ? 16px : 0px)
             + (self.is_heading ? 6px : 0px);
-        background: data.kind == 5 ? #e9eef5 : transparent;
-        border-radius: 6px;
+        background: data.kind == 5 ? #e9eef5 : (data.kind == 7 ? #f6f8fa : transparent);
+        border-radius: 8px;
+        border-width: data.kind == 7 ? 1px : 0px;
+        border-color: #dde3ec;
+        clip: data.kind == 7;
+
+        if data.kind == 7: VerticalLayout {
+            x: 0px; y: 8px;
+            width: parent.width;
+            height: parent.height - 16px;
+            padding: 0px;
+            spacing: 0px;
+            for line in data.diff_lines: Rectangle {
+                height: line.lines * 17px;
+                background: line.tone == 1 ? #e6ffec
+                    : (line.tone == 2 ? #ffebe9 : transparent);
+                Text {
+                    x: 12px; y: 0px;
+                    width: parent.width - 20px;
+                    height: 100%;
+                    text: line.text;
+                    wrap: word-wrap;
+                    vertical-alignment: top;
+                    font-family: "Cascadia Mono, Consolas";
+                    font-size: 12px;
+                    color: line.tone == 1 ? #1a7f37
+                        : (line.tone == 2 ? #cf222e : #57606a);
+                }
+            }
+        }
 
         if data.kind == 5: Text {
             x: 10px; y: 8px;
@@ -764,7 +810,7 @@ slint::slint! {
             color: #111827;
         }
 
-        if data.kind != 5: Text {
+        if data.kind != 5 && data.kind != 7: Text {
             x: data.indent * 14px;
             y: root.is_heading ? 6px : 0px;
             width: parent.width - data.indent * 14px;
@@ -866,8 +912,8 @@ slint::slint! {
         // against this width. Height is user-resizable.
         min-width: 640px;
         max-width: 640px;
-        preferred-height: 620px;
-        min-height: 480px;
+        preferred-height: 640px;
+        min-height: 496px;
         title: "claudie request";
         icon: @image-url("../../assets/icon.ico");
         background: #f4f7fc;
@@ -891,32 +937,36 @@ slint::slint! {
         callback toggle_option(int);
         callback set_other_text(int, string);
 
+        // Card: 16px window margin; inner content keeps a 16px gutter so the
+        // wrapping width (576) stays in sync with prompt_popup.rs constants.
         Rectangle {
-            x: 12px;
-            y: 12px;
-            width: 616px;
-            height: root.height - 24px;
+            x: 16px;
+            y: 16px;
+            width: 608px;
+            height: root.height - 32px;
             background: white;
-            border-radius: 8px;
+            border-radius: 12px;
             border-width: 1px;
             border-color: #e4e8f0;
         }
 
         VerticalLayout {
             x: 32px;
-            y: 26px;
+            y: 32px;
             width: 576px;
-            height: root.height - 52px;
-            spacing: 10px;
+            height: root.height - 64px;
+            spacing: 16px;
 
-            Text { height: 26px; text: root.title_text; font-size: 19px; font-weight: 600; color: #111827; overflow: elide; }
+            Text { height: 28px; text: root.title_text; font-size: 20px; font-weight: 600; color: #111827; overflow: elide; }
             Text { height: 18px; text: root.subtitle_text; font-size: 13px; color: #6b7280; overflow: elide; }
 
+            // Detail vs. options split follows the golden ratio (~3:2): plans
+            // hand the larger share to the detail panel, question lists invert it.
             Rectangle {
-                vertical-stretch: root.detail_dominant ? 3 : 1;
-                min-height: 96px;
+                vertical-stretch: root.detail_dominant ? 3 : 2;
+                min-height: 120px;
                 background: #f2f5fa;
-                border-radius: 8px;
+                border-radius: 12px;
                 border-width: 1px;
                 border-color: #dae0ea;
 
@@ -926,7 +976,7 @@ slint::slint! {
                     height: parent.height - 24px;
                     VerticalLayout {
                         padding: 0px;
-                        spacing: 4px;
+                        spacing: 8px;
                         for block in root.detail_blocks: MarkdownBlockRow {
                             data: block;
                         }
@@ -943,8 +993,8 @@ slint::slint! {
             }
 
             if is_choice: ScrollView {
-                vertical-stretch: root.detail_dominant ? 1 : 3;
-                min-height: 110px;
+                vertical-stretch: root.detail_dominant ? 2 : 3;
+                min-height: 120px;
                 VerticalLayout {
                     padding: 4px;
                     spacing: 8px;
@@ -973,16 +1023,16 @@ slint::slint! {
             }
 
             HorizontalLayout {
-                height: 32px;
-                spacing: 10px;
+                height: 40px;
+                spacing: 12px;
                 alignment: end;
 
-                if !is_choice: ActionButton { width: 88px; text: "Allow"; clicked => { root.allow_once(); } }
-                if !is_choice: ActionButton { width: 100px; text: "Always"; clicked => { root.allow_always(); } }
-                if !is_choice: ActionButton { width: 88px; text: "Deny"; clicked => { root.deny(); } }
+                if !is_choice: ActionButton { width: 96px; text: "Allow"; clicked => { root.allow_once(); } }
+                if !is_choice: ActionButton { width: 104px; text: "Always"; clicked => { root.allow_always(); } }
+                if !is_choice: ActionButton { width: 96px; text: "Deny"; clicked => { root.deny(); } }
 
-                if is_choice: ActionButton { width: 100px; text: "Submit"; enabled: root.submit_enabled; clicked => { root.submit_choice(); } }
-                if is_choice: ActionButton { width: 88px; text: "Cancel"; clicked => { root.cancel_choice(); } }
+                if is_choice: ActionButton { width: 104px; text: "Submit"; enabled: root.submit_enabled; clicked => { root.submit_choice(); } }
+                if is_choice: ActionButton { width: 96px; text: "Cancel"; clicked => { root.cancel_choice(); } }
             }
         }
     }

@@ -9,7 +9,7 @@ use crate::hooks::{
     decide_current_permission, deny_current_choice, set_current_choice_other_text,
     submit_current_choice, toggle_current_choice_option,
 };
-use crate::ui::slint_views::{ChoiceOptionData, MarkdownBlockData, PromptWindow};
+use crate::ui::slint_views::{ChoiceOptionData, DiffLine, MarkdownBlockData, PromptWindow};
 use crate::ui::window_icon::{apply_slint_window_icons, schedule_prompt_window_icon_refresh};
 use crate::util::{MarkdownBlock, MarkdownBlockKind, estimate_wrapped_lines, markdown_blocks};
 
@@ -17,6 +17,7 @@ use crate::util::{MarkdownBlock, MarkdownBlockKind, estimate_wrapped_lines, mark
 // PromptWindow geometry in slint_views.rs (window width is fixed at 640).
 const DETAIL_TEXT_PX: f32 = 530.0;
 const DETAIL_CODE_TEXT_PX: f32 = 510.0;
+const DETAIL_DIFF_TEXT_PX: f32 = 500.0;
 const OPTION_TEXT_PX: f32 = 500.0;
 const HEADER_TEXT_PX: f32 = 540.0;
 
@@ -156,6 +157,14 @@ struct BlockView {
     text: String,
     indent: u8,
     lines: u32,
+    diff_lines: Vec<DiffLineView>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct DiffLineView {
+    text: String,
+    tone: u8,
+    lines: u32,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -178,6 +187,9 @@ fn detail_blocks(markdown: &str) -> Vec<BlockView> {
 }
 
 fn block_view(block: &MarkdownBlock) -> BlockView {
+    if block.kind == MarkdownBlockKind::Diff {
+        return diff_block_view(&block.text);
+    }
     let (kind, font_px) = match block.kind {
         MarkdownBlockKind::Paragraph => (0, 13.0),
         MarkdownBlockKind::Heading(1) => (1, 17.0),
@@ -186,6 +198,7 @@ fn block_view(block: &MarkdownBlock) -> BlockView {
         MarkdownBlockKind::Bullet => (4, 13.0),
         MarkdownBlockKind::Code => (5, 12.0),
         MarkdownBlockKind::Quote => (6, 13.0),
+        MarkdownBlockKind::Diff => unreachable!("handled above"),
     };
     let mono = block.kind == MarkdownBlockKind::Code;
     let avail = if mono {
@@ -198,6 +211,35 @@ fn block_view(block: &MarkdownBlock) -> BlockView {
         text: block.text.clone(),
         indent: block.indent,
         lines: estimate_wrapped_lines(&block.text, font_px, avail, mono),
+        diff_lines: Vec::new(),
+    }
+}
+
+fn diff_block_view(text: &str) -> BlockView {
+    let mut total = 0u32;
+    let diff_lines = text
+        .split('\n')
+        .map(|raw| {
+            let tone = match raw.as_bytes().first() {
+                Some(b'+') => 1,
+                Some(b'-') => 2,
+                _ => 0,
+            };
+            let lines = estimate_wrapped_lines(raw, 12.0, DETAIL_DIFF_TEXT_PX, true);
+            total += lines;
+            DiffLineView {
+                text: raw.to_string(),
+                tone,
+                lines,
+            }
+        })
+        .collect();
+    BlockView {
+        kind: 7,
+        text: String::new(),
+        indent: 0,
+        lines: total,
+        diff_lines,
     }
 }
 
@@ -354,11 +396,23 @@ fn apply_prompt_snapshot(window: &PromptWindow, snapshot: &PromptSnapshot) {
     let block_data: Vec<MarkdownBlockData> = snapshot
         .detail
         .iter()
-        .map(|block| MarkdownBlockData {
-            kind: i32::from(block.kind),
-            text: shared(&block.text),
-            indent: i32::from(block.indent),
-            lines: block.lines as i32,
+        .map(|block| {
+            let diff_lines: Vec<DiffLine> = block
+                .diff_lines
+                .iter()
+                .map(|line| DiffLine {
+                    text: shared(&line.text),
+                    tone: i32::from(line.tone),
+                    lines: line.lines as i32,
+                })
+                .collect();
+            MarkdownBlockData {
+                kind: i32::from(block.kind),
+                text: shared(&block.text),
+                indent: i32::from(block.indent),
+                lines: block.lines as i32,
+                diff_lines: ModelRc::from(Rc::new(VecModel::from(diff_lines))),
+            }
         })
         .collect();
     let blocks: ModelRc<MarkdownBlockData> = ModelRc::from(Rc::new(VecModel::from(block_data)));
