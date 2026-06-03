@@ -161,7 +161,7 @@ impl DailyStats {
 pub(crate) fn tool_stats_kind(tool_name: &str) -> ToolStatsKind {
     let normalized = tool_name.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "task" => ToolStatsKind::Subagent,
+        "task" | "agent" => ToolStatsKind::Subagent,
         "bash" | "shell" => ToolStatsKind::Bash,
         "edit" | "multiedit" | "write" | "notebookedit" => ToolStatsKind::Write,
         "read" | "grep" | "glob" | "ls" | "webfetch" | "websearch" => ToolStatsKind::Search,
@@ -200,4 +200,15 @@ fn today_key() -> String {
         GetLocalTime(&mut time);
     }
     format!("{:04}-{:02}-{:02}", time.wYear, time.wMonth, time.wDay)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subagent_tool_names_map_to_subagent_kind() {
+        assert_eq!(tool_stats_kind("Task"), ToolStatsKind::Subagent);
+        assert_eq!(tool_stats_kind("Agent"), ToolStatsKind::Subagent);
+    }
 }

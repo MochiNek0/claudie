@@ -965,7 +965,7 @@ fn record_daily_stats(state: &mut AppState, event: &str, tool_name: &str) {
 fn mood_for_tool(tool_name: &str) -> PetMood {
     let normalized = tool_name.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "task" => PetMood::Thinking,
+        "task" | "agent" => PetMood::Thinking,
         "bash" | "shell" => PetMood::Building,
         "edit" | "multiedit" | "write" | "notebookedit" => PetMood::Typing,
         "read" | "grep" | "glob" | "ls" | "webfetch" | "websearch" => PetMood::Search,
@@ -1013,7 +1013,8 @@ fn compact_tool_name(tool_name: &str) -> String {
 }
 
 fn mood_for_tool_use(tool_name: &str, payload: &Value) -> PetMood {
-    if !tool_name.trim().eq_ignore_ascii_case("Task") {
+    let trimmed = tool_name.trim();
+    if !trimmed.eq_ignore_ascii_case("Task") && !trimmed.eq_ignore_ascii_case("Agent") {
         return mood_for_tool(tool_name);
     }
 
@@ -1197,6 +1198,7 @@ mod tests {
     #[test]
     fn tool_names_map_to_work_moods() {
         assert_eq!(mood_for_tool("Task"), PetMood::Thinking);
+        assert_eq!(mood_for_tool("Agent"), PetMood::Thinking);
         assert_eq!(mood_for_tool("Bash"), PetMood::Building);
         assert_eq!(mood_for_tool("Edit"), PetMood::Typing);
         assert_eq!(
@@ -1257,6 +1259,18 @@ mod tests {
             hook_activity(
                 "PreToolUse",
                 "Task",
+                &json!({
+                    "tool_input": {
+                        "description": "Delegate research to a subagent"
+                    }
+                })
+            ),
+            Some(HookActivity::StartTool(PetMood::Subagent))
+        );
+        assert_eq!(
+            hook_activity(
+                "PreToolUse",
+                "Agent",
                 &json!({
                     "tool_input": {
                         "description": "Delegate research to a subagent"
