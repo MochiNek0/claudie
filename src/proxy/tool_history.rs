@@ -7,12 +7,13 @@ pub(super) fn should_retry_with_tool_transcript(err: &UpstreamError, request: &V
     if !request_has_tool_history(request) {
         return false;
     }
-    let err = err.message.to_ascii_lowercase();
-    let status_matches = err.contains("http 400") || err.contains("http 422");
-    let shape_matches = ["tool", "tool_call", "messages", "role"]
+    if !matches!(err.status, Some(400) | Some(422)) {
+        return false;
+    }
+    let message = err.message.to_ascii_lowercase();
+    ["tool", "tool_call", "messages", "role"]
         .iter()
-        .any(|needle| err.contains(needle));
-    status_matches && shape_matches
+        .any(|needle| message.contains(needle))
 }
 
 pub(super) fn request_has_tool_history(request: &Value) -> bool {
@@ -154,6 +155,48 @@ mod tests {
                 .unwrap()
                 .contains("README contents")
         );
+    }
+
+    #[test]
+    fn transcript_retry_requires_structured_4xx_status() {
+        let request = json!({
+            "model": "gpt-test",
+            "messages": [{
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": { "name": "Bash", "arguments": "{}" }
+                }]
+            }]
+        });
+
+        // Network-level failure whose text merely mentions "http 400 tool"
+        // must not trigger a transcript retry: real 400/422 responses always
+        // carry a structured status.
+        assert!(!should_retry_with_tool_transcript(
+            &UpstreamError {
+                status: None,
+                message: "connection reset while sending http 400 tool history".to_string(),
+            },
+            &request
+        ));
+        assert!(!should_retry_with_tool_transcript(
+            &UpstreamError {
+                status: Some(500),
+                message: "OpenAI proxy upstream returned HTTP 500: tool messages rejected"
+                    .to_string(),
+            },
+            &request
+        ));
+        assert!(should_retry_with_tool_transcript(
+            &UpstreamError {
+                status: Some(422),
+                message: "OpenAI proxy upstream returned HTTP 422: unknown role".to_string(),
+            },
+            &request
+        ));
     }
 
     #[test]

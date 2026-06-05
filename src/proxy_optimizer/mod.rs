@@ -20,6 +20,9 @@ const MESSAGE_ENVELOPE_CHARS: usize = 24;
 
 #[derive(Clone, Debug)]
 pub(crate) struct OptimizedRequest {
+    /// Request ready to send upstream. `Value::Null` placeholder when
+    /// `pending_summary` is `Some`; callers then use the pending summary's
+    /// `request_with_summary`/`fallback_request` instead.
     pub(crate) request: Value,
     pub(crate) pending_summary: Option<PendingSummary>,
     // Optimizer outcome flags: asserted by the optimizer tests, not read in production.
@@ -153,17 +156,18 @@ pub(crate) fn optimize_openai_request(request: Value, profile: &LlmProfile) -> O
     let mut combined =
         Vec::with_capacity(prefix_messages.len() + old_messages.len() + recent_messages.len());
     combined.extend_from_slice(&prefix_messages);
-    combined.extend_from_slice(&old_messages);
+    combined.extend(old_messages);
     combined.extend_from_slice(&recent_messages);
     set_messages(&mut request, combined);
-    let fallback_request = request.clone();
     OptimizedRequest {
-        request,
+        // The caller only consumes the pending summary's requests, so move the
+        // full request into fallback_request instead of cloning it.
+        request: Value::Null,
         pending_summary: Some(PendingSummary {
             cache_key,
             config,
             summary_request,
-            fallback_request,
+            fallback_request: request,
             prefix_messages,
             recent_messages,
         }),

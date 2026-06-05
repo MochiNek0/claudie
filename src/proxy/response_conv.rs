@@ -50,16 +50,12 @@ pub(super) fn openai_to_anthropic_response(
         content.push(json!({ "type": "text", "text": "" }));
     }
 
-    let finish_reason = choice
-        .get("finish_reason")
-        .and_then(Value::as_str)
-        .unwrap_or("stop");
-    let stop_reason = match finish_reason {
-        "tool_calls" | "function_call" => "tool_use",
-        "length" => "max_tokens",
-        "content_filter" => "stop_sequence",
-        _ => "end_turn",
-    };
+    let stop_reason = map_finish_reason(
+        choice
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("stop"),
+    );
 
     let prompt_tokens = openai
         .pointer("/usage/prompt_tokens")
@@ -89,6 +85,18 @@ pub(super) fn openai_to_anthropic_response(
             "cache_creation_input_tokens": 0
         }
     })
+}
+
+/// Map an OpenAI `finish_reason` to the equivalent Anthropic `stop_reason`.
+/// Shared by the non-streaming and streaming paths so the mapping stays in
+/// one place. Unknown values fall back to `end_turn`.
+pub(super) fn map_finish_reason(reason: &str) -> &'static str {
+    match reason {
+        "tool_calls" | "function_call" => "tool_use",
+        "length" => "max_tokens",
+        "content_filter" => "refusal",
+        _ => "end_turn",
+    }
 }
 
 /// Extract the number of prompt tokens served from the upstream's prompt cache.
@@ -181,6 +189,16 @@ pub(super) fn openai_message_content_to_text(content: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_finish_reasons_to_anthropic_stop_reasons() {
+        assert_eq!(map_finish_reason("tool_calls"), "tool_use");
+        assert_eq!(map_finish_reason("function_call"), "tool_use");
+        assert_eq!(map_finish_reason("length"), "max_tokens");
+        assert_eq!(map_finish_reason("content_filter"), "refusal");
+        assert_eq!(map_finish_reason("stop"), "end_turn");
+        assert_eq!(map_finish_reason("weird_custom_reason"), "end_turn");
+    }
 
     #[test]
     fn converts_openai_tool_call_response() {

@@ -9,12 +9,72 @@ use crate::app::AppState;
 use crate::settings::LlmProfile;
 
 use super::capability_cache::save_tool_history_capability;
-use super::http::{shorten_for_error, write_json_response};
-use super::record_proxy_error;
+use super::http::shorten_for_error;
 use super::request_conv::estimate_request_input_tokens;
-use super::response_conv::cached_input_tokens;
+use super::response_conv::{cached_input_tokens, map_finish_reason};
 use super::tool_history::{should_retry_with_tool_transcript, tool_history_as_text_transcript};
-use super::upstream::{call_openai_streaming, proxy_status_for_upstream_error};
+use super::upstream::call_openai_streaming;
+use super::{record_proxy_error, write_upstream_error};
+
+/// Upper bound for a single SSE line from the upstream. Normal chunks are a
+/// few KB; the generous limit only guards against a broken upstream streaming
+/// an endless line into memory.
+const MAX_SSE_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+enum SseLine {
+    Eof,
+    Line,
+    TooLong,
+}
+
+/// Read one `\n`-terminated line into `line`, giving up once it exceeds `cap`
+/// bytes. Unlike `BufRead::read_line`, the cap is enforced while reading, so a
+/// broken upstream cannot grow an endless line into memory before the check.
+fn read_sse_line<R: BufRead>(
+    reader: &mut R,
+    line: &mut String,
+    cap: usize,
+) -> std::io::Result<SseLine> {
+    let mut bytes = Vec::new();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if bytes.is_empty() {
+                return Ok(SseLine::Eof);
+            }
+            return line_from_bytes(bytes, line);
+        }
+        match available.iter().position(|&byte| byte == b'\n') {
+            Some(pos) => {
+                bytes.extend_from_slice(&available[..=pos]);
+                reader.consume(pos + 1);
+                return line_from_bytes(bytes, line);
+            }
+            None => {
+                let len = available.len();
+                bytes.extend_from_slice(available);
+                reader.consume(len);
+                if bytes.len() > cap {
+                    return Ok(SseLine::TooLong);
+                }
+            }
+        }
+    }
+}
+
+fn line_from_bytes(bytes: Vec<u8>, line: &mut String) -> std::io::Result<SseLine> {
+    match String::from_utf8(bytes) {
+        Ok(text) => {
+            *line = text;
+            Ok(SseLine::Line)
+        }
+        // Match BufRead::read_line, which fails on invalid UTF-8.
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        )),
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_streaming_request(
@@ -42,23 +102,13 @@ pub(super) fn run_streaming_request(
                 }
                 Err(retry_err) => {
                     let combined = format!("{err}; text tool transcript retry failed: {retry_err}");
-                    record_proxy_error(state, combined.clone());
-                    let _ = write_json_response(
-                        stream,
-                        proxy_status_for_upstream_error(&retry_err),
-                        json!({ "error": combined }),
-                    );
+                    write_upstream_error(stream, state, &retry_err, combined);
                 }
             }
         }
         Err(err) => {
             let message = err.to_string();
-            record_proxy_error(state, message.clone());
-            let _ = write_json_response(
-                stream,
-                proxy_status_for_upstream_error(&err),
-                json!({ "error": message }),
-            );
+            write_upstream_error(stream, state, &err, message);
         }
     }
 }
@@ -158,12 +208,21 @@ struct StreamTranslator<'a, W: Write> {
     thinking_block_index: Option<usize>,
     text_block_index: Option<usize>,
     next_block_index: usize,
+    /// Keyed by the upstream `index`, or by a synthetic slot for upstreams
+    /// that omit `index` on tool_call deltas (see `resolve_tool_slot`).
     tool_calls_by_openai_index: HashMap<u64, ToolCallState>,
+    /// tool_call id → slot, for index-less deltas that repeat a known id.
+    id_to_slot: Vec<(String, u64)>,
+    last_tool_slot: Option<u64>,
+    /// Synthetic slots start far above any real upstream index so the two
+    /// key spaces never collide when an upstream mixes both styles.
+    synthetic_next: u64,
     input_tokens: u64,
     output_tokens: u64,
     cache_read_tokens: u64,
     stop_reason: Option<&'static str>,
     error_message: Option<String>,
+    malformed_chunk_count: usize,
 }
 
 impl<'a, W: Write> StreamTranslator<'a, W> {
@@ -179,21 +238,30 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
             text_block_index: None,
             next_block_index: 0,
             tool_calls_by_openai_index: HashMap::new(),
+            id_to_slot: Vec::new(),
+            last_tool_slot: None,
+            synthetic_next: 1 << 40,
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
             stop_reason: None,
             error_message: None,
+            malformed_chunk_count: 0,
         }
     }
 
     fn run<R: BufRead>(&mut self, mut reader: R) -> std::io::Result<()> {
         let mut line = String::new();
         loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {}
+            match read_sse_line(&mut reader, &mut line, MAX_SSE_LINE_BYTES) {
+                Ok(SseLine::Eof) => break,
+                Ok(SseLine::Line) => {}
+                Ok(SseLine::TooLong) => {
+                    self.error_message.get_or_insert_with(|| {
+                        "upstream sent an oversized SSE line; stream truncated".to_string()
+                    });
+                    break;
+                }
                 Err(err) => {
                     if is_client_disconnect(&err) {
                         return Ok(());
@@ -214,7 +282,12 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
             }
             let chunk: Value = match serde_json::from_str(payload) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(_) => {
+                    // Hot path: only count here; one summary line is surfaced
+                    // via error_message after the stream ends.
+                    self.malformed_chunk_count += 1;
+                    continue;
+                }
             };
             if let Some(error) = chunk.get("error") {
                 let _ = self.emit_stream_error(error);
@@ -311,9 +384,50 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
         Ok(())
     }
 
+    /// Map a tool_call delta to a stable slot key. Most upstreams tag every
+    /// delta with `index`; some OpenAI-compatible servers omit it, sending the
+    /// id only on the first frame of each call. Without a fallback, all such
+    /// calls would collapse into slot 0 and their arguments would interleave.
+    fn resolve_tool_slot(&mut self, explicit_index: Option<u64>, id: Option<&str>) -> u64 {
+        let id = id.filter(|value| !value.is_empty());
+        let known = id.and_then(|id| {
+            self.id_to_slot
+                .iter()
+                .find_map(|(known, slot)| (known == id).then_some(*slot))
+        });
+        let slot = if let Some(index) = explicit_index {
+            index
+        } else if let Some(slot) = known {
+            slot
+        } else if id.is_some() {
+            // A fresh id without an index opens a new tool call.
+            self.allocate_synthetic_slot()
+        } else if let Some(slot) = self.last_tool_slot {
+            // Argument fragments often arrive with neither index nor id; they
+            // belong to the most recent call.
+            slot
+        } else {
+            self.allocate_synthetic_slot()
+        };
+        if known.is_none() {
+            if let Some(id) = id {
+                self.id_to_slot.push((id.to_string(), slot));
+            }
+        }
+        self.last_tool_slot = Some(slot);
+        slot
+    }
+
+    fn allocate_synthetic_slot(&mut self) -> u64 {
+        let slot = self.synthetic_next;
+        self.synthetic_next += 1;
+        slot
+    }
+
     fn absorb_tool_call(&mut self, tc: &Value) -> std::io::Result<()> {
-        let openai_index = tc.get("index").and_then(Value::as_u64).unwrap_or(0);
+        let explicit_index = tc.get("index").and_then(Value::as_u64);
         let id = tc.get("id").and_then(Value::as_str);
+        let slot_key = self.resolve_tool_slot(explicit_index, id);
         let name = tc.pointer("/function/name").and_then(Value::as_str);
         let arguments = tc
             .pointer("/function/arguments")
@@ -323,7 +437,7 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
         let delta = {
             let tool_call = self
                 .tool_calls_by_openai_index
-                .entry(openai_index)
+                .entry(slot_key)
                 .or_insert_with(|| {
                     let block_index = self.next_block_index;
                     self.next_block_index += 1;
@@ -552,6 +666,15 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
     }
 
     fn finalize(&mut self) -> std::io::Result<()> {
+        if self.malformed_chunk_count > 0 {
+            // A real mid-stream error message takes priority over this summary.
+            self.error_message.get_or_insert_with(|| {
+                format!(
+                    "skipped {} malformed SSE chunk(s) from upstream",
+                    self.malformed_chunk_count
+                )
+            });
+        }
         if !self.started {
             self.emit_message_start()?;
         }
@@ -580,15 +703,6 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
         write!(self.out, "event: {event}\n")?;
         write!(self.out, "data: {data}\n\n")?;
         self.out.flush()
-    }
-}
-
-fn map_finish_reason(reason: &str) -> &'static str {
-    match reason {
-        "tool_calls" | "function_call" => "tool_use",
-        "length" => "max_tokens",
-        "content_filter" => "stop_sequence",
-        _ => "end_turn",
     }
 }
 
@@ -830,6 +944,78 @@ mod tests {
     }
 
     #[test]
+    fn translator_separates_indexless_tool_calls_by_id() {
+        // Some OpenAI-compatible upstreams omit `index` on tool_call deltas.
+        // Two calls with distinct ids must land in distinct blocks instead of
+        // collapsing into slot 0.
+        let chunks = vec![
+            json!({
+                "id": "chatcmpl-1",
+                "choices": [{ "delta": { "tool_calls": [{
+                    "id": "call_a", "type": "function",
+                    "function": { "name": "Read", "arguments": "{}" }
+                }] } }]
+            }),
+            json!({
+                "id": "chatcmpl-1",
+                "choices": [{ "delta": { "tool_calls": [{
+                    "id": "call_b", "type": "function",
+                    "function": { "name": "Bash", "arguments": "{}" }
+                }] }, "finish_reason": "tool_calls" }]
+            }),
+        ];
+
+        let events = run_translator(&chunks);
+        let starts: Vec<&Value> = events
+            .iter()
+            .filter(|(name, _)| name == "content_block_start")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(starts.len(), 2);
+        assert_eq!(starts[0]["content_block"]["id"], "call_a");
+        assert_eq!(starts[1]["content_block"]["id"], "call_b");
+        assert_ne!(starts[0]["index"], starts[1]["index"]);
+    }
+
+    #[test]
+    fn translator_joins_indexless_argument_fragments_to_last_tool_call() {
+        // Continuation frames often carry neither index nor id; they belong to
+        // the most recent call.
+        let chunks = vec![
+            json!({
+                "id": "chatcmpl-1",
+                "choices": [{ "delta": { "tool_calls": [{
+                    "id": "call_a", "type": "function",
+                    "function": { "name": "Read", "arguments": "{\"p\":\"" }
+                }] } }]
+            }),
+            json!({
+                "id": "chatcmpl-1",
+                "choices": [{ "delta": { "tool_calls": [{
+                    "function": { "arguments": "x\"}" }
+                }] }, "finish_reason": "tool_calls" }]
+            }),
+        ];
+
+        let events = run_translator(&chunks);
+        let starts: Vec<&Value> = events
+            .iter()
+            .filter(|(name, _)| name == "content_block_start")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0]["content_block"]["id"], "call_a");
+        let arguments: String = events
+            .iter()
+            .filter(|(name, value)| {
+                name == "content_block_delta" && value["delta"]["type"] == "input_json_delta"
+            })
+            .map(|(_, v)| v["delta"]["partial_json"].as_str().unwrap())
+            .collect();
+        assert_eq!(arguments, "{\"p\":\"x\"}");
+    }
+
+    #[test]
     fn translator_handles_parallel_tool_calls() {
         let chunks = vec![json!({
             "id": "chatcmpl-1",
@@ -894,6 +1080,20 @@ mod tests {
     }
 
     #[test]
+    fn translator_maps_content_filter_finish_reason_to_refusal() {
+        let chunks = vec![
+            json!({ "id": "chatcmpl-1", "choices": [{ "delta": { "content": "hi" } }] }),
+            json!({ "id": "chatcmpl-1", "choices": [{ "delta": {}, "finish_reason": "content_filter" }] }),
+        ];
+        let events = run_translator(&chunks);
+        let delta = events
+            .iter()
+            .find(|(name, _)| name == "message_delta")
+            .expect("message_delta");
+        assert_eq!(delta.1["delta"]["stop_reason"], "refusal");
+    }
+
+    #[test]
     fn translator_emits_error_event_on_mid_stream_error_chunk() {
         let chunks = vec![
             json!({ "id": "chatcmpl-1", "choices": [{ "delta": { "content": "hi" } }] }),
@@ -928,6 +1128,91 @@ mod tests {
         assert!(ping > start, "ping must follow message_start");
         // message_start seeds input_tokens with the estimate.
         assert!(text.contains("\"input_tokens\":7"));
+    }
+
+    #[test]
+    fn read_sse_line_caps_endless_lines_without_buffering_them() {
+        // A long line with no newline must stop at the cap instead of buffering
+        // the entire stream.
+        let input = vec![b'x'; 64];
+        let mut reader = std::io::BufReader::with_capacity(8, std::io::Cursor::new(input));
+        let mut line = String::new();
+        assert!(matches!(
+            read_sse_line(&mut reader, &mut line, 16).unwrap(),
+            SseLine::TooLong
+        ));
+
+        // A line within the cap is returned intact, newline preserved.
+        let mut reader =
+            std::io::BufReader::with_capacity(8, std::io::Cursor::new(b"data: hi\nrest".to_vec()));
+        assert!(matches!(
+            read_sse_line(&mut reader, &mut line, 16).unwrap(),
+            SseLine::Line
+        ));
+        assert_eq!(line, "data: hi\n");
+
+        // EOF without trailing newline still yields the final line, then Eof.
+        let mut reader = std::io::BufReader::new(std::io::Cursor::new(b"tail".to_vec()));
+        assert!(matches!(
+            read_sse_line(&mut reader, &mut line, 16).unwrap(),
+            SseLine::Line
+        ));
+        assert_eq!(line, "tail");
+        assert!(matches!(
+            read_sse_line(&mut reader, &mut line, 16).unwrap(),
+            SseLine::Eof
+        ));
+    }
+
+    #[test]
+    fn translator_truncates_stream_on_oversized_sse_line() {
+        // One valid chunk, then a line just over MAX_SSE_LINE_BYTES with no
+        // terminating newline: the run loop must truncate and finalize.
+        let mut sse_input = Vec::new();
+        sse_input.extend_from_slice(
+            b"data: {\"id\":\"c\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        );
+        sse_input.extend_from_slice(b"data: ");
+        sse_input.extend(std::iter::repeat_n(b'x', MAX_SSE_LINE_BYTES + 1));
+        let reader = std::io::BufReader::new(std::io::Cursor::new(sse_input));
+        let mut out: Vec<u8> = Vec::new();
+        let error_message = {
+            let mut translator = StreamTranslator::new(&mut out, "m".to_string(), 0);
+            translator.run(reader).unwrap();
+            translator.error_message.clone()
+        };
+        assert!(error_message.unwrap().contains("oversized SSE line"));
+        let text = String::from_utf8(out).unwrap();
+        // Stream is finalized normally so the client still gets a valid message.
+        assert!(text.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn translator_counts_malformed_chunks_and_keeps_stream_alive() {
+        let sse_input = "data: {not json\n\n\
+            data: also not json\n\n\
+            data: {\"id\":\"c\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n\
+            data: [DONE]\n\n";
+        let reader = std::io::BufReader::new(std::io::Cursor::new(sse_input.as_bytes().to_vec()));
+        let mut out: Vec<u8> = Vec::new();
+        let (malformed, error_message) = {
+            let mut translator = StreamTranslator::new(&mut out, "m".to_string(), 0);
+            translator.run(reader).unwrap();
+            (
+                translator.malformed_chunk_count,
+                translator.error_message.clone(),
+            )
+        };
+        assert_eq!(malformed, 2);
+        assert!(
+            error_message
+                .unwrap()
+                .contains("skipped 2 malformed SSE chunk(s)")
+        );
+        let text = String::from_utf8(out).unwrap();
+        // Valid chunks still translate and the stream closes cleanly.
+        assert!(text.contains("\"text\":\"hi\""));
+        assert!(text.contains("event: message_stop"));
     }
 
     #[test]

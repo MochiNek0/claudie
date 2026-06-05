@@ -144,7 +144,34 @@ fn model_summary_mode_creates_pending_summary() {
     let optimized = optimize_openai_request(request, &profile);
 
     assert!(!optimized.local_summary);
-    assert!(optimized.pending_summary.is_some());
+    let pending = optimized.pending_summary.expect("pending summary");
+
+    // The full (compressed) conversation moves into fallback_request so a
+    // failed summary call still sends every message upstream.
+    let fallback_messages = pending.fallback_request["messages"].as_array().unwrap();
+    assert_eq!(fallback_messages.len(), 30);
+    assert!(
+        fallback_messages[29]["content"]
+            .as_str()
+            .unwrap()
+            .contains("message-29")
+    );
+
+    // Applying a model summary keeps the summary block plus the recent tail.
+    let with_summary = pending.request_with_summary("model summary text");
+    let messages = with_summary["messages"].as_array().unwrap();
+    assert!(messages.iter().any(|message| {
+        message["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("model summary text")
+    }));
+    assert!(messages.iter().any(|message| {
+        message["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("message-29")
+    }));
 }
 
 #[test]

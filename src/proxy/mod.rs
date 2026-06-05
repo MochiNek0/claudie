@@ -7,6 +7,7 @@ mod streaming;
 mod tool_history;
 mod upstream;
 
+use std::borrow::Cow;
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -27,7 +28,7 @@ use request_conv::anthropic_to_openai_request;
 use response_conv::openai_to_anthropic_response;
 use streaming::run_streaming_request;
 use tool_history::{should_retry_with_tool_transcript, tool_history_as_text_transcript};
-use upstream::{call_openai, proxy_status_for_upstream_error};
+use upstream::{UpstreamError, call_openai, proxy_status_for_upstream_error};
 
 const MAX_PROXY_CONNECTIONS: usize = 32;
 
@@ -204,10 +205,11 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
     let force_transcript_no_tools = !model_supports_tools(&outbound_model);
     let use_tool_transcript = force_transcript_no_tools
         || cached_tool_history_needs_transcript(&profile, &openai_request);
-    let outbound_request = if use_tool_transcript {
-        tool_history_as_text_transcript(&openai_request)
+    // Borrow in the common case; only the transcript fallback needs an owned copy.
+    let outbound_request: Cow<Value> = if use_tool_transcript {
+        Cow::Owned(tool_history_as_text_transcript(&openai_request))
     } else {
-        openai_request.clone()
+        Cow::Borrowed(&openai_request)
     };
 
     if wants_stream {
@@ -235,24 +237,14 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
                 Ok(value) => value,
                 Err(retry_err) => {
                     let combined = format!("{err}; text tool transcript retry failed: {retry_err}");
-                    record_proxy_error(&state, combined.clone());
-                    let _ = write_json_response(
-                        &mut stream,
-                        proxy_status_for_upstream_error(&retry_err),
-                        json!({ "error": combined }),
-                    );
+                    write_upstream_error(&mut stream, &state, &retry_err, combined);
                     return;
                 }
             }
         }
         Err(err) => {
             let message = err.to_string();
-            record_proxy_error(&state, message.clone());
-            let _ = write_json_response(
-                &mut stream,
-                proxy_status_for_upstream_error(&err),
-                json!({ "error": message }),
-            );
+            write_upstream_error(&mut stream, &state, &err, message);
             return;
         }
     };
@@ -383,4 +375,20 @@ pub(super) fn record_proxy_error(state: &Arc<Mutex<AppState>>, err: String) {
     let mut state = state.lock().expect("state poisoned");
     state.last_error = err;
     state.set_mood(PetMood::Error);
+}
+
+/// Record an upstream failure and report it to the client with the proxy
+/// status mapped from the upstream error.
+fn write_upstream_error(
+    stream: &mut TcpStream,
+    state: &Arc<Mutex<AppState>>,
+    err: &UpstreamError,
+    message: String,
+) {
+    record_proxy_error(state, message.clone());
+    let _ = write_json_response(
+        stream,
+        proxy_status_for_upstream_error(err),
+        json!({ "error": message }),
+    );
 }
