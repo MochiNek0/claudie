@@ -38,9 +38,12 @@ claudie 受 [rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/cla
 - **宠物互动**：短按左键播放 `wave` / `stretch` 互动动画，按住移动仍可拖动窗口；专注阶段可使用 `pomodoro` 动画。
 - **空闲睡眠**：长时间无活动后进入睡眠，有新活动时唤醒。
 - **窗口与资源设置**：支持宠物缩放、窗口位置记忆、GIF 目录和 mood -> GIF 映射。
+- **钓鱼小游戏**：在宠物上点击即可开始钓鱼，经历「等待 → 提竿 → 收线 → 上钩/脱钩」流程；收线阶段需在移动目标区维持张力以填满进度条。
 - **Settings 面板**：Basic、Pomodoro、LLM Profiles、Stats 四个标签页，使用 Slint 原生窗口。
 - **LLM Profiles**：保存官方或自定义 LLM profile，可写入 Claude Code settings，并可从右键菜单快速切换。
 - **会话小账本**：按天记录 prompts、工具分类、权限/选择、错误、番茄钟完成数和 token 用量；Stats 页展示今日与最近 7 天。
+- **官方用量监控**：右键菜单与设置面板实时显示 Claude Code 官方 5 小时/7 天用量限制，支持 Max/Pro/Team 订阅计划识别和自动刷新（OAuth 轮询）。
+- **Secrets 加密存储**：敏感凭据使用 Windows DPAPI 加密保存，透明加密/解密。
 - **OpenAI 兼容代理**：把 Claude Code 的 Anthropic Messages 请求转换到 OpenAI Chat Completions，支持工具调用、流式响应、图片转发、reasoning 输出、并行工具调用、工具历史降级、上下文压缩、历史总结和能力缓存。
 - **Windows-only**：应用只支持 Windows，包含桌面宠物 UI、hook/proxy 服务、Settings 面板和权限/选择交互。
 
@@ -140,23 +143,32 @@ src/
   globals.rs               进程级 OnceLock 全局句柄
   notifier.rs              Win32 消息框通知封装
   util.rs                  参数解析、路径、文本截断和 UTF-16 helper
-  app/                     AppState、mood、权限/选择、番茄钟、统计等领域状态
+  time_util.rs             时间戳解析、时长格式化和百分比解析
+  official_usage.rs        Claude Code 官方用量 OAuth 轮询线程
+  usage_display.rs         官方用量格式化与 UI 显示适配
+  app/                     AppState、mood、权限/选择、钓鱼、番茄钟、统计等领域状态
   hooks/                   Claude Code hook server、事件语义、配额提取和 settings 合并
   proxy/                   Anthropic Messages -> OpenAI Chat Completions 代理
   proxy_optimizer/         长上下文压缩、分块摘要和代理缓存
-  settings/                用户设置、LLM profiles、Claude env 集成和 JSON 存储
+  settings/                用户设置、LLM profiles、Secrets、Claude env 集成和 JSON 存储
   ui/                      Win32/GDI+ 主窗口、Slint 设置窗/弹窗和渲染逻辑
 ```
 
 关键文件：
 
+- `src/app/fishing.rs`：钓鱼小游戏状态机（等待/提竿/收线/上钩/脱钩）。
 - `src/hooks/events.rs`：hook 事件语义、权限等待、选择响应和 stats 记录。
 - `src/hooks/claude_settings.rs`：hook settings 安装、卸载、合并和备份。
+- `src/hooks/quota.rs`：Token、模型、provider、配额、速率限制、官方用量窗口捕获。
 - `src/proxy/request_conv.rs` / `response_conv.rs` / `streaming.rs`：请求、响应、流式转换。
 - `src/proxy/provider.rs`：provider/model 能力检测、图片转发、reasoning 和 compat prompt 策略。
 - `src/proxy/tool_history.rs` / `capability_cache.rs`：工具历史文本降级和能力缓存。
 - `src/proxy_optimizer/config.rs` / `compress.rs` / `summary.rs` / `cache.rs`：上下文优化和缓存。
 - `src/settings/mod.rs`：profile、OpenAI body、Extra env、Claude settings 写入和路径规范化。
+- `src/settings/secrets.rs`：Windows DPAPI 加密存储、自定义 serde 序列化。
+- `src/official_usage.rs`：Claude Code OAuth 用量 API 轮询和凭据管理。
+- `src/usage_display.rs`：用量百分比条、重置倒计时、订阅计划格式化。
+- `src/time_util.rs`：RFC3339/epoch 时间戳解析、百分比值提取。
 - `src/ui/window/mod.rs`：主窗口生命周期、热键、右键菜单、拖动和 profile 菜单。
 - `src/ui/window/render.rs`：HUD、宠物绘制、权限 overlay、选择卡片。
 - `src/ui/slint_views.rs` 与 `src/ui/settings_panel/`：Settings / Prompt 窗口声明与控制器。
@@ -171,6 +183,7 @@ src/
 
 - `%USERPROFILE%\.claudie\settings.json`：资源目录、GIF 映射、缩放、睡眠时间、窗口位置和番茄钟设置。
 - `%USERPROFILE%\.claudie\llm_profiles.json`：LLM profiles、active profile、上游 auth、OpenAI body 和 Extra env。
+- `%USERPROFILE%\.claudie\secrets.json`：Windows DPAPI 加密的敏感凭据（API key、OAuth token）。
 - `%USERPROFILE%\.claudie\daily_stats.json`：每日 prompt、工具分类、权限/选择、错误、focus session 和 token 计数，最多保留 45 天。
 - `%USERPROFILE%\.claudie\proxy_summaries.json`：旧版单块摘要缓存。
 - `%USERPROFILE%\.claudie\proxy_cache\`：代理缓存目录，包含 `summaries/`、`chunks/` 和 `capabilities/`。

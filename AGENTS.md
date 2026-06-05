@@ -40,19 +40,24 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 
 ## Directory Map
 
-- `src/main.rs`: CLI flags, shared `AppState`, hook/proxy startup, automatic hook ensure/cleanup, and Windows UI entrypoint.
+- `src/main.rs`: CLI flags, shared `AppState`, hook/proxy startup, official usage polling, automatic hook ensure/cleanup, and Windows UI entrypoint.
 - `src/config.rs`: ports, window dimensions, menu IDs, overlay geometry, scale limits, permission timeout, and UI constants.
 - `src/globals.rs`: process-wide `OnceLock` handles for shared app state and pet renderer.
 - `src/notifier.rs`: Win32 message-box notification wrapper.
 - `src/util.rs`: argument parsing, path helpers, text shortening, and UTF-16 conversion.
+- `src/time_util.rs`: RFC3339/epoch timestamp parsing, duration formatting, and percentage value extraction.
+- `src/official_usage.rs`: Claude Code OAuth usage API polling thread and credential management.
+- `src/usage_display.rs`: official usage percentage bars, reset countdown, subscription plan formatting, and UI display adapter.
 - `src/app/`: core domain state.
-- `src/app/mod.rs`: `AppState`, `PetMood`, sessions, pending permissions/choices, quota snapshots, pomodoro, stats, and mood decay.
+- `src/app/mod.rs`: `AppState`, `PetMood`, sessions, pending permissions/choices, quota snapshots, fishing, pomodoro, stats, and mood decay.
+- `src/app/fishing.rs`: fishing minigame state machine with waiting/reeling/caught/missed phases and tension zone tracking.
 - `src/app/pomodoro.rs`: focus/short-break/long-break timer state and transitions.
-- `src/app/stats.rs`: local daily ledger, local date bucketing, tool classification, and token counters.
+- `src/app/stats.rs`: local daily ledger, local date bucketing, tool classification, token counters, and fishing stats.
 - `src/hooks/`: Claude Code hook facade.
+- `src/hooks/mod.rs`: public re-exports and helper entry points.
 - `src/hooks/server.rs`: minimal synchronous HTTP server accepting `POST /hook`.
 - `src/hooks/events.rs`: Claude hook event semantics, mood transitions, permission/choice waiting, hook responses, and stats call sites.
-- `src/hooks/quota.rs`: token, model, provider, quota, and rate-limit extraction from payloads/transcripts.
+- `src/hooks/quota.rs`: token, model, provider, quota, rate-limit, and official usage window capture from payloads/transcripts.
 - `src/hooks/claude_settings.rs`: hook settings generation, merge, install, uninstall, and one-time backup handling.
 - `src/proxy/`: local Anthropic Messages to OpenAI Chat Completions compatibility proxy.
 - `src/proxy/mod.rs`: proxy server, active profile lookup, optimization handoff, upstream call/retry flow, and `/v1/messages` routing.
@@ -71,17 +76,27 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `src/proxy_optimizer/summary.rs`: local extractive summaries, optional model summary request building, and chunk generation.
 - `src/proxy_optimizer/cache.rs`: legacy summary cache, summary/chunk cache files, cache pruning, and FNV-1a keys.
 - `src/proxy_optimizer/tests.rs`: optimizer integration-style unit tests.
-- `src/settings/`: user settings, LLM profile persistence, Claude env merge, and JSON storage.
+- `src/settings/`: user settings, LLM profile persistence, secrets encryption, Claude env merge, and JSON storage.
 - `src/settings/mod.rs`: settings/profile structs, normalization, OpenAI profile detection, extra env/body parsing, Claude settings writes, and onboarding helper.
+- `src/settings/secrets.rs`: Windows DPAPI encrypted sensitive credential storage, custom serde serialization, and transparent load/save.
 - `src/settings/storage.rs`: BOM-tolerant reads and pretty JSON writes.
+- `src/ui/`: raw Win32 windowing, Slint dialog views, GIF rendering, window icons, and theme tokens.
+- `src/ui/mod.rs`: UI module structure and type re-exports.
 - `src/ui/gif_animation.rs`: GDI+ GIF loading, frame delay sampling, mood transitions, and drawing.
 - `src/ui/theme.rs`: shared colors, radii, and typography tokens for settings and overlays.
-- `src/ui/window/mod.rs`: main transparent pet window, hotkeys, context menu, dragging/clicking, profile menu, and position persistence.
-- `src/ui/window/render.rs`: render snapshot, HUD, pet drawing, permission overlay, and choice card drawing.
 - `src/ui/slint_views.rs`: Slint declarations for Settings and Prompt windows.
-- `src/ui/settings_panel/`: Slint Settings lifecycle, callback wiring, and tab controllers.
-- `src/ui/prompt_popup.rs`: Slint permission/choice popup snapshots and callbacks.
 - `src/ui/window_icon.rs`: Slint/Winit/Win32 icon bridge for auxiliary windows.
+- `src/ui/window/mod.rs`: main transparent pet window, hotkeys, context menu, dragging/clicking, profile menu, official usage display, position persistence, and fishing minigame click trigger.
+- `src/ui/window/render.rs`: render snapshot, HUD, pet drawing, permission overlay, choice card drawing, and fishing HUD overlay.
+- `src/ui/prompt_popup.rs`: Slint permission/choice popup snapshots and callbacks.
+- `src/ui/settings_panel/`: Settings window Slint bridge, tab controllers, and live timers.
+- `src/ui/settings_panel/mod.rs`: settings panel top-level refcell bridge and timer thread lifecycle.
+- `src/ui/settings_panel/controller.rs`: settings controller dispatching, official profile usage refresh, and shared helpers.
+- `src/ui/settings_panel/controller/basic.rs`: basic settings tab controller (asset dir, scale, sleep timeout, windowed mode).
+- `src/ui/settings_panel/controller/pomodoro.rs`: pomodoro timer settings tab controller.
+- `src/ui/settings_panel/controller/stats.rs`: daily stats display tab controller.
+- `src/ui/settings_panel/controller/profiles.rs`: LLM profile management and official usage display tab controller.
+- `build.rs`: compile-time Slint frontend compilation and resource embedding.
 - `assets/claudie/`: bundled GIF pet moods.
 - `packaging/`: Windows installer helpers.
 
@@ -89,7 +104,8 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 
 - `%USERPROFILE%\.claudie\settings.json`: pet asset base directory, GIF directory, animation mapping, scale, sleep timeout, window position, and pomodoro settings.
 - `%USERPROFILE%\.claudie\llm_profiles.json`: saved LLM profiles, active profile id, upstream auth fields, OpenAI body, and extra env.
-- `%USERPROFILE%\.claudie\daily_stats.json`: daily counters for prompts, tools, permissions, choices, errors, completed focus sessions, and token usage.
+- `%USERPROFILE%\.claudie\daily_stats.json`: daily counters for prompts, tools, permissions, choices, errors, completed focus sessions, token usage, and fishing attempts.
+- `%USERPROFILE%\.claudie\secrets.json`: Windows DPAPI-encrypted sensitive credentials (API keys, OAuth tokens).
 - `%USERPROFILE%\.claudie\proxy_summaries.json`: legacy single-block summary cache.
 - `%USERPROFILE%\.claudie\proxy_cache\`: OpenAI proxy cache directory:
   - `summaries/`: single-block summary cache JSON files.
@@ -117,6 +133,9 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - Use `util::wide` for strings passed to Win32 APIs.
 - Do not block the UI thread with noticeable network or filesystem work.
 - When settings change, update both persisted files and in-memory `AppState`.
+- Secrets in `src/settings/secrets.rs` use Windows DPAPI (`CryptProtectData`/`CryptUnprotectData`) for encryption at rest. The `Secrets` struct wraps a `serde_json::Value` and serializes encrypted. Secrets are scoped to the current Windows user — they cannot be decrypted by another user or on another machine.
+- Official usage polling runs in a dedicated thread spawned at startup. It polls the Claude Code OAuth API (`/api/v2/organizations/.../usage` and `/api/v2/billing/subscription`) every 60 seconds with a cached `token.json` from the Claude Code config directory. Results are stored in `AppState` and displayed in the Settings panel Usage tab and the right-click menu live quota bar.
+- The fishing minigame in `src/app/fishing.rs` is a turn-based state machine: `Inactive → Waiting → Reeling → Caught | Missed`. Left-click on the pet starts the game. During the `Reeling` phase, the player must click when the tension bar is within the green zone. Fishing stats are recorded in `daily_stats.json` alongside tool usage stats. The game interacts with the pet GIF renderer to show mood changes during play.
 
 ## Maintenance Guidelines
 
@@ -156,3 +175,6 @@ Manual checks worth doing for relevant changes:
 - LLM Profiles can save/use/import/delete profiles and switch from the right-click menu.
 - OpenAI-format profiles route Claude Code through `http://127.0.0.1:17388`, forward `OpenAI body`, stream correctly when requested, and compress/summarize long conversations without losing recent messages.
 - Stats records daily counters and token usage in `%USERPROFILE%\.claudie\daily_stats.json`, and the Stats tab charts do not overflow.
+- Right-click menu shows official Claude Code usage (5h/7d) with percentage bars; basic users see the upgrade link.
+- Left-clicking the pet triggers the fishing minigame: waiting phase, click again to reel, keep tension in the green zone to catch.
+- Secrets are encrypted with DPAPI and survive app restart; importing an API key stores it encrypted.

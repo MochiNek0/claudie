@@ -35,12 +35,15 @@ claudie is inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerz
 - **Choice cards**: supports interactive `PreToolUse` choices for `AskUserQuestion` and `ExitPlanMode`, with options plus Submit / Cancel.
 - **Hotkeys**: `Ctrl+Shift+Y` allows a permission or submits a choice; `Ctrl+Shift+N` denies a permission or cancels a choice.
 - **Pomodoro timer**: built-in Pomodoro with Start / Stop / Pause / Resume / Skip and notifications on phase completion.
+- **Fishing minigame**: click on the pet to start fishing through a "waiting → reeling → caught/missed" sequence; maintain tension by keeping the mouse inside a moving target zone during the reeling phase.
 - **Pet interaction**: short left-click plays `wave` / `stretch`; click-and-move still drags the window; focus sessions can use the `pomodoro` animation.
 - **Idle sleep**: auto-sleeps after inactivity and wakes on new activity.
 - **Window and asset settings**: pet scaling, window position memory, GIF directory, and mood-to-GIF mapping.
 - **Settings panel**: Basic, Pomodoro, LLM Profiles, and Stats tabs using native Slint windows.
 - **LLM Profiles**: save official or custom LLM profiles, write the active profile to Claude Code settings, and switch quickly from the right-click menu.
 - **Session ledger**: records daily prompts, tool categories, permission/choice counts, errors, completed focus sessions, and token usage; Stats shows today and the last 7 days.
+- **Official usage monitoring**: real-time Claude Code 5h/7d usage limits in the right-click menu and Settings panel, with subscription plan detection (Max/Pro/Team) and auto-refresh via OAuth polling.
+- **Secrets encrypted storage**: sensitive credentials encrypted/decrypted transparently with Windows DPAPI.
 - **OpenAI-compatible proxy**: converts Claude Code Anthropic Messages requests to OpenAI Chat Completions with tools, streaming, image forwarding, reasoning output, parallel tool calls, tool-history fallback, context compression, summaries, and capability caching.
 - **Windows-only**: ships the desktop pet UI, hook/proxy services, Settings panel, and permission/choice interactions for Windows.
 
@@ -140,23 +143,32 @@ src/
   globals.rs               Process-wide OnceLock handles
   notifier.rs              Win32 message-box notification wrapper
   util.rs                  Arg parsing, paths, text shortening, UTF-16 helpers
-  app/                     AppState, moods, permissions/choices, Pomodoro, stats domain state
+  time_util.rs             Timestamp parsing, duration formatting, percentage extraction
+  official_usage.rs        Claude Code official usage OAuth polling thread
+  usage_display.rs         Official usage formatting and UI display adapter
+  app/                     AppState, moods, permissions/choices, fishing, Pomodoro, stats domain state
   hooks/                   Claude Code hook server, event semantics, quota extraction, settings merge
   proxy/                   Anthropic Messages -> OpenAI Chat Completions proxy
   proxy_optimizer/         Long-context compression, chunk summaries, proxy cache
-  settings/                User settings, LLM profiles, Claude env integration, JSON storage
+  settings/                User settings, LLM profiles, Secrets, Claude env integration, JSON storage
   ui/                      Win32/GDI+ main window, Slint settings/prompt windows, rendering
 ```
 
 Key files:
 
+- `src/app/fishing.rs`: fishing minigame state machine (waiting/reeling/caught/missed).
 - `src/hooks/events.rs`: hook semantics, permission waiting, choice responses, and stats recording.
 - `src/hooks/claude_settings.rs`: hook settings install, uninstall, merge, and backup.
+- `src/hooks/quota.rs`: token, model, provider, quota, rate-limit, and official usage window capture.
 - `src/proxy/request_conv.rs` / `response_conv.rs` / `streaming.rs`: request, response, and streaming conversion.
 - `src/proxy/provider.rs`: provider/model capability detection, image forwarding, reasoning, and compat prompt policy.
 - `src/proxy/tool_history.rs` / `capability_cache.rs`: tool-history transcript fallback and capability cache.
 - `src/proxy_optimizer/config.rs` / `compress.rs` / `summary.rs` / `cache.rs`: context optimization and cache.
 - `src/settings/mod.rs`: profiles, OpenAI body, Extra env, Claude settings writes, and path normalization.
+- `src/settings/secrets.rs`: Windows DPAPI encrypted storage and custom serde serialization.
+- `src/official_usage.rs`: Claude Code OAuth usage API polling and credential management.
+- `src/usage_display.rs`: usage percentage bars, reset countdown, subscription plan formatting.
+- `src/time_util.rs`: RFC3339/epoch timestamp parsing and percentage value extraction.
 - `src/ui/window/mod.rs`: main window lifecycle, hotkeys, right-click menu, dragging, and profile menu.
 - `src/ui/window/render.rs`: HUD, pet drawing, permission overlay, and choice cards.
 - `src/ui/slint_views.rs` and `src/ui/settings_panel/`: Settings / Prompt declarations and controllers.
@@ -171,6 +183,7 @@ Other directories:
 
 - `%USERPROFILE%\.claudie\settings.json`: asset path, GIF mapping, scale, sleep timeout, window position, and Pomodoro settings.
 - `%USERPROFILE%\.claudie\llm_profiles.json`: LLM profiles, active profile, upstream auth, OpenAI body, and Extra env.
+- `%USERPROFILE%\.claudie\secrets.json`: Windows DPAPI-encrypted sensitive credentials (API keys, OAuth tokens).
 - `%USERPROFILE%\.claudie\daily_stats.json`: daily prompt, tool, permission/choice, error, focus-session, and token counters; keeps up to 45 days.
 - `%USERPROFILE%\.claudie\proxy_summaries.json`: legacy single-block summary cache.
 - `%USERPROFILE%\.claudie\proxy_cache\`: proxy cache directory containing `summaries/`, `chunks/`, and `capabilities/`.
