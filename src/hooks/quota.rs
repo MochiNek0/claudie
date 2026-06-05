@@ -3,11 +3,19 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::app::QuotaStats;
+use crate::app::{OfficialUsageWindow, QuotaStats};
+use crate::time_util::{date_value_unix_ms, now_unix_ms, usage_percent_value};
 use crate::util::shorten;
 
-pub(super) fn update_quota_from_value(quota: &mut QuotaStats, value: &Value) {
-    walk_quota_value(quota, value, None);
+/// `capture_official` should be true only while the official profile is
+/// active, so other providers' payloads cannot pollute the official usage
+/// windows maintained by the official usage poller.
+pub(super) fn update_quota_from_value(
+    quota: &mut QuotaStats,
+    value: &Value,
+    capture_official: bool,
+) {
+    walk_quota_value(quota, value, None, capture_official);
 
     let latest_total = quota
         .input_tokens
@@ -19,7 +27,12 @@ pub(super) fn update_quota_from_value(quota: &mut QuotaStats, value: &Value) {
     }
 }
 
-fn walk_quota_value(quota: &mut QuotaStats, value: &Value, parent_key: Option<&str>) {
+fn walk_quota_value(
+    quota: &mut QuotaStats,
+    value: &Value,
+    parent_key: Option<&str>,
+    capture_official: bool,
+) {
     match value {
         Value::Object(object) => {
             for (key, child) in object {
@@ -52,16 +65,21 @@ fn walk_quota_value(quota: &mut QuotaStats, value: &Value, parent_key: Option<&s
                             quota.provider = shorten(provider, 28);
                         }
                     }
-                    "ratelimits" | "limits" => quota.rate_limits = shorten(&child.to_string(), 130),
+                    "ratelimits" | "limits" => {
+                        quota.rate_limits = shorten(&child.to_string(), 130);
+                        if capture_official {
+                            capture_official_rate_limits(quota, child);
+                        }
+                    }
                     _ => {}
                 }
                 capture_provider_quota_field(quota, key, &normalized_key, child, parent_key);
-                walk_quota_value(quota, child, Some(key));
+                walk_quota_value(quota, child, Some(key), capture_official);
             }
         }
         Value::Array(items) => {
             for item in items {
-                walk_quota_value(quota, item, parent_key);
+                walk_quota_value(quota, item, parent_key, capture_official);
             }
         }
         _ => {}
@@ -186,6 +204,59 @@ fn number_value(value: &Value) -> Option<u64> {
         .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
 }
 
+fn capture_official_rate_limits(quota: &mut QuotaStats, value: &Value) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+
+    for (key, child) in object {
+        match normalize_key(key).as_str() {
+            "fivehour" => merge_official_window(&mut quota.official_five_hour, child),
+            "sevenday" => merge_official_window(&mut quota.official_seven_day, child),
+            _ => {}
+        }
+    }
+
+    if quota.official_five_hour.used_percentage.is_some()
+        || quota.official_seven_day.used_percentage.is_some()
+    {
+        quota.official_usage_error.clear();
+        quota.official_usage_updated_at_unix_ms = Some(now_unix_ms());
+    }
+}
+
+fn merge_official_window(window: &mut OfficialUsageWindow, value: &Value) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+
+    for (key, child) in object {
+        match normalize_key(key).as_str() {
+            "usedpercentage" | "utilization" => {
+                if let Some(percent) = usage_percent_value(child) {
+                    window.used_percentage = Some(percent);
+                }
+            }
+            "resetsat" | "resetat" => {
+                if let Some(reset_at) = date_value_unix_ms(child) {
+                    window.reset_at_unix_ms = Some(reset_at);
+                    window.reset_label.clear();
+                } else if let Some(label) = child
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                {
+                    // A label replaces any previously captured timestamp;
+                    // otherwise the stale timestamp would keep rendering.
+                    window.reset_at_unix_ms = None;
+                    window.reset_label = shorten(label, 32);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(super) fn scan_transcript_usage(path: &Path) -> Option<QuotaStats> {
     let metadata = fs::metadata(path).ok()?;
     if metadata.len() == 0 {
@@ -212,7 +283,9 @@ pub(super) fn scan_transcript_usage(path: &Path) -> Option<QuotaStats> {
             .saturating_add(quota.output_tokens)
             .saturating_add(quota.cache_creation_tokens)
             .saturating_add(quota.cache_read_tokens);
-        update_quota_from_value(&mut quota, &value);
+        // Official fields are dropped when the snapshot is merged back into
+        // state.quota, so transcript scans never capture them.
+        update_quota_from_value(&mut quota, &value, false);
         let after = quota
             .input_tokens
             .saturating_add(quota.output_tokens)

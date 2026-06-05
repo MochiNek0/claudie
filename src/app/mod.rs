@@ -203,6 +203,13 @@ pub(crate) enum PendingInteractionKind {
     Choice,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OfficialUsageWindow {
+    pub(crate) used_percentage: Option<u8>,
+    pub(crate) reset_at_unix_ms: Option<u64>,
+    pub(crate) reset_label: String,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct QuotaStats {
     pub(crate) input_tokens: u64,
@@ -217,6 +224,11 @@ pub(crate) struct QuotaStats {
     pub(crate) quota_reset: String,
     pub(crate) last_model: String,
     pub(crate) rate_limits: String,
+    pub(crate) official_plan: String,
+    pub(crate) official_five_hour: OfficialUsageWindow,
+    pub(crate) official_seven_day: OfficialUsageWindow,
+    pub(crate) official_usage_updated_at_unix_ms: Option<u64>,
+    pub(crate) official_usage_error: String,
     pub(crate) transcript_path: String,
 }
 

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use slint::{SharedString, Timer, TimerMode};
 
-use crate::app::AppState;
+use crate::app::{AppState, QuotaStats};
 use crate::globals::APP_STATE;
 use crate::settings::{
     LlmProfile, LlmProfileDb, UserSettings, load_llm_profile_db, load_user_settings,
@@ -52,10 +52,14 @@ impl SettingsController {
         self._timer
             .start(TimerMode::Repeated, Duration::from_secs(1), move || {
                 if let Some(ui) = weak.upgrade()
-                    && (ui.get_active_tab() == 1 || ui.get_active_tab() == 3)
+                    && (ui.get_active_tab() == 1
+                        || ui.get_active_tab() == 2
+                        || ui.get_active_tab() == 3)
                 {
                     if ui.get_active_tab() == 1 {
                         pomodoro::set_pomodoro_status(&ui);
+                    } else if ui.get_active_tab() == 2 {
+                        controller_refresh_profile_usage(&ui);
                     } else {
                         stats::set_stats_status(&ui);
                     }
@@ -92,6 +96,45 @@ pub(super) fn sync_app_llm_profiles(llm_db: &LlmProfileDb) {
         let mut state = state.lock().expect("state poisoned");
         state.llm_profiles = llm_db.clone();
     }
+}
+
+/// Only the official profile has live usage; other providers show defaults.
+pub(super) fn usage_quota_for_profile(profile: &LlmProfile, quota: QuotaStats) -> QuotaStats {
+    if profile.is_official() {
+        quota
+    } else {
+        QuotaStats::default()
+    }
+}
+
+pub(super) fn current_profile_usage_quota(profile: &LlmProfile) -> QuotaStats {
+    let Some(state) = APP_STATE.get() else {
+        return QuotaStats::default();
+    };
+    let quota = state.lock().expect("state poisoned").quota.clone();
+    usage_quota_for_profile(profile, quota)
+}
+
+fn controller_refresh_profile_usage(ui: &SettingsWindow) {
+    // The full profile form refresh lives in profiles.rs; this timer path keeps
+    // the selected provider's live usage fresh without disturbing in-progress edits.
+    let index = ui.get_selected_profile_index();
+    if index < 0 {
+        return;
+    }
+    let Some(state) = APP_STATE.get() else {
+        return;
+    };
+    let state = state.lock().expect("state poisoned");
+    let mut db = state.llm_profiles.clone();
+    let quota = state.quota.clone();
+    drop(state);
+    db.normalize();
+    let Some(profile) = db.profiles.get(index as usize) else {
+        return;
+    };
+    let display_quota = usage_quota_for_profile(profile, quota);
+    profiles::set_profile_usage_fields(ui, profile, &db.active_profile_id, &display_quota);
 }
 
 pub(super) fn profile_label_for_message(profile: &LlmProfile) -> String {

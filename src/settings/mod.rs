@@ -17,7 +17,7 @@ const DEFAULT_GIF_DIR: &str = "assets/claudie";
 const DEFAULT_SLEEP_AFTER_SECS: u32 = 75;
 const SLEEP_AFTER_MIN_SECS: u32 = 15;
 const SLEEP_AFTER_MAX_SECS: u32 = 1800;
-const OFFICIAL_LLM_PROFILE_ID: &str = "official";
+pub(crate) const OFFICIAL_LLM_PROFILE_ID: &str = "official";
 const OFFICIAL_LLM_PROFILE_NAME: &str = "Official";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -192,6 +192,10 @@ fn default_sleep_after_secs() -> u32 {
 }
 
 impl LlmProfileDb {
+    pub(crate) fn official_profile_active(&self) -> bool {
+        self.active_profile_id.trim() == OFFICIAL_LLM_PROFILE_ID
+    }
+
     pub(crate) fn normalize(&mut self) {
         self.ensure_official_profile();
         self.profiles.retain(|profile| {
@@ -269,6 +273,10 @@ impl LlmProfileDb {
 }
 
 impl LlmProfile {
+    pub(crate) fn is_official(&self) -> bool {
+        self.id.trim() == OFFICIAL_LLM_PROFILE_ID
+    }
+
     pub(crate) fn display_label(&self) -> String {
         match (self.name.trim().is_empty(), self.model.trim().is_empty()) {
             (false, false) => format!("{} {}", self.name.trim(), self.model.trim()),

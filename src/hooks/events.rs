@@ -79,7 +79,8 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
         } else if clears_pending_interaction(event.as_str()) {
             clear_stale_interactions(&mut state, &session_id);
         }
-        update_quota_from_value(&mut state.quota, &payload);
+        let capture_official = state.llm_profiles.official_profile_active();
+        update_quota_from_value(&mut state.quota, &payload, capture_official);
         if let Some(path) = transcript_path.as_deref() {
             state.quota.transcript_path = path.to_string();
         }
@@ -190,7 +191,8 @@ fn handle_permission_request(
         state.start_permission_activity(permission.id, &permission.session_id, mood);
         state.set_resting_mood(mood, true);
         state.record_permission_stats();
-        update_quota_from_value(&mut state.quota, &payload);
+        let capture_official = state.llm_profiles.official_profile_active();
+        update_quota_from_value(&mut state.quota, &payload, capture_official);
         state.record_token_snapshot();
         permission
     };
@@ -394,7 +396,7 @@ fn handle_choice_request(
         state.start_choice_activity(choice.id, &choice.session_id, resting);
         state.set_resting_mood(resting, false);
         state.record_choice_stats();
-        update_quota_from_value(&mut state.quota, &json!({}));
+        update_quota_from_value(&mut state.quota, &json!({}), false);
         state.record_token_snapshot();
         choice
     };

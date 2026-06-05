@@ -399,6 +399,12 @@ slint::slint! {
         in-out property <string> haiku_model;
         in-out property <string> extra_env;
         in-out property <string> openai_extra_body;
+        in property <string> profile_usage_title;
+        in property <string> profile_usage_summary;
+        in property <string> profile_usage_five_hour_value;
+        in property <string> profile_usage_seven_day_value;
+        in property <float> profile_usage_five_hour_bar;
+        in property <float> profile_usage_seven_day_bar;
 
         in property <string> stats_today_title;
         in property <string> stats_today_summary;
@@ -660,6 +666,12 @@ slint::slint! {
             MonoTextEdit { x: 0px; y: 412px; width: 392px; height: 72px; text <=> root.extra_env; }
             Text { x: 408px; y: 392px; text: "OpenAI body"; color: #6b7280; font-size: 12px; }
             MonoTextEdit { x: 408px; y: 412px; width: 392px; height: 72px; text <=> root.openai_extra_body; }
+
+            Rectangle { x: 0px; y: 496px; width: 560px; height: 48px; background: #f2f5fa; border-radius: 10px; border-width: 1px; border-color: #dae0ea; }
+            Text { x: 14px; y: 506px; width: 340px; text: root.profile_usage_title; overflow: elide; color: #111827; font-size: 13px; font-weight: 600; }
+            Text { x: 14px; y: 526px; width: 340px; text: root.profile_usage_summary; overflow: elide; color: #475569; font-size: 11px; }
+            StatBarRow { x: 368px; y: 500px; width: 174px; height: 18px; label: "5h"; value: root.profile_usage_five_hour_value; bar: root.profile_usage_five_hour_bar; accent: root.profile_usage_five_hour_bar >= 90 ? #d64545 : (root.profile_usage_five_hour_bar >= 70 ? #d88a24 : #0a84ff); }
+            StatBarRow { x: 368px; y: 522px; width: 174px; height: 18px; label: "7d"; value: root.profile_usage_seven_day_value; bar: root.profile_usage_seven_day_bar; accent: root.profile_usage_seven_day_bar >= 90 ? #d64545 : (root.profile_usage_seven_day_bar >= 70 ? #d88a24 : #7c5cc4); }
 
             ActionButton { x: 592px; y: 504px; width: 96px; height: 40px; text: "Save"; clicked => { root.save_profile(); } }
             ActionButton { x: 704px; y: 504px; width: 96px; height: 40px; text: "Use"; clicked => { root.use_profile(); } }

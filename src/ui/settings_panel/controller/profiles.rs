@@ -5,8 +5,12 @@ use crate::settings::{
     ensure_claude_onboarding_complete, save_llm_profile_db,
 };
 use crate::ui::slint_views::SettingsWindow;
+use crate::usage_display::provider_usage_display;
 
-use super::{SettingsController, profile_label_for_message, shared, sync_app_llm_profiles};
+use super::{
+    SettingsController, current_profile_usage_quota, profile_label_for_message, shared,
+    sync_app_llm_profiles,
+};
 
 impl SettingsController {
     pub(in crate::ui::settings_panel) fn previous_profile(&mut self) {
@@ -40,7 +44,11 @@ impl SettingsController {
     pub(in crate::ui::settings_panel) fn new_profile(&mut self) {
         self.profile_index = self.llm_db.profiles.len();
         if let Some(ui) = self.ui() {
+            // Deselect the picker so the live-usage timer does not repaint the
+            // previously selected profile's usage onto the blank form.
+            ui.set_selected_profile_index(-1);
             set_profile_fields(&ui, &LlmProfile::default());
+            set_empty_profile_usage_fields(&ui);
             ui.set_profile_position(shared("New profile"));
             ui.set_status_message(shared("Editing a new profile."));
         }
@@ -60,6 +68,12 @@ impl SettingsController {
         ui.set_selected_profile_index(self.profile_index as i32);
         if let Some(profile) = self.llm_db.profiles.get(self.profile_index) {
             set_profile_fields(&ui, profile);
+            set_profile_usage_fields(
+                &ui,
+                profile,
+                &self.llm_db.active_profile_id,
+                &current_profile_usage_quota(profile),
+            );
             ui.set_profile_position(shared(&format!(
                 "{} of {}",
                 self.profile_index + 1,
@@ -67,6 +81,7 @@ impl SettingsController {
             )));
         } else {
             set_profile_fields(&ui, &LlmProfile::default());
+            set_empty_profile_usage_fields(&ui);
             ui.set_profile_position(shared("New profile"));
         }
     }
@@ -157,7 +172,7 @@ impl SettingsController {
         let Some(profile) = self.current_profile_from_fields() else {
             return;
         };
-        if profile.id.trim() == "official" {
+        if profile.is_official() {
             self.status("The official profile cannot be deleted.");
             return;
         }
@@ -190,4 +205,34 @@ fn set_profile_fields(ui: &SettingsWindow, profile: &LlmProfile) {
     ui.set_haiku_model(shared(&profile.haiku_model));
     ui.set_extra_env(shared(&profile.extra_env));
     ui.set_openai_extra_body(shared(&profile.openai_extra_body));
+}
+
+pub(super) fn set_profile_usage_fields(
+    ui: &SettingsWindow,
+    profile: &LlmProfile,
+    active_profile_id: &str,
+    quota: &crate::app::QuotaStats,
+) {
+    let profile_name = profile.name.trim();
+    let profile_name = if profile_name.is_empty() {
+        profile.id.as_str()
+    } else {
+        profile_name
+    };
+    let usage = provider_usage_display(profile_name, &profile.id, active_profile_id, quota);
+    ui.set_profile_usage_title(shared(&usage.title));
+    ui.set_profile_usage_summary(shared(&usage.summary));
+    ui.set_profile_usage_five_hour_value(shared(&usage.five_hour.value));
+    ui.set_profile_usage_seven_day_value(shared(&usage.seven_day.value));
+    ui.set_profile_usage_five_hour_bar(usage.five_hour.bar);
+    ui.set_profile_usage_seven_day_bar(usage.seven_day.bar);
+}
+
+fn set_empty_profile_usage_fields(ui: &SettingsWindow) {
+    ui.set_profile_usage_title(shared("Provider usage"));
+    ui.set_profile_usage_summary(shared("Save or select a provider profile."));
+    ui.set_profile_usage_five_hour_value(shared("--"));
+    ui.set_profile_usage_seven_day_value(shared("--"));
+    ui.set_profile_usage_five_hour_bar(0.0);
+    ui.set_profile_usage_seven_day_bar(0.0);
 }

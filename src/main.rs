@@ -9,10 +9,13 @@ mod config;
 mod globals;
 mod hooks;
 mod notifier;
+mod official_usage;
 mod proxy;
 mod proxy_optimizer;
 mod settings;
+mod time_util;
 mod ui;
+mod usage_display;
 mod util;
 
 use std::env;
@@ -26,6 +29,7 @@ use hooks::{
     uninstall_claude_hooks,
 };
 use notifier::notify_user;
+use official_usage::start_official_usage_poller;
 use proxy::start_openai_proxy_server;
 use ui::{init_animation_store, run_window};
 use util::parse_port;
@@ -135,6 +139,8 @@ fn start_runtime_hooks(state: Arc<Mutex<AppState>>, port: u16) -> bool {
     if let Err(err) = start_openai_proxy_server(state.clone()) {
         record_app_error(&state, err);
     }
+
+    start_official_usage_poller(state.clone());
 
     if let Err(err) = ensure_claude_hooks(state.clone(), port) {
         record_app_error(&state, err);

@@ -1,19 +1,26 @@
 mod render;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use render::{
     RenderState, choice_option_at_point, fill_rect, render_permission_overlay, render_scene,
     scroll_choice_lines, scroll_permission_detail_lines, snapshot_state,
 };
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
-    EndPaint, InvalidateRect, PAINTSTRUCT, SRCCOPY, ScreenToClient, SelectObject,
+    BeginPaint, BitBlt, COLOR_MENU, COLOR_MENUHILIGHT, CreateCompatibleBitmap, CreateCompatibleDC,
+    DFC_MENU, DFCS_MENUCHECK, DeleteDC, DeleteObject, DrawFrameControl, EndPaint, FillRect,
+    GetSysColorBrush, GetTextExtentPoint32W, InvalidateRect, PAINTSTRUCT, SRCCOPY, ScreenToClient,
+    SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
+use windows_sys::Win32::UI::Controls::{
+    DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_CHECKED, ODS_SELECTED, ODT_MENU,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetLastInputInfo, LASTINPUTINFO, MOD_CONTROL, MOD_SHIFT, RegisterHotKey, ReleaseCapture,
     SetCapture, UnregisterHotKey,
@@ -22,15 +29,15 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GWLP_USERDATA, GetClientRect,
     GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, IDC_ARROW,
-    IDC_HAND, LWA_COLORKEY, LoadCursorW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    RegisterClassW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
+    IDC_HAND, LWA_COLORKEY, LoadCursorW, MF_CHECKED, MF_OWNERDRAW, MF_POPUP, MF_SEPARATOR,
+    MF_STRING, RegisterClassW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN,
-    TrackPopupMenu, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WS_VISIBLE,
+    TrackPopupMenu, WM_CREATE, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::app::pomodoro::PomodoroStatus;
@@ -47,9 +54,12 @@ use crate::settings::{
 };
 use crate::ui::prompt_popup::{close_prompt_popup, sync_prompt_popup};
 use crate::ui::settings_panel::{close_settings_panel, show_settings_panel};
-use crate::util::wide;
+use crate::usage_display::provider_usage_display;
+use crate::util::{shorten, wide};
 
 static CONTEXT_MENU_OPEN: AtomicBool = AtomicBool::new(false);
+static MENU_PROFILE_DRAW_ITEMS: OnceLock<Mutex<HashMap<usize, MenuProfileDrawItem>>> =
+    OnceLock::new();
 static LEFT_BUTTON_CAPTURED: AtomicBool = AtomicBool::new(false);
 static LEFT_BUTTON_DRAGGING: AtomicBool = AtomicBool::new(false);
 static LEFT_BUTTON_SCREEN_X: AtomicI32 = AtomicI32::new(0);
@@ -64,6 +74,17 @@ const ACTIVE_TIMER_MS: u32 = 33;
 const IDLE_TIMER_MS: u32 = 120;
 const SLEEP_TIMER_MS: u32 = 500;
 const TOPMOST_REFRESH_MS: u32 = 1_000;
+
+#[derive(Clone)]
+struct MenuProfileDrawItem {
+    segments: Vec<MenuProfileDrawSegment>,
+}
+
+#[derive(Clone)]
+struct MenuProfileDrawSegment {
+    text: String,
+    color: u32,
+}
 
 pub(crate) unsafe fn run_window(port: u16) {
     let class_name = wide("ClaudieWindow");
@@ -156,6 +177,18 @@ unsafe extern "system" fn window_proc(
         WM_CREATE => {
             let _createstruct = lparam as *const CREATESTRUCTW;
             0
+        }
+        WM_MEASUREITEM => {
+            if measure_profile_menu_item(lparam) {
+                return 1;
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_DRAWITEM => {
+            if draw_profile_menu_item(lparam) {
+                return 1;
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_PAINT => {
             paint_window(hwnd);
@@ -761,6 +794,9 @@ unsafe fn show_context_menu(hwnd: HWND) {
 }
 
 unsafe fn append_llm_profile_menu(menu: windows_sys::Win32::UI::WindowsAndMessaging::HMENU) {
+    // Drop entries from previous menu opens so the store only describes the
+    // owner-drawn items appended below.
+    clear_menu_profile_draw_items();
     let entries = llm_profile_menu_entries();
     if entries.is_empty() {
         return;
@@ -770,19 +806,26 @@ unsafe fn append_llm_profile_menu(menu: windows_sys::Win32::UI::WindowsAndMessag
         return;
     }
 
-    for (index, label, checked) in entries {
-        let label = wide(&label);
-        let flags = if checked {
-            MF_STRING | MF_CHECKED
+    for (index, label, checked, draw_item) in entries {
+        let command_id = MENU_LLM_PROFILE_BASE_ID + index;
+        let checked_flag = if checked { MF_CHECKED } else { 0 };
+        if let Some(draw_item) = draw_item {
+            store_menu_profile_draw_item(command_id, draw_item);
+            AppendMenuW(
+                profile_menu,
+                MF_OWNERDRAW | checked_flag,
+                command_id,
+                command_id as *const u16,
+            );
         } else {
-            MF_STRING
-        };
-        AppendMenuW(
-            profile_menu,
-            flags,
-            MENU_LLM_PROFILE_BASE_ID + index,
-            label.as_ptr(),
-        );
+            let label = wide(&label);
+            AppendMenuW(
+                profile_menu,
+                MF_STRING | checked_flag,
+                command_id,
+                label.as_ptr(),
+            );
+        }
     }
 
     let profile_label = wide("LLM Profile");
@@ -794,21 +837,190 @@ unsafe fn append_llm_profile_menu(menu: windows_sys::Win32::UI::WindowsAndMessag
     );
 }
 
-fn llm_profile_menu_entries() -> Vec<(usize, String, bool)> {
+fn llm_profile_menu_entries() -> Vec<(usize, String, bool, Option<MenuProfileDrawItem>)> {
     let Some(state) = APP_STATE.get() else {
         return Vec::new();
     };
-    let mut db = state.lock().expect("state poisoned").llm_profiles.clone();
+    let state = state.lock().expect("state poisoned");
+    let mut db = state.llm_profiles.clone();
+    let quota = state.quota.clone();
+    drop(state);
     db.normalize();
     db.profiles
         .iter()
         .take(MENU_LLM_PROFILE_MAX_ITEMS)
         .enumerate()
         .map(|(index, profile)| {
-            let label = profile_menu_label(profile);
-            (index, label, profile.id == db.active_profile_id)
+            let (label, color) =
+                profile_menu_label_with_usage(profile, &db.active_profile_id, &quota);
+            (index, label, profile.id == db.active_profile_id, color)
         })
         .collect()
+}
+
+fn profile_menu_label_with_usage(
+    profile: &LlmProfile,
+    active_profile_id: &str,
+    quota: &crate::app::QuotaStats,
+) -> (String, Option<MenuProfileDrawItem>) {
+    let label = profile_menu_label(profile);
+    if !profile.is_official() {
+        return (label, None);
+    }
+    let usage = provider_usage_display(&label, &profile.id, active_profile_id, quota);
+    if !usage.has_usage {
+        return (label, None);
+    }
+    let item = MenuProfileDrawItem {
+        segments: vec![
+            MenuProfileDrawSegment {
+                // Keep the fixed-width usage suffix within the measured item
+                // width even for long profile labels.
+                text: shorten(&label, 26),
+                color: rgb(17, 24, 39),
+            },
+            MenuProfileDrawSegment {
+                text: "  ".to_string(),
+                color: rgb(17, 24, 39),
+            },
+            MenuProfileDrawSegment {
+                text: format!("5h {}", usage.five_hour.value),
+                color: profile_usage_window_menu_color(usage.five_hour.percent, rgb(10, 132, 255)),
+            },
+            MenuProfileDrawSegment {
+                text: " / ".to_string(),
+                color: rgb(17, 24, 39),
+            },
+            MenuProfileDrawSegment {
+                text: format!("7d {}", usage.seven_day.value),
+                color: profile_usage_window_menu_color(usage.seven_day.percent, rgb(124, 92, 196)),
+            },
+        ],
+    };
+    (label, Some(item))
+}
+
+fn profile_usage_window_menu_color(percent: Option<u8>, default_color: u32) -> u32 {
+    let percent = percent.unwrap_or(0);
+    if percent >= 90 {
+        rgb(214, 69, 69)
+    } else if percent >= 60 {
+        rgb(216, 138, 36)
+    } else {
+        default_color
+    }
+}
+
+fn store_menu_profile_draw_item(id: usize, item: MenuProfileDrawItem) {
+    let items = MENU_PROFILE_DRAW_ITEMS.get_or_init(|| Mutex::new(HashMap::new()));
+    items
+        .lock()
+        .expect("profile menu item store poisoned")
+        .insert(id, item);
+}
+
+fn clear_menu_profile_draw_items() {
+    if let Some(items) = MENU_PROFILE_DRAW_ITEMS.get() {
+        items
+            .lock()
+            .expect("profile menu item store poisoned")
+            .clear();
+    }
+}
+
+fn menu_profile_draw_item(id: usize) -> Option<MenuProfileDrawItem> {
+    MENU_PROFILE_DRAW_ITEMS
+        .get()?
+        .lock()
+        .expect("profile menu item store poisoned")
+        .get(&id)
+        .cloned()
+}
+
+unsafe fn measure_profile_menu_item(lparam: LPARAM) -> bool {
+    let measure = lparam as *mut MEASUREITEMSTRUCT;
+    if measure.is_null()
+        || (*measure).CtlType != ODT_MENU
+        || !has_profile_draw_item((*measure).itemID as usize)
+    {
+        return false;
+    }
+    (*measure).itemWidth = 292;
+    (*measure).itemHeight = 24;
+    true
+}
+
+unsafe fn draw_profile_menu_item(lparam: LPARAM) -> bool {
+    let draw = lparam as *const DRAWITEMSTRUCT;
+    if draw.is_null() || (*draw).CtlType != ODT_MENU {
+        return false;
+    }
+    let Some(item) = menu_profile_draw_item((*draw).itemID as usize) else {
+        return false;
+    };
+
+    let rect = (*draw).rcItem;
+    let selected = (*draw).itemState & ODS_SELECTED != 0;
+    let checked = (*draw).itemState & ODS_CHECKED != 0;
+    let background = if selected {
+        COLOR_MENUHILIGHT
+    } else {
+        COLOR_MENU
+    };
+    FillRect((*draw).hDC, &rect, GetSysColorBrush(background));
+
+    SetBkMode((*draw).hDC, TRANSPARENT as i32);
+    if checked {
+        let mut check_rect = RECT {
+            left: rect.left + 5,
+            top: rect.top + 5,
+            right: rect.left + 18,
+            bottom: rect.top + 18,
+        };
+        DrawFrameControl((*draw).hDC, &mut check_rect, DFC_MENU, DFCS_MENUCHECK);
+    }
+    let color_override = if selected {
+        Some(rgb(255, 255, 255))
+    } else {
+        None
+    };
+    draw_menu_profile_segments(
+        (*draw).hDC,
+        rect.left + 24,
+        rect.top + 5,
+        &item.segments,
+        color_override,
+    );
+    true
+}
+
+unsafe fn draw_menu_profile_segments(
+    hdc: windows_sys::Win32::Graphics::Gdi::HDC,
+    mut x: i32,
+    y: i32,
+    segments: &[MenuProfileDrawSegment],
+    color_override: Option<u32>,
+) {
+    for segment in segments {
+        let text = wide(&segment.text);
+        let len = (text.len() - 1) as i32;
+        SetTextColor(hdc, color_override.unwrap_or(segment.color));
+        TextOutW(hdc, x, y, text.as_ptr(), len);
+
+        let mut size = SIZE { cx: 0, cy: 0 };
+        if GetTextExtentPoint32W(hdc, text.as_ptr(), len, &mut size) != 0 {
+            x += size.cx;
+        }
+    }
+}
+
+fn has_profile_draw_item(id: usize) -> bool {
+    MENU_PROFILE_DRAW_ITEMS.get().is_some_and(|items| {
+        items
+            .lock()
+            .expect("profile menu item store poisoned")
+            .contains_key(&id)
+    })
 }
 
 fn profile_menu_label(profile: &LlmProfile) -> String {
@@ -1008,6 +1220,10 @@ fn loword(value: u32) -> i16 {
 
 fn hiword(value: u32) -> i16 {
     ((value >> 16) & 0xffff) as i16
+}
+
+fn rgb(r: u8, g: u8, b: u8) -> u32 {
+    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
 
 fn point_in(px: i32, py: i32, x: i32, y: i32, w: i32, h: i32) -> bool {
