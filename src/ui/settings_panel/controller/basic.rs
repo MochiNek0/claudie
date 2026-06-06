@@ -11,6 +11,7 @@ impl SettingsController {
         };
         ui.set_pet_scale(self.settings.pet_scale_percent() as f32);
         ui.set_sleep_after(self.settings.sleep_after_secs() as f32);
+        ui.set_show_session_switcher(self.settings.show_session_switcher);
         ui.set_pet_dir(shared(&self.settings.pet_dir));
         ui.set_gif_dir(shared(&self.settings.gif_dir));
         ui.set_anim_idle(shared(&self.settings.animations.idle));
@@ -41,6 +42,7 @@ impl SettingsController {
             PET_SCALE_MAX_PERCENT,
         );
         self.settings.sleep_after_secs = clamp_i32(ui.get_sleep_after().round() as i32, 15, 1800);
+        self.settings.show_session_switcher = ui.get_show_session_switcher();
         self.settings.pet_dir = ui.get_pet_dir().to_string();
         self.settings.gif_dir = ui.get_gif_dir().to_string();
         self.settings.animations = AnimationSettings {
@@ -99,6 +101,7 @@ impl SettingsController {
         let defaults = UserSettings::default();
         self.settings.pet_scale_percent = defaults.pet_scale_percent();
         self.settings.sleep_after_secs = defaults.sleep_after_secs();
+        self.settings.show_session_switcher = defaults.show_session_switcher;
         self.settings.pet_dir = defaults.pet_dir;
         self.settings.gif_dir = defaults.gif_dir;
         self.settings.animations = defaults.animations;

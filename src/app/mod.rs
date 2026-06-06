@@ -4,6 +4,7 @@ pub(crate) mod stats;
 
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,8 @@ const WORK_MIN_VISIBLE: Duration = Duration::from_millis(3_000);
 const HAPPY_MIN_VISIBLE: Duration = Duration::from_millis(2_000);
 const SUBAGENT_MIN_VISIBLE: Duration = Duration::from_millis(2_500);
 const INTERACTION_MIN_VISIBLE: Duration = Duration::from_millis(1_800);
+const ENDED_SESSION_RETENTION: Duration = Duration::from_secs(30 * 60);
+const MAX_ENDED_SESSIONS: usize = 50;
 const STATS_FLUSH_INTERVAL: Duration = Duration::from_secs(3);
 const RESTING_ACTIVITY_KEY: &str = "resting";
 const SUBAGENT_ACTIVITY_KEY: &str = "subagent";
@@ -203,6 +206,13 @@ pub(crate) enum PendingInteractionKind {
     Choice,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PendingInteractionTarget {
+    kind: PendingInteractionKind,
+    id: u64,
+    sequence: u64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct OfficialUsageWindow {
     pub(crate) used_percentage: Option<u8>,
@@ -238,6 +248,85 @@ pub(crate) struct ActiveTool {
     pub(crate) mood: PetMood,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClaudeSessionStatus {
+    Idle,
+    Streaming,
+    Tool,
+    WaitingPermission,
+    WaitingChoice,
+    Compacting,
+    Error,
+    Done,
+    Ended,
+}
+
+impl ClaudeSessionStatus {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Streaming => "Streaming",
+            Self::Tool => "Tool",
+            Self::WaitingPermission => "Permission",
+            Self::WaitingChoice => "Choice",
+            Self::Compacting => "Compacting",
+            Self::Error => "Error",
+            Self::Done => "Done",
+            Self::Ended => "Ended",
+        }
+    }
+
+    fn mood(self) -> PetMood {
+        match self {
+            Self::Idle | Self::Done | Self::Ended => PetMood::Idle,
+            Self::Streaming | Self::Compacting => PetMood::Thinking,
+            Self::Tool => PetMood::Thinking,
+            Self::WaitingPermission | Self::WaitingChoice => PetMood::Thinking,
+            Self::Error => PetMood::Error,
+        }
+    }
+
+    fn is_live(self) -> bool {
+        !matches!(self, Self::Ended)
+    }
+
+    fn visual_projection(self) -> Option<ActivityProjection> {
+        let interrupts_visual = matches!(
+            self,
+            Self::Streaming
+                | Self::WaitingPermission
+                | Self::WaitingChoice
+                | Self::Compacting
+                | Self::Error
+        );
+        interrupts_visual.then_some(ActivityProjection {
+            mood: self.mood(),
+            interrupts_visual,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ClaudeSession {
+    pub(crate) id: String,
+    pub(crate) cwd: String,
+    pub(crate) status: ClaudeSessionStatus,
+    pub(crate) detail: String,
+    pub(crate) order: u64,
+    pub(crate) last_seen: Instant,
+    waiting_interaction_sequence: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SessionSwitcherItem {
+    pub(crate) id: String,
+    pub(crate) display_name: String,
+    pub(crate) status: ClaudeSessionStatus,
+    pub(crate) detail: String,
+    pub(crate) focused: bool,
+    pub(crate) pending_count: usize,
+}
+
 pub(crate) struct AppState {
     pub(crate) mood: PetMood,
     pub(crate) mood_started_at: Instant,
@@ -256,6 +345,9 @@ pub(crate) struct AppState {
     pub(crate) active_tool_names: HashMap<String, VecDeque<String>>,
     pub(crate) active_subagents: usize,
     pub(crate) activity_spans: HashMap<String, ActivitySpan>,
+    pub(crate) sessions: HashMap<String, ClaudeSession>,
+    pub(crate) focused_session_id: Option<String>,
+    next_session_order: u64,
     pub(crate) pending_permissions: VecDeque<PendingPermission>,
     pub(crate) pending_choices: VecDeque<PendingChoice>,
     pub(crate) quota: QuotaStats,
@@ -293,6 +385,9 @@ impl AppState {
             active_tool_names: HashMap::new(),
             active_subagents: 0,
             activity_spans: HashMap::new(),
+            sessions: HashMap::new(),
+            focused_session_id: None,
+            next_session_order: 1,
             pending_permissions: VecDeque::new(),
             pending_choices: VecDeque::new(),
             quota: QuotaStats::default(),
@@ -378,6 +473,7 @@ impl AppState {
         removed
     }
 
+    #[allow(dead_code)]
     pub(crate) fn clear_activity_spans_by_kind(&mut self, kind: ActivityKind) {
         let before = self.activity_spans.len();
         self.activity_spans
@@ -426,50 +522,341 @@ impl AppState {
         self.end_activity_span(&choice_activity_key(id));
     }
 
-    pub(crate) fn current_pending_interaction(&self) -> Option<PendingInteractionKind> {
-        match (
-            self.pending_permissions.front(),
-            self.pending_choices.front(),
-        ) {
-            (Some(permission), Some(choice)) => {
-                if permission.interaction_sequence <= choice.interaction_sequence {
-                    Some(PendingInteractionKind::Permission)
-                } else {
-                    Some(PendingInteractionKind::Choice)
-                }
-            }
-            (Some(_), None) => Some(PendingInteractionKind::Permission),
-            (None, Some(_)) => Some(PendingInteractionKind::Choice),
-            (None, None) => None,
+    pub(crate) fn note_session_event(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        event: &str,
+        tool_name: &str,
+        tool_mood: PetMood,
+    ) {
+        let (status, detail) = session_status_for_event(event, tool_name, tool_mood);
+        self.set_session_status(session_id, cwd, status, detail, None);
+    }
+
+    pub(crate) fn mark_session_waiting_permission(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        tool_name: &str,
+        interaction_sequence: u64,
+    ) {
+        let detail = if tool_name.trim().is_empty() {
+            "Waiting for permission".to_string()
+        } else {
+            format!("{} wants access", tool_name.trim())
+        };
+        self.set_session_status(
+            session_id,
+            cwd,
+            ClaudeSessionStatus::WaitingPermission,
+            detail,
+            Some(interaction_sequence),
+        );
+    }
+
+    pub(crate) fn mark_session_waiting_choice(
+        &mut self,
+        session_id: &str,
+        detail: &str,
+        interaction_sequence: u64,
+    ) {
+        let detail = if detail.trim().is_empty() {
+            "Waiting for input".to_string()
+        } else {
+            detail.trim().to_string()
+        };
+        self.set_session_status(
+            session_id,
+            "",
+            ClaudeSessionStatus::WaitingChoice,
+            detail,
+            Some(interaction_sequence),
+        );
+    }
+
+    pub(crate) fn mark_session_interaction_finished(
+        &mut self,
+        session_id: &str,
+        interaction_sequence: u64,
+        status: ClaudeSessionStatus,
+        detail: impl Into<String>,
+    ) {
+        let session_id = normalize_session_id(session_id);
+        let is_current_wait = self.sessions.get(&session_id).is_some_and(|session| {
+            session.waiting_interaction_sequence == Some(interaction_sequence)
+        });
+        if !is_current_wait {
+            return;
         }
+        self.set_session_status(&session_id, "", status, detail.into(), None);
+    }
+
+    pub(crate) fn focus_session(&mut self, session_id: &str) {
+        let session_id = normalize_session_id(session_id);
+        if !self.sessions.contains_key(&session_id) {
+            return;
+        }
+        self.focused_session_id = Some(session_id);
+        self.refresh_visual_mood();
+    }
+
+    pub(crate) fn focus_relative_session(&mut self, delta: i32) {
+        let mut sessions = self
+            .sessions
+            .values()
+            .filter(|session| session.status.is_live())
+            .collect::<Vec<_>>();
+        if sessions.len() <= 1 {
+            return;
+        }
+        sessions.sort_by_key(|session| session.order);
+        let current = self
+            .focused_session_id
+            .as_deref()
+            .and_then(|focused| sessions.iter().position(|session| session.id == focused))
+            .unwrap_or(0);
+        let len = sessions.len() as i32;
+        let next = (current as i32 + delta).rem_euclid(len) as usize;
+        self.focused_session_id = Some(sessions[next].id.clone());
+        self.refresh_visual_mood();
+    }
+
+    pub(crate) fn session_switcher_items(&self) -> Vec<SessionSwitcherItem> {
+        let focused = self.focused_session_id.as_deref();
+        let mut sessions = self
+            .sessions
+            .values()
+            .filter(|session| session.status.is_live())
+            .collect::<Vec<_>>();
+        sessions.sort_by(|a, b| {
+            let a_focused = focused.is_some_and(|focused| focused == a.id);
+            let b_focused = focused.is_some_and(|focused| focused == b.id);
+            b_focused
+                .cmp(&a_focused)
+                .then_with(|| {
+                    self.pending_count_for_session(&b.id)
+                        .cmp(&self.pending_count_for_session(&a.id))
+                })
+                .then_with(|| b.last_seen.cmp(&a.last_seen))
+                .then_with(|| a.order.cmp(&b.order))
+        });
+        sessions
+            .into_iter()
+            .map(|session| SessionSwitcherItem {
+                id: session.id.clone(),
+                display_name: session_display_name(session),
+                status: session.status,
+                detail: session.detail.clone(),
+                focused: self
+                    .focused_session_id
+                    .as_deref()
+                    .is_some_and(|focused| focused == session.id),
+                pending_count: self.pending_count_for_session(&session.id),
+            })
+            .collect()
+    }
+
+    fn set_session_status(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        status: ClaudeSessionStatus,
+        detail: String,
+        waiting_interaction_sequence: Option<u64>,
+    ) {
+        let session_id = normalize_session_id(session_id);
+        let now = Instant::now();
+        if !self.sessions.contains_key(&session_id) {
+            let order = self.next_session_order;
+            self.next_session_order = self.next_session_order.saturating_add(1);
+            self.sessions.insert(
+                session_id.clone(),
+                ClaudeSession {
+                    id: session_id.clone(),
+                    cwd: String::new(),
+                    status: ClaudeSessionStatus::Idle,
+                    detail: String::new(),
+                    order,
+                    last_seen: now,
+                    waiting_interaction_sequence: None,
+                },
+            );
+        }
+
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            if !cwd.trim().is_empty() {
+                session.cwd = cwd.trim().to_string();
+            }
+            session.status = status;
+            session.detail = detail;
+            session.last_seen = now;
+            session.waiting_interaction_sequence = waiting_interaction_sequence;
+        }
+        self.prune_stale_sessions(now);
+        self.reconcile_focused_session(Some(&session_id));
+        self.refresh_visual_mood();
+    }
+
+    fn prune_stale_sessions(&mut self, now: Instant) {
+        let mut remove = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.status == ClaudeSessionStatus::Ended
+                    && now.saturating_duration_since(session.last_seen) >= ENDED_SESSION_RETENTION
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+
+        let ended_count = self
+            .sessions
+            .values()
+            .filter(|session| session.status == ClaudeSessionStatus::Ended)
+            .count();
+        let remaining_ended = ended_count.saturating_sub(remove.len());
+        if remaining_ended > MAX_ENDED_SESSIONS {
+            let extra = remaining_ended - MAX_ENDED_SESSIONS;
+            let mut ended = self
+                .sessions
+                .iter()
+                .filter(|(id, session)| {
+                    session.status == ClaudeSessionStatus::Ended
+                        && !remove.iter().any(|remove_id| remove_id == *id)
+                })
+                .map(|(id, session)| (id.clone(), session.last_seen, session.order))
+                .collect::<Vec<_>>();
+            ended.sort_by_key(|(_, last_seen, order)| (*last_seen, *order));
+            remove.extend(ended.into_iter().take(extra).map(|(id, _, _)| id));
+        }
+
+        for id in remove {
+            self.sessions.remove(&id);
+        }
+    }
+
+    fn reconcile_focused_session(&mut self, preferred: Option<&str>) {
+        if self
+            .focused_session_id
+            .as_deref()
+            .is_some_and(|id| self.session_is_live(id))
+        {
+            return;
+        }
+
+        if let Some(preferred) = preferred {
+            if self.session_is_live(preferred) {
+                self.focused_session_id = Some(preferred.to_string());
+                return;
+            }
+        }
+
+        self.focused_session_id = self
+            .sessions
+            .values()
+            .filter(|session| session.status.is_live())
+            .min_by_key(|session| session.order)
+            .map(|session| session.id.clone());
+    }
+
+    fn session_is_live(&self, session_id: &str) -> bool {
+        self.sessions
+            .get(session_id)
+            .is_some_and(|session| session.status.is_live())
+    }
+
+    fn pending_count_for_session(&self, session_id: &str) -> usize {
+        self.pending_permissions
+            .iter()
+            .filter(|pending| pending.session_id == session_id)
+            .count()
+            + self
+                .pending_choices
+                .iter()
+                .filter(|pending| pending.session_id == session_id)
+                .count()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn current_pending_interaction(&self) -> Option<PendingInteractionKind> {
+        self.current_pending_target().map(|target| target.kind)
     }
 
     pub(crate) fn current_pending_permission(&self) -> Option<&PendingPermission> {
-        matches!(
-            self.current_pending_interaction(),
-            Some(PendingInteractionKind::Permission)
-        )
-        .then(|| self.pending_permissions.front())
-        .flatten()
+        let target = self.current_pending_target()?;
+        if target.kind != PendingInteractionKind::Permission {
+            return None;
+        }
+        self.pending_permissions
+            .iter()
+            .find(|pending| pending.id == target.id)
     }
 
     pub(crate) fn current_pending_choice(&self) -> Option<&PendingChoice> {
-        matches!(
-            self.current_pending_interaction(),
-            Some(PendingInteractionKind::Choice)
-        )
-        .then(|| self.pending_choices.front())
-        .flatten()
+        let target = self.current_pending_target()?;
+        if target.kind != PendingInteractionKind::Choice {
+            return None;
+        }
+        self.pending_choices
+            .iter()
+            .find(|pending| pending.id == target.id)
     }
 
     pub(crate) fn current_pending_choice_mut(&mut self) -> Option<&mut PendingChoice> {
-        if !matches!(
-            self.current_pending_interaction(),
-            Some(PendingInteractionKind::Choice)
-        ) {
+        let target = self.current_pending_target()?;
+        if target.kind != PendingInteractionKind::Choice {
             return None;
         }
-        self.pending_choices.front_mut()
+        self.pending_choices
+            .iter_mut()
+            .find(|pending| pending.id == target.id)
+    }
+
+    fn current_pending_target(&self) -> Option<PendingInteractionTarget> {
+        if let Some(focused) = self.focused_session_id.as_deref()
+            && let Some(target) = self.pending_target_for_session(Some(focused))
+        {
+            return Some(target);
+        }
+        self.pending_target_for_session(None)
+    }
+
+    fn pending_target_for_session(
+        &self,
+        session_id: Option<&str>,
+    ) -> Option<PendingInteractionTarget> {
+        let permission = self
+            .pending_permissions
+            .iter()
+            .filter(|pending| session_id.map_or(true, |id| pending.session_id == id))
+            .map(|pending| PendingInteractionTarget {
+                kind: PendingInteractionKind::Permission,
+                id: pending.id,
+                sequence: pending.interaction_sequence,
+            })
+            .min_by_key(|target| target.sequence);
+
+        let choice = self
+            .pending_choices
+            .iter()
+            .filter(|pending| session_id.map_or(true, |id| pending.session_id == id))
+            .map(|pending| PendingInteractionTarget {
+                kind: PendingInteractionKind::Choice,
+                id: pending.id,
+                sequence: pending.interaction_sequence,
+            })
+            .min_by_key(|target| target.sequence);
+
+        match (permission, choice) {
+            (Some(permission), Some(choice)) => Some(if permission.sequence <= choice.sequence {
+                permission
+            } else {
+                choice
+            }),
+            (Some(permission), None) => Some(permission),
+            (None, Some(choice)) => Some(choice),
+            (None, None) => None,
+        }
     }
 
     pub(crate) fn start_tool_activity(
@@ -565,6 +952,7 @@ impl AppState {
         tool.mood
     }
 
+    #[allow(dead_code)]
     pub(crate) fn finish_all_tools(&mut self) {
         self.active_tools = 0;
         self.active_tool_moods.clear();
@@ -597,6 +985,7 @@ impl AppState {
         self.refresh_visual_mood();
     }
 
+    #[allow(dead_code)]
     pub(crate) fn clear_activity(&mut self) {
         self.finish_all_tools();
         self.active_subagents = 0;
@@ -607,7 +996,13 @@ impl AppState {
     pub(crate) fn activity_mood(&self) -> Option<PetMood> {
         self.best_active_work_span()
             .map(|span| span.mood)
-            .or_else(|| self.legacy_activity_mood())
+            .or_else(|| {
+                if self.focused_session_id.is_some() {
+                    None
+                } else {
+                    self.legacy_activity_mood()
+                }
+            })
     }
 
     pub(crate) fn start_subagent(&mut self) {
@@ -637,6 +1032,36 @@ impl AppState {
     }
 
     fn projected_activity(&self) -> ActivityProjection {
+        if let Some(focused) = self.focused_session_id.as_deref() {
+            if let Some(span) = self.best_span(|span| self.span_visible_for_focus(span, focused)) {
+                return ActivityProjection {
+                    mood: span.mood,
+                    interrupts_visual: span.interrupts_visual,
+                };
+            }
+            if let Some(session_projection) = self
+                .sessions
+                .get(focused)
+                .and_then(|session| session.status.visual_projection())
+            {
+                if let Some(resting) = self.resting_span() {
+                    if resting.mood.priority() > session_projection.mood.priority() {
+                        return ActivityProjection {
+                            mood: resting.mood,
+                            interrupts_visual: resting.interrupts_visual,
+                        };
+                    }
+                }
+                return session_projection;
+            }
+            if let Some(resting) = self.resting_span() {
+                return ActivityProjection {
+                    mood: resting.mood,
+                    interrupts_visual: resting.interrupts_visual,
+                };
+            }
+        }
+
         if let Some(span) = self.best_span(|_| true) {
             return ActivityProjection {
                 mood: span.mood,
@@ -696,7 +1121,28 @@ impl AppState {
         self.best_span(|span| {
             matches!(span.kind, ActivityKind::Tool | ActivityKind::Subagent)
                 && span.mood.is_active_work()
+                && self
+                    .focused_session_id
+                    .as_deref()
+                    .map_or(true, |focused| self.span_visible_for_focus(span, focused))
         })
+    }
+
+    fn span_visible_for_focus(&self, span: &ActivitySpan, focused: &str) -> bool {
+        span.session_id == focused
+            || matches!(
+                span.kind,
+                ActivityKind::Subagent
+                    | ActivityKind::Pomodoro
+                    | ActivityKind::Interaction
+                    | ActivityKind::Fishing
+            )
+    }
+
+    fn resting_span(&self) -> Option<&ActivitySpan> {
+        self.activity_spans
+            .get(RESTING_ACTIVITY_KEY)
+            .filter(|span| span.kind == ActivityKind::Resting)
     }
 
     fn best_span(&self, accept: impl Fn(&ActivitySpan) -> bool) -> Option<&ActivitySpan> {
@@ -1257,6 +1703,91 @@ fn fishing_mood_for_phase(phase: FishingPhase) -> PetMood {
     }
 }
 
+fn normalize_session_id(session_id: &str) -> String {
+    let trimmed = session_id.trim();
+    if trimmed.is_empty() {
+        "default".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn session_display_name(session: &ClaudeSession) -> String {
+    project_name_from_cwd(&session.cwd).unwrap_or_else(|| session.id.clone())
+}
+
+fn project_name_from_cwd(cwd: &str) -> Option<String> {
+    let cwd = cwd.trim();
+    if cwd.is_empty() {
+        return None;
+    }
+    Path::new(cwd)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            cwd.trim_end_matches(['\\', '/'])
+                .rsplit(['\\', '/'])
+                .find(|part| !part.trim().is_empty())
+                .map(|part| part.trim().to_string())
+        })
+}
+
+fn session_status_for_event(
+    event: &str,
+    tool_name: &str,
+    tool_mood: PetMood,
+) -> (ClaudeSessionStatus, String) {
+    match event {
+        "SessionStart" => (ClaudeSessionStatus::Idle, "Session started".to_string()),
+        "SessionResume" => (ClaudeSessionStatus::Idle, "Session resumed".to_string()),
+        "UserPromptSubmit" => (ClaudeSessionStatus::Streaming, "Streaming".to_string()),
+        "PreToolUse" | "WorktreeCreate" => {
+            let tool = if tool_name.trim().is_empty() {
+                "tool"
+            } else {
+                tool_name.trim()
+            };
+            (
+                ClaudeSessionStatus::Tool,
+                format!("{} {}", tool_mood_label(tool_mood), tool),
+            )
+        }
+        "PostToolUse" | "PostToolBatch" => {
+            (ClaudeSessionStatus::Streaming, "Streaming".to_string())
+        }
+        "PreCompact" => (ClaudeSessionStatus::Compacting, "Compacting".to_string()),
+        "PostCompact" => (ClaudeSessionStatus::Done, "Compacted".to_string()),
+        "PermissionDenied" => (
+            ClaudeSessionStatus::Streaming,
+            "Permission denied".to_string(),
+        ),
+        "PostToolUseFailure" | "StopFailure" => {
+            (ClaudeSessionStatus::Error, "Hook failure".to_string())
+        }
+        "Stop" => (ClaudeSessionStatus::Done, "Ready".to_string()),
+        "SessionEnd" => (ClaudeSessionStatus::Ended, "Session ended".to_string()),
+        "Notification" => (ClaudeSessionStatus::Done, "Notification".to_string()),
+        "Elicitation" => (
+            ClaudeSessionStatus::WaitingChoice,
+            "Waiting for input".to_string(),
+        ),
+        _ => (ClaudeSessionStatus::Streaming, event.to_string()),
+    }
+}
+
+fn tool_mood_label(mood: PetMood) -> &'static str {
+    match mood {
+        PetMood::Typing => "Editing",
+        PetMood::Building => "Running",
+        PetMood::Search => "Reading",
+        PetMood::Subagent => "Delegating",
+        _ => "Using",
+    }
+}
+
 fn normalize_tool_name_key(tool_name: &str) -> String {
     tool_name.trim().to_ascii_lowercase()
 }
@@ -1396,6 +1927,228 @@ mod tests {
         );
         assert!(state.current_pending_permission().is_some());
         assert!(state.current_pending_choice().is_none());
+    }
+
+    #[test]
+    fn focused_session_pending_takes_priority_over_older_global_pending() {
+        let mut state = AppState::new();
+        state.note_session_event("s1", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("s2", "", "SessionStart", "", PetMood::Thinking);
+        state.focus_session("s2");
+
+        state.pending_permissions.push_back(PendingPermission {
+            id: 1,
+            interaction_sequence: 1,
+            session_id: "s1".to_string(),
+            tool_name: "Edit".to_string(),
+            summary: String::new(),
+            cwd: String::new(),
+            suggestions: Vec::new(),
+            waiter: Arc::new(PermissionWaiter {
+                decision: Mutex::new(None),
+                ready: Condvar::new(),
+            }),
+        });
+        state.pending_choices.push_back(PendingChoice {
+            id: 1,
+            interaction_sequence: 2,
+            session_id: "s2".to_string(),
+            kind: ChoiceKind::AskUserQuestion,
+            title: String::new(),
+            detail: String::new(),
+            questions: Vec::new(),
+            selected: Vec::new(),
+            other_text: Vec::new(),
+            tool_input: Value::Null,
+            waiter: Arc::new(ChoiceWaiter {
+                decision: Mutex::new(None),
+                ready: Condvar::new(),
+            }),
+        });
+
+        assert_eq!(
+            state.current_pending_interaction(),
+            Some(PendingInteractionKind::Choice)
+        );
+        assert!(state.current_pending_choice().is_some());
+        assert!(state.current_pending_permission().is_none());
+    }
+
+    #[test]
+    fn stale_interaction_finish_does_not_reopen_ended_session() {
+        let mut state = AppState::new();
+        state.mark_session_waiting_permission("s1", "", "Edit", 1);
+        state.note_session_event("s1", "", "SessionEnd", "", PetMood::Thinking);
+
+        state.mark_session_interaction_finished(
+            "s1",
+            1,
+            ClaudeSessionStatus::Done,
+            "Permission closed",
+        );
+
+        assert_eq!(
+            state.sessions.get("s1").expect("session").status,
+            ClaudeSessionStatus::Ended
+        );
+    }
+
+    #[test]
+    fn older_interaction_finish_does_not_mask_newer_wait() {
+        let mut state = AppState::new();
+        state.mark_session_waiting_permission("s1", "", "Edit", 1);
+        state.mark_session_waiting_choice("s1", "Question", 2);
+
+        state.mark_session_interaction_finished(
+            "s1",
+            1,
+            ClaudeSessionStatus::Done,
+            "Permission closed",
+        );
+
+        assert_eq!(
+            state.sessions.get("s1").expect("session").status,
+            ClaudeSessionStatus::WaitingChoice
+        );
+    }
+
+    #[test]
+    fn focused_session_activity_mood_ignores_other_session_tools() {
+        let mut state = AppState::new();
+        state.note_session_event("s1", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("s2", "", "SessionStart", "", PetMood::Thinking);
+        state.focus_session("s2");
+
+        state.start_tool_activity(
+            "s1:id:write-1".to_string(),
+            "Write".to_string(),
+            PetMood::Typing,
+        );
+        assert_eq!(state.activity_mood(), None);
+
+        state.start_tool_activity(
+            "s2:id:bash-1".to_string(),
+            "Bash".to_string(),
+            PetMood::Building,
+        );
+        assert_eq!(state.activity_mood(), Some(PetMood::Building));
+    }
+
+    #[test]
+    fn relative_session_focus_cycles_live_sessions() {
+        let mut state = AppState::new();
+        state.note_session_event("s1", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("s2", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("s3", "", "SessionStart", "", PetMood::Thinking);
+        state.focus_session("s2");
+
+        state.focus_relative_session(1);
+        assert_eq!(state.focused_session_id.as_deref(), Some("s3"));
+
+        state.focus_relative_session(1);
+        assert_eq!(state.focused_session_id.as_deref(), Some("s1"));
+
+        state.note_session_event("s1", "", "SessionEnd", "", PetMood::Thinking);
+        state.focus_relative_session(-1);
+        assert_eq!(state.focused_session_id.as_deref(), Some("s3"));
+    }
+
+    #[test]
+    fn focused_session_still_allows_global_subagent_visual() {
+        let mut state = AppState::new();
+        state.note_session_event("s1", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("s2", "", "SessionStart", "", PetMood::Thinking);
+        state.focus_session("s2");
+
+        state.start_subagent();
+
+        assert_eq!(state.activity_mood(), Some(PetMood::Subagent));
+        assert_eq!(state.mood, PetMood::Subagent);
+    }
+
+    #[test]
+    fn completed_focused_session_does_not_mask_resting_happy() {
+        let mut state = AppState::new();
+        state.note_session_event("s1", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("s1", "", "Stop", "", PetMood::Thinking);
+        state.set_resting_mood(PetMood::Happy, false);
+
+        assert_eq!(state.resting_mood, PetMood::Happy);
+        assert_eq!(state.mood, PetMood::Happy);
+    }
+
+    #[test]
+    fn session_switcher_keeps_focused_and_recent_sessions_first() {
+        let mut state = AppState::new();
+        let base = Instant::now();
+        for index in 1..=6 {
+            let id = format!("s{index}");
+            state.note_session_event(&id, "", "SessionStart", "", PetMood::Thinking);
+            state.sessions.get_mut(&id).expect("session").last_seen =
+                base + Duration::from_secs(index);
+        }
+        state.focus_session("s1");
+
+        let items = state.session_switcher_items();
+        let visible = items
+            .iter()
+            .take(5)
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(visible.first().copied(), Some("s1"));
+        assert!(visible.contains(&"s6"));
+    }
+
+    #[test]
+    fn session_switcher_uses_project_name_from_cwd() {
+        let mut state = AppState::new();
+        state.note_session_event(
+            "session-abcdef",
+            "C:\\Users\\me\\repo",
+            "SessionStart",
+            "",
+            PetMood::Thinking,
+        );
+
+        let items = state.session_switcher_items();
+
+        assert_eq!(items[0].display_name, "repo");
+    }
+
+    #[test]
+    fn ended_sessions_prune_after_retention() {
+        let mut state = AppState::new();
+        state.note_session_event("old", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("old", "", "SessionEnd", "", PetMood::Thinking);
+        state.sessions.get_mut("old").expect("session").last_seen =
+            Instant::now() - ENDED_SESSION_RETENTION - Duration::from_secs(1);
+
+        state.note_session_event("live", "", "SessionStart", "", PetMood::Thinking);
+
+        assert!(!state.sessions.contains_key("old"));
+        assert!(state.sessions.contains_key("live"));
+    }
+
+    #[test]
+    fn ended_session_pruning_keeps_recent_cap() {
+        let mut state = AppState::new();
+        let base = Instant::now() - Duration::from_secs(60);
+        for index in 0..(MAX_ENDED_SESSIONS + 3) {
+            let id = format!("ended-{index}");
+            state.note_session_event(&id, "", "SessionEnd", "", PetMood::Thinking);
+            state.sessions.get_mut(&id).expect("session").last_seen =
+                base + Duration::from_secs(index as u64);
+        }
+
+        let ended_count = state
+            .sessions
+            .values()
+            .filter(|session| session.status == ClaudeSessionStatus::Ended)
+            .count();
+
+        assert_eq!(ended_count, MAX_ENDED_SESSIONS);
+        assert!(!state.sessions.contains_key("ended-0"));
     }
 
     #[test]

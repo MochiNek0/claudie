@@ -27,6 +27,8 @@ pub(crate) struct UserSettings {
     pub(crate) gif_dir: String,
     pub(crate) animations: AnimationSettings,
     pub(crate) window_position: Option<WindowPosition>,
+    #[serde(default = "default_show_session_switcher")]
+    pub(crate) show_session_switcher: bool,
     #[serde(default = "default_pet_scale_percent")]
     pub(crate) pet_scale_percent: u32,
     #[serde(default = "default_sleep_after_secs")]
@@ -102,6 +104,7 @@ impl Default for UserSettings {
             gif_dir: DEFAULT_GIF_DIR.to_string(),
             animations: AnimationSettings::default(),
             window_position: None,
+            show_session_switcher: true,
             pet_scale_percent: 80,
             sleep_after_secs: DEFAULT_SLEEP_AFTER_SECS,
             pomodoro: PomodoroSettings::default(),
@@ -189,6 +192,10 @@ fn default_pet_scale_percent() -> u32 {
 
 fn default_sleep_after_secs() -> u32 {
     DEFAULT_SLEEP_AFTER_SECS
+}
+
+fn default_show_session_switcher() -> bool {
+    true
 }
 
 impl LlmProfileDb {

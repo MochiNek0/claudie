@@ -6,8 +6,10 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use render::{
-    RenderState, choice_option_at_point, fill_rect, render_permission_overlay, render_scene,
-    scroll_choice_lines, scroll_permission_detail_lines, snapshot_state,
+    RenderState, choice_option_at_point, fill_rect, render_fishing_hud_window,
+    render_permission_overlay, render_pet_window, render_session_switcher_window,
+    scroll_choice_lines, scroll_permission_detail_lines, session_switcher_session_at_point,
+    snapshot_state,
 };
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -69,6 +71,7 @@ static DRAG_WINDOW_Y: AtomicI32 = AtomicI32::new(0);
 static RIGHT_BUTTON_CAPTURED: AtomicBool = AtomicBool::new(false);
 static CURRENT_TIMER_MS: AtomicU32 = AtomicU32::new(ACTIVE_TIMER_MS);
 static LAST_TOPMOST_TICK: AtomicU32 = AtomicU32::new(0);
+static PET_NOMINAL_ORIGIN: OnceLock<Mutex<Option<(i32, i32)>>> = OnceLock::new();
 const CLICK_DRAG_THRESHOLD_PX: i32 = 6;
 const ACTIVE_TIMER_MS: u32 = 33;
 const IDLE_TIMER_MS: u32 = 120;
@@ -86,9 +89,35 @@ struct MenuProfileDrawSegment {
     color: u32,
 }
 
+struct AuxWindows {
+    permission_overlay: HWND,
+    fishing_hud: HWND,
+    session_switcher: HWND,
+}
+
+struct WindowLayout {
+    pet_visible_rect: PetVisibleRect,
+    fishing_visible: bool,
+    fishing_width: i32,
+    fishing_height: i32,
+    session_visible: bool,
+    session_width: i32,
+    session_height: i32,
+}
+
+#[derive(Clone, Copy)]
+struct PetVisibleRect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
 pub(crate) unsafe fn run_window(port: u16) {
     let class_name = wide("ClaudieWindow");
     let overlay_class_name = wide("ClaudiePermissionOverlay");
+    let fishing_class_name = wide("ClaudieFishingHud");
+    let session_class_name = wide("ClaudieSessionSwitcher");
     let title = wide(&format!("claudie :{port}"));
     let hinstance = GetModuleHandleW(std::ptr::null());
     let wc = WNDCLASSW {
@@ -110,9 +139,23 @@ pub(crate) unsafe fn run_window(port: u16) {
         ..wc
     };
     RegisterClassW(&overlay_wc);
+    let fishing_wc = WNDCLASSW {
+        lpfnWndProc: Some(fishing_hud_proc),
+        lpszClassName: fishing_class_name.as_ptr(),
+        ..wc
+    };
+    RegisterClassW(&fishing_wc);
+    let session_wc = WNDCLASSW {
+        lpfnWndProc: Some(session_switcher_proc),
+        lpszClassName: session_class_name.as_ptr(),
+        ..wc
+    };
+    RegisterClassW(&session_wc);
 
     let settings = current_user_settings();
     let (x, y) = initial_pet_position(&settings);
+    let initial_visible_rect = visible_pet_rect_in_window(&settings, PetMood::Idle);
+    let (window_w, window_h) = (initial_visible_rect.width, initial_visible_rect.height);
     let hwnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
         class_name.as_ptr(),
@@ -120,8 +163,8 @@ pub(crate) unsafe fn run_window(port: u16) {
         WS_POPUP | WS_VISIBLE,
         x,
         y,
-        WINDOW_WIDTH,
-        WINDOW_HEIGHT,
+        window_w,
+        window_h,
         std::ptr::null_mut(),
         std::ptr::null_mut(),
         hinstance,
@@ -132,6 +175,7 @@ pub(crate) unsafe fn run_window(port: u16) {
         eprintln!("Failed to create claudie window");
         return;
     }
+    remember_pet_nominal_origin_from_window(hwnd, initial_visible_rect);
 
     let overlay_hwnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
@@ -149,8 +193,34 @@ pub(crate) unsafe fn run_window(port: u16) {
     );
     if !overlay_hwnd.is_null() {
         SetLayeredWindowAttributes(overlay_hwnd, TRANSPARENT_KEY, 255, LWA_COLORKEY);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, overlay_hwnd as isize);
     }
+
+    let fishing_hwnd = create_aux_window(
+        fishing_class_name.as_ptr(),
+        title.as_ptr(),
+        FISHING_HUD_WIDTH,
+        FISHING_HUD_HEIGHT,
+        hinstance,
+        hwnd,
+    );
+    let (session_width, session_height) = session_window_size_for_settings(&settings);
+    let session_hwnd = create_aux_window(
+        session_class_name.as_ptr(),
+        title.as_ptr(),
+        session_width,
+        session_height,
+        hinstance,
+        hwnd,
+    );
+
+    store_aux_windows(
+        hwnd,
+        AuxWindows {
+            permission_overlay: overlay_hwnd,
+            fishing_hud: fishing_hwnd,
+            session_switcher: session_hwnd,
+        },
+    );
 
     SetLayeredWindowAttributes(hwnd, TRANSPARENT_KEY, 255, LWA_COLORKEY);
     ShowWindow(hwnd, SW_SHOW);
@@ -165,6 +235,35 @@ pub(crate) unsafe fn run_window(port: u16) {
 
     UnregisterHotKey(hwnd, 1);
     UnregisterHotKey(hwnd, 2);
+}
+
+unsafe fn create_aux_window(
+    class_name: *const u16,
+    title: *const u16,
+    width: i32,
+    height: i32,
+    hinstance: windows_sys::Win32::Foundation::HINSTANCE,
+    owner: HWND,
+) -> HWND {
+    let hwnd = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
+        class_name,
+        title,
+        WS_POPUP,
+        0,
+        0,
+        width,
+        height,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        hinstance,
+        std::ptr::null_mut(),
+    );
+    if !hwnd.is_null() {
+        SetLayeredWindowAttributes(hwnd, TRANSPARENT_KEY, 255, LWA_COLORKEY);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, owner as isize);
+    }
+    hwnd
 }
 
 unsafe extern "system" fn window_proc(
@@ -197,6 +296,7 @@ unsafe extern "system" fn window_proc(
         WM_ERASEBKGND => 1,
         WM_TIMER => {
             let mut timer_ms = IDLE_TIMER_MS;
+            let mut target_layout = None;
             if let Some(state) = APP_STATE.get() {
                 let mut state = state.lock().expect("state poisoned");
                 let user_idle = user_idle_snapshot();
@@ -207,8 +307,12 @@ unsafe extern "system" fn window_proc(
                     user_idle.map(|snapshot| snapshot.1),
                 );
                 timer_ms = desired_timer_interval(&state);
+                target_layout = Some(window_layout_for_state(&state));
             }
             update_window_timer(hwnd, timer_ms);
+            if let Some(layout) = target_layout {
+                sync_window_layout(hwnd, &layout);
+            }
             let overlay = overlay_hwnd(hwnd);
             if !overlay.is_null() {
                 ShowWindow(overlay, SW_HIDE);
@@ -216,8 +320,10 @@ unsafe extern "system" fn window_proc(
             sync_prompt_popup();
             if !CONTEXT_MENU_OPEN.load(Ordering::Relaxed) && should_refresh_topmost() {
                 ensure_pet_topmost(hwnd);
+                ensure_aux_topmost(hwnd);
             }
             InvalidateRect(hwnd, std::ptr::null(), 0);
+            invalidate_aux_windows(hwnd);
             0
         }
         WM_HOTKEY => {
@@ -267,6 +373,7 @@ unsafe extern "system" fn window_proc(
                 LEFT_BUTTON_DRAGGING.store(true, Ordering::Relaxed);
             }
             if LEFT_BUTTON_DRAGGING.load(Ordering::Relaxed) {
+                let visible_rect = current_pet_visible_rect_in_window();
                 let (x, y) = clamp_window_position(
                     DRAG_WINDOW_X.load(Ordering::Relaxed) + dx,
                     DRAG_WINDOW_Y.load(Ordering::Relaxed) + dy,
@@ -281,6 +388,8 @@ unsafe extern "system" fn window_proc(
                     0,
                     SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 );
+                remember_pet_nominal_origin(x, y, visible_rect);
+                sync_current_window_layout(hwnd);
             }
             0
         }
@@ -290,12 +399,14 @@ unsafe extern "system" fn window_proc(
             ReleaseCapture();
             if was_captured && !was_dragging {
                 with_app_state(|state| state.interact_with_pet());
-                InvalidateRect(hwnd, std::ptr::null(), 0);
+                sync_current_window_layout(hwnd);
+                invalidate_pet_and_aux(hwnd);
             } else if was_dragging {
                 persist_pet_window_position(hwnd);
             }
             0
         }
+        WM_MOUSEWHEEL => DefWindowProcW(hwnd, msg, wparam, lparam),
         WM_RBUTTONDOWN => {
             RIGHT_BUTTON_CAPTURED.store(true, Ordering::Relaxed);
             SetCapture(hwnd);
@@ -319,10 +430,7 @@ unsafe extern "system" fn window_proc(
         WM_DESTROY => {
             persist_pet_window_position(hwnd);
             flush_app_stats_now();
-            let overlay = overlay_hwnd(hwnd);
-            if !overlay.is_null() {
-                DestroyWindow(overlay);
-            }
+            destroy_aux_windows(hwnd);
             close_settings_panel();
             close_prompt_popup();
             let _ = slint::quit_event_loop();
@@ -339,15 +447,47 @@ fn current_user_settings() -> UserSettings {
         .unwrap_or_else(load_user_settings)
 }
 
+fn window_layout_for_state(state: &AppState) -> WindowLayout {
+    let pet_visible_rect = visible_pet_rect_in_window(&state.settings, state.mood);
+    let (session_width, session_height) = session_window_size_for_state(state);
+    WindowLayout {
+        pet_visible_rect,
+        fishing_visible: state.fishing.is_active(),
+        fishing_width: FISHING_HUD_WIDTH,
+        fishing_height: FISHING_HUD_HEIGHT,
+        session_visible: session_switcher_visible(state),
+        session_width,
+        session_height,
+    }
+}
+
+fn session_switcher_visible(state: &AppState) -> bool {
+    state.settings.show_session_switcher && state.session_switcher_items().len() > 1
+}
+
+fn session_window_size_for_settings(settings: &UserSettings) -> (i32, i32) {
+    let (pet_width, _) = scaled_pet_size_for_percent(settings.pet_scale_percent());
+    (
+        pet_width.max(SESSION_SWITCHER_MIN_WIDTH),
+        SESSION_BAR_HEIGHT,
+    )
+}
+
+fn session_window_size_for_state(state: &AppState) -> (i32, i32) {
+    session_window_size_for_settings(&state.settings)
+}
+
+fn pet_window_size_for_settings(settings: &UserSettings, mood: PetMood) -> (i32, i32) {
+    let rect = visible_pet_rect_in_window(settings, mood);
+    (rect.width.max(1), rect.height.max(1))
+}
+
 unsafe fn initial_pet_position(settings: &UserSettings) -> (i32, i32) {
     let Some(position) = settings.window_position else {
         return (CW_USEDEFAULT, CW_USEDEFAULT);
     };
-    clamp_window_position(
-        position.x,
-        position.y,
-        visible_pet_rect_in_window(settings, PetMood::Idle),
-    )
+    let (width, height) = pet_window_size_for_settings(settings, PetMood::Idle);
+    clamp_window_position(position.x, position.y, (0, 0, width, height))
 }
 
 unsafe fn clamp_window_position(x: i32, y: i32, visible_rect: (i32, i32, i32, i32)) -> (i32, i32) {
@@ -376,6 +516,12 @@ unsafe fn clamp_window_position(x: i32, y: i32, visible_rect: (i32, i32, i32, i3
 
 fn current_pet_rect_in_window() -> (i32, i32, i32, i32) {
     let (settings, mood) = current_pet_settings_and_mood();
+    let (width, height) = pet_window_size_for_settings(&settings, mood);
+    (0, 0, width, height)
+}
+
+fn current_pet_visible_rect_in_window() -> PetVisibleRect {
+    let (settings, mood) = current_pet_settings_and_mood();
     visible_pet_rect_in_window(&settings, mood)
 }
 
@@ -390,15 +536,11 @@ fn current_pet_settings_and_mood() -> (UserSettings, PetMood) {
 }
 
 fn nominal_pet_rect_in_window(settings: &UserSettings) -> (i32, i32, i32, i32) {
-    let scale = settings.pet_scale_percent() as i32;
-    let w = (PET_W * scale + 50) / 100;
-    let h = (PET_H * scale + 50) / 100;
-    let center_x = PET_X + PET_W / 2;
-    let bottom_y = PET_Y + PET_H;
-    (center_x - w / 2, bottom_y - h, w.max(1), h.max(1))
+    let (w, h) = scaled_pet_size_for_percent(settings.pet_scale_percent());
+    (PET_X, PET_Y, w, h)
 }
 
-fn visible_pet_rect_in_window(settings: &UserSettings, mood: PetMood) -> (i32, i32, i32, i32) {
+fn visible_pet_rect_in_window(settings: &UserSettings, mood: PetMood) -> PetVisibleRect {
     let nominal_rect = nominal_pet_rect_in_window(settings);
     let Some(bounds) = PET_RENDERER.get().and_then(|store| {
         store
@@ -406,7 +548,13 @@ fn visible_pet_rect_in_window(settings: &UserSettings, mood: PetMood) -> (i32, i
             .expect("pet renderer poisoned")
             .visible_bounds(mood)
     }) else {
-        return nominal_rect;
+        let (x, y, width, height) = nominal_rect;
+        return PetVisibleRect {
+            x,
+            y,
+            width,
+            height,
+        };
     };
 
     let (pet_x, pet_y, pet_w, pet_h) = nominal_rect;
@@ -424,7 +572,12 @@ fn visible_pet_rect_in_window(settings: &UserSettings, mood: PetMood) -> (i32, i
         draw_x + (((bounds.x + bounds.width) as i64 * draw_w + source_w - 1) / source_w) as i32;
     let bottom =
         draw_y + (((bounds.y + bounds.height) as i64 * draw_h + source_h - 1) / source_h) as i32;
-    (left, top, (right - left).max(1), (bottom - top).max(1))
+    PetVisibleRect {
+        x: left,
+        y: top,
+        width: (right - left).max(1),
+        height: (bottom - top).max(1),
+    }
 }
 
 fn fit_source_into(src_w: u32, src_h: u32, max_w: i32, max_h: i32) -> (i32, i32) {
@@ -458,9 +611,12 @@ unsafe fn persist_pet_window_position(hwnd: HWND) {
     }
 
     let mut settings = current_user_settings();
+    let current_visible_rect = current_pet_visible_rect_in_window();
+    let (origin_x, origin_y) = pet_nominal_origin(&rect, current_visible_rect);
+    let idle_visible_rect = visible_pet_rect_in_window(&settings, PetMood::Idle);
     settings.window_position = Some(WindowPosition {
-        x: rect.left,
-        y: rect.top,
+        x: origin_x + idle_visible_rect.x,
+        y: origin_y + idle_visible_rect.y,
     });
     if save_user_settings(&settings).is_ok()
         && let Some(state) = APP_STATE.get()
@@ -518,6 +674,183 @@ unsafe fn update_window_timer(hwnd: HWND, interval_ms: u32) {
     }
 }
 
+unsafe fn sync_window_layout(hwnd: HWND, layout: &WindowLayout) {
+    resize_pet_window_if_needed(hwnd, layout.pet_visible_rect);
+    let Some(aux) = aux_windows(hwnd) else {
+        return;
+    };
+    if !aux.permission_overlay.is_null() {
+        ShowWindow(aux.permission_overlay, SW_HIDE);
+    }
+    let mut pet_rect = RECT::default();
+    if GetWindowRect(hwnd, &mut pet_rect) == 0 {
+        return;
+    }
+    sync_fishing_window(&pet_rect, aux.fishing_hud, layout);
+    sync_session_window(&pet_rect, aux.session_switcher, layout);
+}
+
+unsafe fn sync_current_window_layout(hwnd: HWND) {
+    let Some(state) = APP_STATE.get() else {
+        return;
+    };
+    let layout = {
+        let state = state.lock().expect("state poisoned");
+        window_layout_for_state(&state)
+    };
+    sync_window_layout(hwnd, &layout);
+}
+
+unsafe fn resize_pet_window_if_needed(hwnd: HWND, visible_rect: PetVisibleRect) {
+    let mut rect = RECT::default();
+    if GetWindowRect(hwnd, &mut rect) == 0 {
+        return;
+    }
+    let width = visible_rect.width;
+    let height = visible_rect.height;
+    let (origin_x, origin_y) = pet_nominal_origin(&rect, visible_rect);
+    let target_x = origin_x + visible_rect.x;
+    let target_y = origin_y + visible_rect.y;
+    let (x, y) = clamp_window_position(target_x, target_y, (0, 0, width, height));
+    if rect.right - rect.left == width
+        && rect.bottom - rect.top == height
+        && rect.left == x
+        && rect.top == y
+    {
+        return;
+    }
+    SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        x,
+        y,
+        width,
+        height,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+    );
+}
+
+fn pet_nominal_origin_store() -> &'static Mutex<Option<(i32, i32)>> {
+    PET_NOMINAL_ORIGIN.get_or_init(|| Mutex::new(None))
+}
+
+fn pet_nominal_origin(window_rect: &RECT, visible_rect: PetVisibleRect) -> (i32, i32) {
+    let mut origin = pet_nominal_origin_store()
+        .lock()
+        .expect("pet nominal origin poisoned");
+    if let Some(origin) = *origin {
+        return origin;
+    }
+    let current = (
+        window_rect.left - visible_rect.x,
+        window_rect.top - visible_rect.y,
+    );
+    *origin = Some(current);
+    current
+}
+
+fn remember_pet_nominal_origin(x: i32, y: i32, visible_rect: PetVisibleRect) {
+    *pet_nominal_origin_store()
+        .lock()
+        .expect("pet nominal origin poisoned") = Some((x - visible_rect.x, y - visible_rect.y));
+}
+
+unsafe fn remember_pet_nominal_origin_from_window(hwnd: HWND, visible_rect: PetVisibleRect) {
+    let mut rect = RECT::default();
+    if GetWindowRect(hwnd, &mut rect) != 0 {
+        remember_pet_nominal_origin(rect.left, rect.top, visible_rect);
+    }
+}
+
+unsafe fn sync_fishing_window(pet_rect: &RECT, hwnd: HWND, layout: &WindowLayout) {
+    if hwnd.is_null() {
+        return;
+    }
+    if !layout.fishing_visible {
+        ShowWindow(hwnd, SW_HIDE);
+        return;
+    }
+    let (x, y) = fishing_window_position(pet_rect, layout.fishing_width, layout.fishing_height);
+    SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        x,
+        y,
+        layout.fishing_width,
+        layout.fishing_height,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+    );
+}
+
+unsafe fn sync_session_window(pet_rect: &RECT, hwnd: HWND, layout: &WindowLayout) {
+    if hwnd.is_null() {
+        return;
+    }
+    if !layout.session_visible {
+        ShowWindow(hwnd, SW_HIDE);
+        return;
+    }
+    let (x, y) = session_window_position(pet_rect, layout.session_width, layout.session_height);
+    SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        x,
+        y,
+        layout.session_width,
+        layout.session_height,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+    );
+}
+
+unsafe fn fishing_window_position(pet_rect: &RECT, width: i32, height: i32) -> (i32, i32) {
+    const GAP: i32 = 8;
+    let (screen_x, _, screen_w, _) = virtual_screen_bounds();
+    let screen_right = screen_x + screen_w;
+    let right_x = pet_rect.right + GAP;
+    let left_x = pet_rect.left - width - GAP;
+    let x = if right_x + width <= screen_right {
+        right_x
+    } else if left_x >= screen_x {
+        left_x
+    } else {
+        right_x
+    };
+    let pet_h = pet_rect.bottom - pet_rect.top;
+    let y = pet_rect.top + (pet_h - height) / 2;
+    clamp_window_position(x, y, (0, 0, width, height))
+}
+
+unsafe fn session_window_position(pet_rect: &RECT, width: i32, height: i32) -> (i32, i32) {
+    let (_, screen_y, _, screen_h) = virtual_screen_bounds();
+    let screen_bottom = screen_y + screen_h;
+    let pet_w = pet_rect.right - pet_rect.left;
+    let x = pet_rect.left + (pet_w - width) / 2;
+    let below_y = pet_rect.bottom + SESSION_BAR_GAP;
+    let above_y = pet_rect.top - SESSION_BAR_GAP - height;
+    let y = if below_y + height <= screen_bottom {
+        below_y
+    } else if above_y >= screen_y {
+        above_y
+    } else {
+        below_y
+    };
+    clamp_window_position(x, y, (0, 0, width, height))
+}
+
+unsafe fn virtual_screen_bounds() -> (i32, i32, i32, i32) {
+    let mut min_x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    let mut min_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    let mut screen_w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    let mut screen_h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if screen_w <= 0 || screen_h <= 0 {
+        min_x = 0;
+        min_y = 0;
+        screen_w = GetSystemMetrics(SM_CXSCREEN);
+        screen_h = GetSystemMetrics(SM_CYSCREEN);
+    }
+    (min_x, min_y, screen_w, screen_h)
+}
+
 fn should_refresh_topmost() -> bool {
     let now = unsafe { GetTickCount() };
     let mut last = LAST_TOPMOST_TICK.load(Ordering::Relaxed);
@@ -537,8 +870,14 @@ fn should_refresh_topmost() -> bool {
     }
 }
 
-unsafe fn base_point_from_client(_hwnd: HWND, x: i32, y: i32) -> (i32, i32) {
-    if x < 0 || y < 0 || x > WINDOW_WIDTH || y > WINDOW_HEIGHT {
+unsafe fn base_point_from_client(hwnd: HWND, x: i32, y: i32) -> (i32, i32) {
+    let mut rect = RECT::default();
+    if GetClientRect(hwnd, &mut rect) == 0 {
+        return (-1, -1);
+    }
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if x < 0 || y < 0 || x > width || y > height {
         return (-1, -1);
     }
     (x, y)
@@ -549,9 +888,85 @@ unsafe fn cursor_over_pet(hwnd: HWND) -> bool {
     if GetCursorPos(&mut point) == 0 || ScreenToClient(hwnd, &mut point) == 0 {
         return false;
     }
-    let (settings, mood) = current_pet_settings_and_mood();
-    let (pet_x, pet_y, pet_w, pet_h) = visible_pet_rect_in_window(&settings, mood);
-    point.x >= pet_x && point.x <= pet_x + pet_w && point.y >= pet_y && point.y <= pet_y + pet_h
+    let (x, y, w, h) = current_pet_rect_in_window();
+    point.x >= x && point.x <= x + w && point.y >= y && point.y <= y + h
+}
+
+unsafe extern "system" fn fishing_hud_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            paint_fishing_hud(hwnd);
+            0
+        }
+        WM_ERASEBKGND => 1,
+        WM_LBUTTONDOWN => {
+            with_app_state(|state| {
+                state.handle_fishing_input();
+            });
+            let pet_hwnd = parent_pet_hwnd(hwnd);
+            sync_current_window_layout(pet_hwnd);
+            invalidate_pet_and_aux(pet_hwnd);
+            0
+        }
+        WM_SETCURSOR => {
+            SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND));
+            1
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+unsafe extern "system" fn session_switcher_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            paint_session_switcher(hwnd);
+            0
+        }
+        WM_ERASEBKGND => 1,
+        WM_LBUTTONDOWN => {
+            let x = loword(lparam as u32) as i32;
+            let y = hiword(lparam as u32) as i32;
+            let mut rect = RECT::default();
+            if GetClientRect(hwnd, &mut rect) != 0
+                && let Some(session_id) = session_switcher_session_at(
+                    x,
+                    y,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                )
+            {
+                with_app_state(|state| state.focus_session(&session_id));
+                let pet_hwnd = parent_pet_hwnd(hwnd);
+                sync_current_window_layout(pet_hwnd);
+                invalidate_pet_and_aux(pet_hwnd);
+            }
+            0
+        }
+        WM_MOUSEWHEEL => {
+            let wheel_delta = hiword(wparam as u32) as i32;
+            let direction = if wheel_delta < 0 { 1 } else { -1 };
+            with_app_state(|state| state.focus_relative_session(direction));
+            let pet_hwnd = parent_pet_hwnd(hwnd);
+            sync_current_window_layout(pet_hwnd);
+            invalidate_pet_and_aux(pet_hwnd);
+            0
+        }
+        WM_SETCURSOR => {
+            SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND));
+            1
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
 }
 
 unsafe extern "system" fn permission_overlay_proc(
@@ -692,7 +1107,85 @@ unsafe fn cursor_over_permission_button(hwnd: HWND) -> bool {
 }
 
 unsafe fn overlay_hwnd(hwnd: HWND) -> HWND {
+    aux_windows(hwnd)
+        .map(|windows| windows.permission_overlay)
+        .unwrap_or(std::ptr::null_mut())
+}
+
+unsafe fn parent_pet_hwnd(hwnd: HWND) -> HWND {
     GetWindowLongPtrW(hwnd, GWLP_USERDATA) as HWND
+}
+
+unsafe fn store_aux_windows(hwnd: HWND, windows: AuxWindows) {
+    let boxed = Box::new(windows);
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(boxed) as isize);
+}
+
+unsafe fn aux_windows(hwnd: HWND) -> Option<&'static AuxWindows> {
+    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const AuxWindows;
+    (!ptr.is_null()).then(|| &*ptr)
+}
+
+unsafe fn take_aux_windows(hwnd: HWND) -> Option<Box<AuxWindows>> {
+    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AuxWindows;
+    if ptr.is_null() {
+        return None;
+    }
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    Some(Box::from_raw(ptr))
+}
+
+unsafe fn destroy_aux_windows(hwnd: HWND) {
+    let Some(windows) = take_aux_windows(hwnd) else {
+        return;
+    };
+    for aux_hwnd in [
+        windows.permission_overlay,
+        windows.fishing_hud,
+        windows.session_switcher,
+    ] {
+        if !aux_hwnd.is_null() {
+            DestroyWindow(aux_hwnd);
+        }
+    }
+}
+
+unsafe fn ensure_aux_topmost(hwnd: HWND) {
+    let Some(windows) = aux_windows(hwnd) else {
+        return;
+    };
+    for aux_hwnd in [windows.fishing_hud, windows.session_switcher] {
+        if !aux_hwnd.is_null() {
+            SetWindowPos(
+                aux_hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
+unsafe fn invalidate_aux_windows(hwnd: HWND) {
+    let Some(windows) = aux_windows(hwnd) else {
+        return;
+    };
+    for aux_hwnd in [windows.fishing_hud, windows.session_switcher] {
+        if !aux_hwnd.is_null() {
+            InvalidateRect(aux_hwnd, std::ptr::null(), 0);
+        }
+    }
+}
+
+unsafe fn invalidate_pet_and_aux(hwnd: HWND) {
+    if hwnd.is_null() {
+        return;
+    }
+    InvalidateRect(hwnd, std::ptr::null(), 0);
+    invalidate_aux_windows(hwnd);
 }
 
 unsafe fn show_context_menu(hwnd: HWND) {
@@ -783,8 +1276,12 @@ unsafe fn show_context_menu(hwnd: HWND) {
             with_app_state(|state| state.skip_pomodoro());
         } else if command == MENU_FISHING_START_ID {
             with_app_state(|state| state.start_fishing());
+            sync_current_window_layout(hwnd);
+            invalidate_pet_and_aux(hwnd);
         } else if command == MENU_FISHING_STOP_ID {
             with_app_state(|state| state.stop_fishing());
+            sync_current_window_layout(hwnd);
+            invalidate_pet_and_aux(hwnd);
         } else if command == MENU_EXIT_ID {
             DestroyWindow(hwnd);
         }
@@ -1114,6 +1611,13 @@ fn choice_option_at(px: i32, py: i32) -> Option<(usize, usize)> {
     })
 }
 
+fn session_switcher_session_at(px: i32, py: i32, width: i32, height: i32) -> Option<String> {
+    APP_STATE.get().and_then(|state| {
+        let state = state.lock().expect("state poisoned");
+        session_switcher_session_at_point(&state, px, py, width, height)
+    })
+}
+
 unsafe fn user_idle_snapshot() -> Option<(Duration, u32)> {
     let mut info = LASTINPUTINFO {
         cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
@@ -1127,6 +1631,65 @@ unsafe fn user_idle_snapshot() -> Option<(Duration, u32)> {
 }
 
 unsafe fn paint_window(hwnd: HWND) {
+    let mut ps = PAINTSTRUCT::default();
+    let hdc = BeginPaint(hwnd, &mut ps);
+    let mut rect = RECT::default();
+    GetClientRect(hwnd, &mut rect);
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+
+    let (state, pet_offset_x, pet_offset_y) = APP_STATE
+        .get()
+        .map(|state| {
+            let state = state.lock().expect("state poisoned");
+            let visible_rect = visible_pet_rect_in_window(&state.settings, state.mood);
+            (snapshot_state(&state), -visible_rect.x, -visible_rect.y)
+        })
+        .unwrap_or_else(|| (RenderState::default(), 0, 0));
+
+    let frame_dc = CreateCompatibleDC(hdc);
+    let frame_bitmap = CreateCompatibleBitmap(hdc, width, height);
+    if !frame_dc.is_null() && !frame_bitmap.is_null() {
+        let old_frame_bitmap = SelectObject(frame_dc, frame_bitmap);
+        fill_rect(frame_dc, &rect, TRANSPARENT_KEY);
+
+        let base_rect = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        render_pet_window(frame_dc, &base_rect, &state, pet_offset_x, pet_offset_y);
+        BitBlt(hdc, 0, 0, width, height, frame_dc, 0, 0, SRCCOPY);
+
+        SelectObject(frame_dc, old_frame_bitmap);
+        DeleteObject(frame_bitmap);
+        DeleteDC(frame_dc);
+    } else {
+        render_pet_window(hdc, &rect, &state, pet_offset_x, pet_offset_y);
+        if !frame_bitmap.is_null() {
+            DeleteObject(frame_bitmap);
+        }
+        if !frame_dc.is_null() {
+            DeleteDC(frame_dc);
+        }
+    }
+
+    EndPaint(hwnd, &ps);
+}
+
+unsafe fn paint_fishing_hud(hwnd: HWND) {
+    paint_state_window(hwnd, render_fishing_hud_window);
+}
+
+unsafe fn paint_session_switcher(hwnd: HWND) {
+    paint_state_window(hwnd, render_session_switcher_window);
+}
+
+unsafe fn paint_state_window(
+    hwnd: HWND,
+    render: fn(windows_sys::Win32::Graphics::Gdi::HDC, &RECT, &RenderState),
+) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
     let mut rect = RECT::default();
@@ -1148,17 +1711,17 @@ unsafe fn paint_window(hwnd: HWND) {
         let base_rect = RECT {
             left: 0,
             top: 0,
-            right: WINDOW_WIDTH,
-            bottom: WINDOW_HEIGHT,
+            right: width,
+            bottom: height,
         };
-        render_scene(frame_dc, &base_rect, &state);
+        render(frame_dc, &base_rect, &state);
         BitBlt(hdc, 0, 0, width, height, frame_dc, 0, 0, SRCCOPY);
 
         SelectObject(frame_dc, old_frame_bitmap);
         DeleteObject(frame_bitmap);
         DeleteDC(frame_dc);
     } else {
-        render_scene(hdc, &rect, &state);
+        render(hdc, &rect, &state);
         if !frame_bitmap.is_null() {
             DeleteObject(frame_bitmap);
         }

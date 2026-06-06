@@ -114,6 +114,35 @@ slint::slint! {
         font-size: 12px;
     }
 
+    component TogglePill inherits Rectangle {
+        in-out property <bool> checked: false;
+        callback toggled(bool);
+
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: root.checked ? #0a84ff : #cfd8e6;
+        background: root.checked ? #0a84ff : #ffffff;
+
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            mouse-cursor: pointer;
+            clicked => {
+                root.checked = !root.checked;
+                root.toggled(root.checked);
+            }
+        }
+
+        Rectangle {
+            x: root.checked ? root.width - 22px : 2px;
+            y: 2px;
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            background: root.checked ? #ffffff : #cfd8e6;
+        }
+    }
+
     component PointerSlider inherits Rectangle {
         in property <float> minimum: 0;
         in property <float> maximum: 100;
@@ -360,6 +389,7 @@ slint::slint! {
         in-out property <int> active_tab: 0;
         in-out property <float> pet_scale: 80;
         in-out property <float> sleep_after: 75;
+        in-out property <bool> show_session_switcher: true;
         in-out property <string> pet_dir;
         in-out property <string> gif_dir;
         in-out property <string> anim_idle;
@@ -578,8 +608,12 @@ slint::slint! {
             Text { x: 612px; y: 384px; text: "Missed"; color: #6b7280; font-size: 12px; }
             MonoLineEdit { x: 612px; y: 404px; width: 188px; height: 32px; text <=> root.anim_fishing_missed; }
 
-            ActionButton { x: 592px; y: 464px; width: 96px; height: 40px; text: "Save"; clicked => { root.save_basic(); } }
-            ActionButton { x: 704px; y: 464px; width: 96px; height: 40px; text: "Reset"; clicked => { root.reset_basic(); } }
+            Text { x: 0px; y: 456px; text: "Session switcher"; color: #6b7280; font-size: 12px; }
+            Text { x: 0px; y: 478px; width: 420px; text: "Show the compact focus panel when more than one Claude Code session is active."; color: #111827; font-size: 13px; }
+            TogglePill { x: 440px; y: 464px; width: 46px; height: 24px; checked <=> root.show_session_switcher; }
+
+            ActionButton { x: 592px; y: 504px; width: 96px; height: 40px; text: "Save"; clicked => { root.save_basic(); } }
+            ActionButton { x: 704px; y: 504px; width: 96px; height: 40px; text: "Reset"; clicked => { root.reset_basic(); } }
         }
 
         if active_tab == 1: Rectangle {

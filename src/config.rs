@@ -1,16 +1,19 @@
 pub(crate) const DEFAULT_PORT: u16 = 17387;
 pub(crate) const DEFAULT_PROXY_PORT: u16 = 17388;
-pub(crate) const WINDOW_WIDTH: i32 = 460;
-pub(crate) const WINDOW_HEIGHT: i32 = 280;
 pub(crate) const PET_SCALE_MIN_PERCENT: u32 = 50;
 pub(crate) const PET_SCALE_MAX_PERCENT: u32 = 150;
 pub(crate) const POMODORO_MIN_MINUTES: u32 = 1;
 pub(crate) const POMODORO_MAX_MINUTES: u32 = 240;
 pub(crate) const TRANSPARENT_KEY: u32 = 0x00ff_00ff;
-pub(crate) const PET_X: i32 = 14;
-pub(crate) const PET_Y: i32 = 95;
+pub(crate) const PET_X: i32 = 0;
+pub(crate) const PET_Y: i32 = 0;
 pub(crate) const PET_W: i32 = 188;
 pub(crate) const PET_H: i32 = 170;
+pub(crate) const SESSION_BAR_HEIGHT: i32 = 24;
+pub(crate) const SESSION_BAR_GAP: i32 = 2;
+pub(crate) const SESSION_SWITCHER_MIN_WIDTH: i32 = 220;
+pub(crate) const FISHING_HUD_WIDTH: i32 = 246;
+pub(crate) const FISHING_HUD_HEIGHT: i32 = 78;
 pub(crate) const PERMISSION_OVERLAY_WIDTH: i32 = 640;
 pub(crate) const PERMISSION_OVERLAY_HEIGHT: i32 = 740;
 pub(crate) const PERMISSION_BUBBLE_X: i32 = 129;
@@ -54,3 +57,11 @@ pub(crate) const MENU_POMODORO_PAUSE_RESUME_ID: usize = 1006;
 pub(crate) const MENU_POMODORO_SKIP_ID: usize = 1007;
 pub(crate) const MENU_LLM_PROFILE_BASE_ID: usize = 1100;
 pub(crate) const MENU_LLM_PROFILE_MAX_ITEMS: usize = 24;
+
+pub(crate) fn scaled_pet_size_for_percent(scale_percent: u32) -> (i32, i32) {
+    let scale = scale_percent.clamp(PET_SCALE_MIN_PERCENT, PET_SCALE_MAX_PERCENT) as i32;
+    (
+        ((PET_W * scale + 50) / 100).max(1),
+        ((PET_H * scale + 50) / 100).max(1),
+    )
+}

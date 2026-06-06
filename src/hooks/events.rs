@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use crate::app::stats::tool_stats_kind;
 use crate::app::{
     AppState, ChoiceDecision, ChoiceKind, ChoiceOption, ChoiceQuestion, ChoiceWaiter,
-    PendingChoice, PendingPermission, PermissionDecision, PermissionWaiter, PetMood,
+    ClaudeSessionStatus, PendingChoice, PendingPermission, PermissionDecision, PermissionWaiter,
+    PetMood,
 };
 use crate::globals::APP_STATE;
 use crate::util::{diff_lines_text, shorten, shorten_block};
@@ -44,7 +45,7 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
     let event = string_field(&payload, "hook_event_name")
         .or_else(|| string_field(&payload, "hookEventName"))
         .unwrap_or_else(|| "unknown".to_string());
-    let session_id = string_field(&payload, "session_id").unwrap_or_else(|| "default".to_string());
+    let session_id = session_id_from_payload(&payload);
     let cwd = string_field(&payload, "cwd").unwrap_or_default();
     let tool_name = string_field(&payload, "tool_name")
         .or_else(|| string_field(&payload, "toolName"))
@@ -73,10 +74,14 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
 
     {
         let mut state = state.lock().expect("state poisoned");
-        if clears_all_pending_interactions(event.as_str()) {
-            clear_all_interactions(&mut state);
-            state.clear_session_activities(&session_id);
-        } else if clears_pending_interaction(event.as_str()) {
+        state.note_session_event(
+            &session_id,
+            &cwd,
+            event.as_str(),
+            &tool_name,
+            mood_for_tool_use(&tool_name, &payload),
+        );
+        if clears_pending_interaction(event.as_str()) {
             clear_stale_interactions(&mut state, &session_id);
         }
         let capture_official = state.llm_profiles.official_profile_active();
@@ -188,6 +193,12 @@ fn handle_permission_request(
         };
         state.pending_permissions.push_back(permission.clone());
         let mood = permission_visual_mood(&payload, &permission.tool_name);
+        state.mark_session_waiting_permission(
+            &permission.session_id,
+            &permission.cwd,
+            &permission.tool_name,
+            permission.interaction_sequence,
+        );
         state.start_permission_activity(permission.id, &permission.session_id, mood);
         state.set_resting_mood(mood, true);
         state.record_permission_stats();
@@ -231,6 +242,21 @@ fn handle_permission_request(
             };
             state.set_resting_mood(mood, matches!(mood, PetMood::Error));
         }
+        let (status, detail) = match decision {
+            Some(PermissionDecision::Deny) => {
+                (ClaudeSessionStatus::Error, "Permission denied".to_string())
+            }
+            Some(PermissionDecision::Ignore) | None => {
+                (ClaudeSessionStatus::Done, "Permission closed".to_string())
+            }
+            _ => (ClaudeSessionStatus::Streaming, "Streaming".to_string()),
+        };
+        state.mark_session_interaction_finished(
+            &permission.session_id,
+            permission.interaction_sequence,
+            status,
+            detail,
+        );
     }
 
     permission_response(
@@ -393,6 +419,11 @@ fn handle_choice_request(
         };
         state.pending_choices.push_back(choice.clone());
         let resting = state.activity_mood().unwrap_or(PetMood::Thinking);
+        state.mark_session_waiting_choice(
+            &choice.session_id,
+            &choice.title,
+            choice.interaction_sequence,
+        );
         state.start_choice_activity(choice.id, &choice.session_id, resting);
         state.set_resting_mood(resting, false);
         state.record_choice_stats();
@@ -427,6 +458,20 @@ fn handle_choice_request(
             };
             state.set_resting_mood(mood, false);
         }
+        let (status, detail) = match decision {
+            Some(ChoiceDecision::Submit { .. }) | Some(ChoiceDecision::Deny) => {
+                (ClaudeSessionStatus::Streaming, "Streaming".to_string())
+            }
+            Some(ChoiceDecision::Ignore) | None => {
+                (ClaudeSessionStatus::Done, "Choice closed".to_string())
+            }
+        };
+        state.mark_session_interaction_finished(
+            &choice.session_id,
+            choice.interaction_sequence,
+            status,
+            detail,
+        );
     }
 
     choice_response(&choice, decision.unwrap_or(ChoiceDecision::Ignore))
@@ -839,45 +884,18 @@ fn clear_stale_interactions(state: &mut AppState, session_id: &str) {
     }
 }
 
-fn clear_all_interactions(state: &mut AppState) {
-    let stale_permissions = state.pending_permissions.drain(..).collect::<Vec<_>>();
-    for pending in stale_permissions {
-        state.finish_permission_activity(pending.id);
-        let mut slot = pending
-            .waiter
-            .decision
-            .lock()
-            .expect("permission waiter poisoned");
-        if slot.is_none() {
-            *slot = Some(PermissionDecision::Ignore);
-            pending.waiter.ready.notify_all();
-        }
-    }
-
-    let stale_choices = state.pending_choices.drain(..).collect::<Vec<_>>();
-    for pending in stale_choices {
-        state.finish_choice_activity(pending.id);
-        let mut slot = pending
-            .waiter
-            .decision
-            .lock()
-            .expect("choice waiter poisoned");
-        if slot.is_none() {
-            *slot = Some(ChoiceDecision::Ignore);
-            pending.waiter.ready.notify_all();
-        }
-    }
-}
-
-fn clears_all_pending_interactions(event: &str) -> bool {
+fn clears_pending_interaction(event: &str) -> bool {
     matches!(
         event,
-        "PermissionDenied" | "PostToolUseFailure" | "Stop" | "SessionEnd" | "StopFailure"
+        "PreToolUse"
+            | "PostToolUse"
+            | "PostToolBatch"
+            | "PermissionDenied"
+            | "PostToolUseFailure"
+            | "Stop"
+            | "SessionEnd"
+            | "StopFailure"
     )
-}
-
-fn clears_pending_interaction(event: &str) -> bool {
-    matches!(event, "PreToolUse" | "PostToolUse" | "PostToolBatch")
 }
 
 fn hook_activity(event: &str, tool_name: &str, payload: &Value) -> Option<HookActivity> {
@@ -924,7 +942,7 @@ fn apply_hook_activity(state: &mut AppState, activity: HookActivity, payload: &V
             state.finish_session_tools(&session_id_from_payload(payload));
         }
         HookActivity::Error => {
-            state.clear_activity();
+            state.finish_session_tools(&session_id_from_payload(payload));
             state.last_error = summarize_payload(payload);
             state.set_resting_mood(PetMood::Error, true);
         }
@@ -1079,7 +1097,11 @@ fn tool_key(payload: &Value) -> String {
 }
 
 fn session_id_from_payload(payload: &Value) -> String {
-    string_field(payload, "session_id").unwrap_or_else(|| "default".to_string())
+    string_field(payload, "session_id")
+        .or_else(|| string_field(payload, "sessionId"))
+        .or_else(|| string_field(payload, "sessionID"))
+        .filter(|session_id| !session_id.trim().is_empty())
+        .unwrap_or_else(|| "default".to_string())
 }
 
 fn candidate_tool_keys(payload: &Value) -> Vec<String> {
@@ -1384,11 +1406,73 @@ mod tests {
     }
 
     #[test]
+    fn session_end_clears_only_matching_pending_interactions() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        {
+            let mut state = state.lock().expect("state poisoned");
+            let mut s1 = build_permission("Edit");
+            s1.id = 1;
+            s1.session_id = "s1".to_string();
+            let mut s2 = build_permission("Bash");
+            s2.id = 2;
+            s2.session_id = "s2".to_string();
+            state.pending_permissions.push_back(s1);
+            state.pending_permissions.push_back(s2);
+        }
+
+        process_hook(
+            json!({
+                "hook_event_name": "SessionEnd",
+                "session_id": "s1"
+            }),
+            state.clone(),
+        );
+
+        let state = state.lock().expect("state poisoned");
+        assert_eq!(state.pending_permissions.len(), 1);
+        assert_eq!(state.pending_permissions[0].session_id, "s2");
+    }
+
+    #[test]
+    fn camel_case_session_id_is_tracked_as_session() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+
+        process_hook(
+            json!({
+                "hook_event_name": "SessionStart",
+                "sessionId": "camel-session"
+            }),
+            state.clone(),
+        );
+
+        let state = state.lock().expect("state poisoned");
+        assert!(state.sessions.contains_key("camel-session"));
+        assert!(!state.sessions.contains_key("default"));
+    }
+
+    #[test]
     fn stop_still_sets_happy() {
         let mut state = AppState::new();
 
         apply_hook_activity(&mut state, HookActivity::Done, &json!({}));
 
+        assert_eq!(state.resting_mood, PetMood::Happy);
+        assert_eq!(state.mood, PetMood::Happy);
+    }
+
+    #[test]
+    fn process_stop_sets_happy_with_focused_session_state() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+
+        process_hook(
+            json!({
+                "hook_event_name": "Stop",
+                "session_id": "s1"
+            }),
+            state.clone(),
+        );
+
+        let state = state.lock().expect("state poisoned");
         assert_eq!(state.resting_mood, PetMood::Happy);
         assert_eq!(state.mood, PetMood::Happy);
     }
