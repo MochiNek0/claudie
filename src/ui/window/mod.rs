@@ -1,6 +1,7 @@
 mod render;
 
 use std::collections::HashMap;
+use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -27,17 +28,22 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetLastInputInfo, LASTINPUTINFO, MOD_CONTROL, MOD_SHIFT, RegisterHotKey, ReleaseCapture,
     SetCapture, UnregisterHotKey,
 };
+use windows_sys::Win32::UI::Shell::{
+    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GWLP_USERDATA, GetClientRect,
     GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, IDC_ARROW,
     IDC_HAND, LWA_COLORKEY, LoadCursorW, MF_CHECKED, MF_OWNERDRAW, MF_POPUP, MF_SEPARATOR,
-    MF_STRING, RegisterClassW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN,
-    TrackPopupMenu, WM_CREATE, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN,
+    MF_STRING, PostMessageW, RegisterClassW, RegisterWindowMessageW, SM_CXSCREEN, SM_CXSMICON,
+    SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYSMICON, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN, TrackPopupMenu, WM_APP,
+    WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_RBUTTONDOWN,
     WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
@@ -56,6 +62,7 @@ use crate::settings::{
 };
 use crate::ui::prompt_popup::{close_prompt_popup, sync_prompt_popup};
 use crate::ui::settings_panel::{close_settings_panel, show_settings_panel};
+use crate::ui::window_icon::load_sized_app_icon;
 use crate::usage_display::provider_usage_display;
 use crate::util::{shorten, wide};
 
@@ -71,12 +78,19 @@ static DRAG_WINDOW_Y: AtomicI32 = AtomicI32::new(0);
 static RIGHT_BUTTON_CAPTURED: AtomicBool = AtomicBool::new(false);
 static CURRENT_TIMER_MS: AtomicU32 = AtomicU32::new(ACTIVE_TIMER_MS);
 static LAST_TOPMOST_TICK: AtomicU32 = AtomicU32::new(0);
+static TASKBAR_CREATED_MESSAGE: AtomicU32 = AtomicU32::new(0);
 static PET_NOMINAL_ORIGIN: OnceLock<Mutex<Option<(i32, i32)>>> = OnceLock::new();
 const CLICK_DRAG_THRESHOLD_PX: i32 = 6;
 const ACTIVE_TIMER_MS: u32 = 33;
 const IDLE_TIMER_MS: u32 = 120;
 const SLEEP_TIMER_MS: u32 = 500;
 const TOPMOST_REFRESH_MS: u32 = 1_000;
+const TRAY_ICON_ID: u32 = 1;
+const TRAY_CALLBACK_MESSAGE: u32 = WM_APP + 1;
+
+fn context_menu_open() -> bool {
+    CONTEXT_MENU_OPEN.load(Ordering::Relaxed)
+}
 
 #[derive(Clone)]
 struct MenuProfileDrawItem {
@@ -222,9 +236,11 @@ pub(crate) unsafe fn run_window(port: u16) {
         },
     );
 
+    register_taskbar_created_message();
     SetLayeredWindowAttributes(hwnd, TRANSPARENT_KEY, 255, LWA_COLORKEY);
     ShowWindow(hwnd, SW_SHOW);
     ensure_pet_topmost(hwnd);
+    install_tray_icon(hwnd);
     RegisterHotKey(hwnd, 1, MOD_CONTROL | MOD_SHIFT, 'Y' as u32);
     RegisterHotKey(hwnd, 2, MOD_CONTROL | MOD_SHIFT, 'N' as u32);
     SetTimer(hwnd, 1, ACTIVE_TIMER_MS, None);
@@ -266,12 +282,76 @@ unsafe fn create_aux_window(
     hwnd
 }
 
+unsafe fn register_taskbar_created_message() {
+    let message = TASKBAR_CREATED_MESSAGE.load(Ordering::Relaxed);
+    if message != 0 {
+        return;
+    }
+    let name = wide("TaskbarCreated");
+    let message = RegisterWindowMessageW(name.as_ptr());
+    if message != 0 {
+        TASKBAR_CREATED_MESSAGE.store(message, Ordering::Relaxed);
+    }
+}
+
+unsafe fn install_tray_icon(hwnd: HWND) {
+    if hwnd.is_null() {
+        return;
+    }
+    let mut data = tray_icon_data(hwnd);
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    data.uCallbackMessage = TRAY_CALLBACK_MESSAGE;
+    data.hIcon = load_sized_app_icon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+    copy_wide_truncated(&mut data.szTip, "claudie");
+    Shell_NotifyIconW(NIM_ADD, &data);
+}
+
+unsafe fn remove_tray_icon(hwnd: HWND) {
+    if hwnd.is_null() {
+        return;
+    }
+    let data = tray_icon_data(hwnd);
+    Shell_NotifyIconW(NIM_DELETE, &data);
+}
+
+fn tray_icon_data(hwnd: HWND) -> NOTIFYICONDATAW {
+    NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: TRAY_ICON_ID,
+        ..Default::default()
+    }
+}
+
+fn copy_wide_truncated(target: &mut [u16], text: &str) {
+    if target.is_empty() {
+        return;
+    }
+    let text = wide(text);
+    let len = text.len().saturating_sub(1).min(target.len() - 1);
+    target[..len].copy_from_slice(&text[..len]);
+    target[len] = 0;
+}
+
+unsafe fn handle_tray_callback(hwnd: HWND, lparam: LPARAM) {
+    match lparam as u32 {
+        WM_CONTEXTMENU | WM_RBUTTONUP => show_context_menu(hwnd),
+        _ => {}
+    }
+}
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    let taskbar_created = TASKBAR_CREATED_MESSAGE.load(Ordering::Relaxed);
+    if taskbar_created != 0 && msg == taskbar_created {
+        install_tray_icon(hwnd);
+        return 0;
+    }
+
     match msg {
         WM_CREATE => {
             let _createstruct = lparam as *const CREATESTRUCTW;
@@ -310,17 +390,20 @@ unsafe extern "system" fn window_proc(
                 target_layout = Some(window_layout_for_state(&state));
             }
             update_window_timer(hwnd, timer_ms);
-            if let Some(layout) = target_layout {
-                sync_window_layout(hwnd, &layout);
-            }
-            let overlay = overlay_hwnd(hwnd);
-            if !overlay.is_null() {
-                ShowWindow(overlay, SW_HIDE);
-            }
-            sync_prompt_popup();
-            if !CONTEXT_MENU_OPEN.load(Ordering::Relaxed) && should_refresh_topmost() {
-                ensure_pet_topmost(hwnd);
-                ensure_aux_topmost(hwnd);
+            let menu_open = context_menu_open();
+            if !menu_open {
+                if let Some(layout) = target_layout {
+                    sync_window_layout(hwnd, &layout);
+                }
+                let overlay = overlay_hwnd(hwnd);
+                if !overlay.is_null() {
+                    ShowWindow(overlay, SW_HIDE);
+                }
+                sync_prompt_popup();
+                if should_refresh_topmost() {
+                    ensure_pet_topmost(hwnd);
+                    ensure_aux_topmost(hwnd);
+                }
             }
             InvalidateRect(hwnd, std::ptr::null(), 0);
             invalidate_aux_windows(hwnd);
@@ -332,6 +415,10 @@ unsafe extern "system" fn window_proc(
                 2 => decide_current_permission(PermissionDecision::Deny),
                 _ => {}
             }
+            0
+        }
+        TRAY_CALLBACK_MESSAGE => {
+            handle_tray_callback(hwnd, lparam);
             0
         }
         WM_LBUTTONDOWN => {
@@ -428,6 +515,7 @@ unsafe extern "system" fn window_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_DESTROY => {
+            remove_tray_icon(hwnd);
             persist_pet_window_position(hwnd);
             flush_app_stats_now();
             destroy_aux_windows(hwnd);
@@ -469,12 +557,23 @@ fn session_window_size_for_settings(settings: &UserSettings) -> (i32, i32) {
     let (pet_width, _) = scaled_pet_size_for_percent(settings.pet_scale_percent());
     (
         pet_width.max(SESSION_SWITCHER_MIN_WIDTH),
-        SESSION_BAR_HEIGHT,
+        session_window_height_for_rows(1),
     )
 }
 
 fn session_window_size_for_state(state: &AppState) -> (i32, i32) {
-    session_window_size_for_settings(&state.settings)
+    let (width, _) = session_window_size_for_settings(&state.settings);
+    let rows = state
+        .session_switcher_items()
+        .len()
+        .min(SESSION_SWITCHER_MAX_VISIBLE_ITEMS)
+        .max(1);
+    (width, session_window_height_for_rows(rows))
+}
+
+fn session_window_height_for_rows(rows: usize) -> i32 {
+    let rows = rows.max(1) as i32;
+    SESSION_SWITCHER_VERTICAL_PADDING * 2 + rows * SESSION_BAR_HEIGHT + (rows - 1)
 }
 
 fn pet_window_size_for_settings(settings: &UserSettings, mood: PetMood) -> (i32, i32) {
@@ -593,6 +692,9 @@ fn fit_source_into(src_w: u32, src_h: u32, max_w: i32, max_h: i32) -> (i32, i32)
 }
 
 unsafe fn ensure_pet_topmost(hwnd: HWND) {
+    if context_menu_open() {
+        return;
+    }
     SetWindowPos(
         hwnd,
         HWND_TOPMOST,
@@ -675,6 +777,9 @@ unsafe fn update_window_timer(hwnd: HWND, interval_ms: u32) {
 }
 
 unsafe fn sync_window_layout(hwnd: HWND, layout: &WindowLayout) {
+    if context_menu_open() {
+        return;
+    }
     resize_pet_window_if_needed(hwnd, layout.pet_visible_rect);
     let Some(aux) = aux_windows(hwnd) else {
         return;
@@ -952,15 +1057,6 @@ unsafe extern "system" fn session_switcher_proc(
             }
             0
         }
-        WM_MOUSEWHEEL => {
-            let wheel_delta = hiword(wparam as u32) as i32;
-            let direction = if wheel_delta < 0 { 1 } else { -1 };
-            with_app_state(|state| state.focus_relative_session(direction));
-            let pet_hwnd = parent_pet_hwnd(hwnd);
-            sync_current_window_layout(pet_hwnd);
-            invalidate_pet_and_aux(pet_hwnd);
-            0
-        }
         WM_SETCURSOR => {
             SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND));
             1
@@ -1151,6 +1247,9 @@ unsafe fn destroy_aux_windows(hwnd: HWND) {
 }
 
 unsafe fn ensure_aux_topmost(hwnd: HWND) {
+    if context_menu_open() {
+        return;
+    }
     let Some(windows) = aux_windows(hwnd) else {
         return;
     };
@@ -1242,6 +1341,7 @@ unsafe fn show_context_menu(hwnd: HWND) {
 
     let mut point = POINT { x: 0, y: 0 };
     if GetCursorPos(&mut point) != 0 {
+        ensure_pet_topmost(hwnd);
         SetForegroundWindow(hwnd);
         CONTEXT_MENU_OPEN.store(true, Ordering::Relaxed);
         let command = TrackPopupMenu(
@@ -1253,8 +1353,12 @@ unsafe fn show_context_menu(hwnd: HWND) {
             hwnd,
             std::ptr::null(),
         );
+        PostMessageW(hwnd, WM_NULL, 0, 0);
         CONTEXT_MENU_OPEN.store(false, Ordering::Relaxed);
+        sync_current_window_layout(hwnd);
+        sync_prompt_popup();
         ensure_pet_topmost(hwnd);
+        ensure_aux_topmost(hwnd);
         let command = command as usize;
         if command == MENU_SETTINGS_ID {
             show_settings_panel(hwnd);

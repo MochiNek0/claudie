@@ -601,27 +601,6 @@ impl AppState {
         self.refresh_visual_mood();
     }
 
-    pub(crate) fn focus_relative_session(&mut self, delta: i32) {
-        let mut sessions = self
-            .sessions
-            .values()
-            .filter(|session| session.status.is_live())
-            .collect::<Vec<_>>();
-        if sessions.len() <= 1 {
-            return;
-        }
-        sessions.sort_by_key(|session| session.order);
-        let current = self
-            .focused_session_id
-            .as_deref()
-            .and_then(|focused| sessions.iter().position(|session| session.id == focused))
-            .unwrap_or(0);
-        let len = sessions.len() as i32;
-        let next = (current as i32 + delta).rem_euclid(len) as usize;
-        self.focused_session_id = Some(sessions[next].id.clone());
-        self.refresh_visual_mood();
-    }
-
     pub(crate) fn session_switcher_items(&self) -> Vec<SessionSwitcherItem> {
         let focused = self.focused_session_id.as_deref();
         let mut sessions = self
@@ -2032,25 +2011,6 @@ mod tests {
             PetMood::Building,
         );
         assert_eq!(state.activity_mood(), Some(PetMood::Building));
-    }
-
-    #[test]
-    fn relative_session_focus_cycles_live_sessions() {
-        let mut state = AppState::new();
-        state.note_session_event("s1", "", "SessionStart", "", PetMood::Thinking);
-        state.note_session_event("s2", "", "SessionStart", "", PetMood::Thinking);
-        state.note_session_event("s3", "", "SessionStart", "", PetMood::Thinking);
-        state.focus_session("s2");
-
-        state.focus_relative_session(1);
-        assert_eq!(state.focused_session_id.as_deref(), Some("s3"));
-
-        state.focus_relative_session(1);
-        assert_eq!(state.focused_session_id.as_deref(), Some("s1"));
-
-        state.note_session_event("s1", "", "SessionEnd", "", PetMood::Thinking);
-        state.focus_relative_session(-1);
-        assert_eq!(state.focused_session_id.as_deref(), Some("s3"));
     }
 
     #[test]

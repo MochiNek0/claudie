@@ -82,7 +82,7 @@ fn set_win32_titlebar_icon(winit_window: &slint::winit_030::winit::window::Windo
     }
 }
 
-unsafe fn load_sized_app_icon(width: i32, height: i32) -> HICON {
+pub(crate) unsafe fn load_sized_app_icon(width: i32, height: i32) -> HICON {
     let resource_icon = LoadImageW(
         GetModuleHandleW(std::ptr::null()),
         1_usize as *const u16,

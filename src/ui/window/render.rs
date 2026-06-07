@@ -111,7 +111,14 @@ pub(super) fn session_switcher_session_at_point(
     if !point_in_rect(px, py, (0, 0, width, height)) {
         return None;
     }
-    items.first().map(|item| item.id.clone())
+    let visible_count = items.len().min(SESSION_SWITCHER_MAX_VISIBLE_ITEMS);
+    for (index, item) in items.iter().take(visible_count).enumerate() {
+        let row_y = SESSION_SWITCHER_VERTICAL_PADDING + index as i32 * (SESSION_BAR_HEIGHT + 1);
+        if point_in_rect(px, py, (0, row_y, width, SESSION_BAR_HEIGHT)) {
+            return Some(item.id.clone());
+        }
+    }
+    None
 }
 
 pub(super) fn render_pet_window(
@@ -645,76 +652,133 @@ fn draw_session_switcher(hdc: HDC, state: &RenderState, x: i32, y: i32, w: i32, 
     if !state.settings.show_session_switcher || state.sessions.len() <= 1 {
         return;
     }
-    let Some(item) = state.sessions.first() else {
-        return;
-    };
-    let border = if item.focused {
-        rgb(185, 218, 255)
-    } else {
-        theme::HAIRLINE
-    };
-    filled_round_rect(hdc, x, y, w, h, theme::RADIUS_FIELD, theme::SURFACE, border);
+    let panel = rgb(33, 32, 37);
+    let panel_border = rgb(43, 42, 49);
+    let focused_row = rgb(39, 37, 45);
+    let divider = rgb(48, 47, 55);
+    let visible_count = state.sessions.len().min(SESSION_SWITCHER_MAX_VISIBLE_ITEMS);
 
-    filled_ellipse(hdc, x + 9, y + 8, 7, 7, session_status_color(item.status));
-    let detail = if item.detail.trim().is_empty() {
-        item.status.label().to_string()
-    } else {
-        format!("{} - {}", item.status.label(), item.detail.trim())
-    };
-    let label = format!("{}  {}", item.display_name.trim(), detail);
-    let right_w = if item.pending_count > 0 { 24 } else { 34 };
-    text_fit(
-        hdc,
-        x + 22,
-        y + 6,
-        (w - right_w - 30).max(1),
-        &label,
-        theme::INK,
-    );
-    if item.pending_count > 0 {
-        let badge = item.pending_count.to_string();
-        let badge_w = (text_width(hdc, &badge) + 12).max(20);
+    filled_round_rect(hdc, x, y, w, h, theme::RADIUS_FIELD, panel, panel_border);
+
+    for (index, item) in state.sessions.iter().take(visible_count).enumerate() {
+        let row_y = y + SESSION_SWITCHER_VERTICAL_PADDING + index as i32 * (SESSION_BAR_HEIGHT + 1);
+        let accent = session_accent_color(item, index);
+
+        if item.focused {
+            filled_rect(
+                hdc,
+                x + 7,
+                row_y + 1,
+                w - 14,
+                SESSION_BAR_HEIGHT - 2,
+                focused_row,
+            );
+        }
+
         filled_round_rect(
             hdc,
-            x + w - badge_w - 7,
-            y + 5,
-            badge_w,
+            x + 2,
+            row_y + 3,
+            5,
+            SESSION_BAR_HEIGHT - 6,
+            4,
+            accent,
+            accent,
+        );
+
+        let count_x = (x + (w * 40) / 100).max(x + 88).min(x + w - 96);
+        let symbol_x = count_x + 30;
+        let detail_x = symbol_x + 20;
+        let name_x = x + 22;
+        let text_y = row_y + 5;
+        let name = item.display_name.trim();
+        let name = if name.is_empty() { "Session" } else { name };
+        let fitted_name = fit_text_to_width(hdc, name, (count_x - name_x - 8).max(1));
+        text(hdc, name_x, text_y, &fitted_name, accent);
+
+        let count = session_count_text(item);
+        text_fit(
+            hdc,
+            count_x,
+            text_y,
+            (symbol_x - count_x - 8).max(1),
+            &count,
+            rgb(196, 199, 206),
+        );
+
+        text_fit(
+            hdc,
+            symbol_x,
+            text_y,
             16,
-            theme::RADIUS_CHIP,
-            rgb(10, 132, 255),
-            rgb(10, 132, 255),
+            session_status_symbol(item.status),
+            rgb(239, 156, 46),
         );
         text_fit(
             hdc,
-            x + w - badge_w - 1,
-            y + 8,
-            badge_w - 8,
-            &badge,
-            theme::SURFACE,
+            detail_x,
+            text_y,
+            (x + w - detail_x - 12).max(1),
+            &session_status_text(item),
+            rgb(237, 239, 244),
         );
-    } else {
-        text_fit(
-            hdc,
-            x + w - 36,
-            y + 7,
-            28,
-            &format!("{}", state.sessions.len()),
-            theme::MUTED,
-        );
+
+        if index + 1 < visible_count {
+            filled_rect(hdc, x + 7, row_y + SESSION_BAR_HEIGHT, w - 9, 1, divider);
+        }
     }
 }
 
-fn session_status_color(status: ClaudeSessionStatus) -> u32 {
-    match status {
-        ClaudeSessionStatus::Idle | ClaudeSessionStatus::Done => rgb(107, 114, 128),
-        ClaudeSessionStatus::Streaming => rgb(10, 132, 255),
-        ClaudeSessionStatus::Tool => rgb(216, 138, 36),
+fn session_accent_color(item: &SessionSwitcherItem, index: usize) -> u32 {
+    match item.status {
+        ClaudeSessionStatus::Error => rgb(232, 93, 87),
         ClaudeSessionStatus::WaitingPermission | ClaudeSessionStatus::WaitingChoice => {
-            rgb(124, 92, 196)
+            rgb(145, 95, 231)
         }
-        ClaudeSessionStatus::Compacting => rgb(42, 157, 143),
-        ClaudeSessionStatus::Error => rgb(222, 86, 80),
-        ClaudeSessionStatus::Ended => rgb(156, 163, 175),
+        _ if item.focused => rgb(125, 83, 224),
+        _ if index % 2 == 0 => rgb(125, 83, 224),
+        _ => rgb(32, 143, 242),
+    }
+}
+
+fn session_count_text(item: &SessionSwitcherItem) -> String {
+    item.pending_count.to_string()
+}
+
+fn session_status_symbol(status: ClaudeSessionStatus) -> &'static str {
+    match status {
+        ClaudeSessionStatus::Tool => ">",
+        ClaudeSessionStatus::Streaming | ClaudeSessionStatus::Compacting => "*",
+        ClaudeSessionStatus::WaitingPermission | ClaudeSessionStatus::WaitingChoice => "!",
+        ClaudeSessionStatus::Error => "x",
+        ClaudeSessionStatus::Idle | ClaudeSessionStatus::Done => "-",
+        ClaudeSessionStatus::Ended => ".",
+    }
+}
+
+fn session_status_text(item: &SessionSwitcherItem) -> String {
+    let detail = item.detail.trim();
+    match item.status {
+        ClaudeSessionStatus::Idle | ClaudeSessionStatus::Done => "ready".to_string(),
+        ClaudeSessionStatus::Streaming => "thinking".to_string(),
+        ClaudeSessionStatus::Tool => {
+            if detail.is_empty() {
+                "tool".to_string()
+            } else {
+                detail.to_string()
+            }
+        }
+        ClaudeSessionStatus::WaitingPermission => "permission".to_string(),
+        ClaudeSessionStatus::WaitingChoice => "choice".to_string(),
+        ClaudeSessionStatus::Compacting => item.status.label().to_ascii_lowercase(),
+        ClaudeSessionStatus::Error => {
+            if detail.is_empty() {
+                "error".to_string()
+            } else {
+                detail.to_string()
+            }
+        }
+        ClaudeSessionStatus::Ended => "ended".to_string(),
     }
 }
 
