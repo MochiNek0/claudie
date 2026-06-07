@@ -19,6 +19,8 @@ const SLEEP_AFTER_MIN_SECS: u32 = 15;
 const SLEEP_AFTER_MAX_SECS: u32 = 1800;
 pub(crate) const OFFICIAL_LLM_PROFILE_ID: &str = "official";
 const OFFICIAL_LLM_PROFILE_NAME: &str = "Official";
+const LEGACY_FISHING_ANIMATIONS: (&str, &str, &str, &str) =
+    ("pomodoro", "building", "happy", "error");
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -127,10 +129,10 @@ impl Default for AnimationSettings {
             pomodoro: "pomodoro".to_string(),
             wave: "wave".to_string(),
             stretch: "stretch".to_string(),
-            fishing: "pomodoro".to_string(),
-            fishing_reel: "building".to_string(),
-            fishing_caught: "happy".to_string(),
-            fishing_missed: "error".to_string(),
+            fishing: "fishing".to_string(),
+            fishing_reel: "reel".to_string(),
+            fishing_caught: "caught".to_string(),
+            fishing_missed: "missed".to_string(),
         }
     }
 }
@@ -422,6 +424,8 @@ fn normalize_user_settings(settings: &mut UserSettings) -> bool {
         changed = true;
     }
 
+    let legacy_fishing_animations = legacy_fishing_animations(&settings.animations);
+
     let legacy_search_animation = settings
         .animations
         .search
@@ -437,6 +441,11 @@ fn normalize_user_settings(settings: &mut UserSettings) -> bool {
         changed = true;
     }
 
+    if legacy_fishing_animations && settings.gif_dir.trim() == DEFAULT_GIF_DIR {
+        set_default_fishing_animations(&mut settings.animations);
+        changed = true;
+    }
+
     // If the persisted gif_dir doesn't actually contain the required GIFs
     // (e.g. left over from a previous build), reset it to the bundled default
     // so the panel surfaces the right path next time it loads.
@@ -447,6 +456,9 @@ fn normalize_user_settings(settings: &mut UserSettings) -> bool {
         settings.gif_dir = DEFAULT_GIF_DIR.to_string();
         if legacy_search_animation {
             settings.animations.search = "search".to_string();
+        }
+        if legacy_fishing_animations {
+            set_default_fishing_animations(&mut settings.animations);
         }
         changed = true;
     }
@@ -466,6 +478,26 @@ fn normalize_user_settings(settings: &mut UserSettings) -> bool {
     }
 
     changed
+}
+
+fn legacy_fishing_animations(animations: &AnimationSettings) -> bool {
+    animation_name_matches(&animations.fishing, LEGACY_FISHING_ANIMATIONS.0)
+        && animation_name_matches(&animations.fishing_reel, LEGACY_FISHING_ANIMATIONS.1)
+        && animation_name_matches(&animations.fishing_caught, LEGACY_FISHING_ANIMATIONS.2)
+        && animation_name_matches(&animations.fishing_missed, LEGACY_FISHING_ANIMATIONS.3)
+}
+
+fn set_default_fishing_animations(animations: &mut AnimationSettings) {
+    animations.fishing = "fishing".to_string();
+    animations.fishing_reel = "reel".to_string();
+    animations.fishing_caught = "caught".to_string();
+    animations.fishing_missed = "missed".to_string();
+}
+
+fn animation_name_matches(value: &str, expected: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.eq_ignore_ascii_case(expected)
+        || trimmed.eq_ignore_ascii_case(&format!("{expected}.gif"))
 }
 
 pub(crate) fn load_llm_profile_db() -> LlmProfileDb {
@@ -1134,6 +1166,48 @@ mod tests {
         assert_eq!(settings.animations.search, "permission");
         assert!(normalize_user_settings(&mut settings));
         assert_eq!(settings.animations.search, "search");
+    }
+
+    #[test]
+    fn default_fishing_animations_use_fishing_gifs() {
+        let settings = AnimationSettings::default();
+
+        assert_eq!(settings.fishing, "fishing");
+        assert_eq!(settings.fishing_reel, "reel");
+        assert_eq!(settings.fishing_caught, "caught");
+        assert_eq!(settings.fishing_missed, "missed");
+    }
+
+    #[test]
+    fn legacy_fishing_animations_migrate_for_default_assets() {
+        let mut settings: UserSettings = serde_json::from_value(serde_json::json!({
+            "gif_dir": DEFAULT_GIF_DIR,
+            "animations": {
+                "idle": "idle",
+                "thinking": "thinking",
+                "typing": "typing",
+                "building": "building",
+                "search": "search",
+                "happy": "happy",
+                "error": "error",
+                "sleeping": "sleeping",
+                "subagent": "subagent",
+                "pomodoro": "pomodoro",
+                "wave": "wave",
+                "stretch": "stretch",
+                "fishing": "pomodoro",
+                "fishing_reel": "building",
+                "fishing_caught": "happy",
+                "fishing_missed": "error"
+            }
+        }))
+        .unwrap();
+
+        assert!(normalize_user_settings(&mut settings));
+        assert_eq!(settings.animations.fishing, "fishing");
+        assert_eq!(settings.animations.fishing_reel, "reel");
+        assert_eq!(settings.animations.fishing_caught, "caught");
+        assert_eq!(settings.animations.fishing_missed, "missed");
     }
 
     #[test]
