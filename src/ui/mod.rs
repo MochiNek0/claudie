@@ -4,6 +4,7 @@ pub(crate) mod settings_panel;
 pub(crate) mod slint_views;
 pub(crate) mod theme;
 pub(crate) mod window_icon;
+pub(crate) mod window_position;
 
 mod window;
 

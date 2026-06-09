@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use windows_sys::Win32::Foundation::HWND;
 
 use crate::app::{ChoiceKind, PendingChoice, PendingPermission, PermissionDecision};
 use crate::globals::APP_STATE;
@@ -11,6 +12,7 @@ use crate::hooks::{
 };
 use crate::ui::slint_views::{ChoiceOptionData, DiffLine, MarkdownBlockData, PromptWindow};
 use crate::ui::window_icon::{apply_slint_window_icons, schedule_prompt_window_icon_refresh};
+use crate::ui::window_position::center_window_on_screen;
 use crate::util::{MarkdownBlock, MarkdownBlockKind, estimate_wrapped_lines, markdown_blocks};
 
 // Text widths in logical px available for wrapping. Keep in sync with the
@@ -20,6 +22,7 @@ const DETAIL_CODE_TEXT_PX: f32 = 510.0;
 const DETAIL_DIFF_TEXT_PX: f32 = 500.0;
 const OPTION_TEXT_PX: f32 = 500.0;
 const HEADER_TEXT_PX: f32 = 540.0;
+const PROMPT_WINDOW_LOGICAL_SIZE: (f32, f32) = (640.0, 640.0);
 
 thread_local! {
     static PROMPT: RefCell<Option<PromptWindow>> = const { RefCell::new(None) };
@@ -36,6 +39,10 @@ struct OptionTarget {
 }
 
 pub(crate) fn sync_prompt_popup() {
+    sync_prompt_popup_for_parent(std::ptr::null_mut());
+}
+
+pub(crate) fn sync_prompt_popup_for_parent(parent: HWND) {
     let snapshot = prompt_snapshot();
     PROMPT.with(|slot| {
         if snapshot.is_none() {
@@ -72,7 +79,9 @@ pub(crate) fn sync_prompt_popup() {
                 apply_prompt_snapshot(window, &snapshot);
             }
             if created {
+                center_window_on_screen(window.window(), parent, PROMPT_WINDOW_LOGICAL_SIZE);
                 let _ = window.show();
+                center_window_on_screen(window.window(), parent, PROMPT_WINDOW_LOGICAL_SIZE);
                 apply_slint_window_icons(window.window());
                 schedule_prompt_window_icon_refresh(window.as_weak());
             }

@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use render::{
     RenderState, choice_option_at_point, fill_rect, render_fishing_hud_window,
-    render_permission_overlay, render_pet_window, render_session_switcher_window,
-    scroll_choice_lines, scroll_permission_detail_lines, session_switcher_session_at_point,
-    snapshot_state,
+    render_permission_overlay, render_pet_window, render_pomodoro_hud_window,
+    render_session_switcher_window, scroll_choice_lines, scroll_permission_detail_lines,
+    session_switcher_session_at_point, snapshot_state,
 };
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -60,7 +60,7 @@ use crate::settings::{
     LlmProfile, UserSettings, WindowPosition, apply_llm_profile_to_claude,
     ensure_claude_onboarding_complete, load_user_settings, save_llm_profile_db, save_user_settings,
 };
-use crate::ui::prompt_popup::{close_prompt_popup, sync_prompt_popup};
+use crate::ui::prompt_popup::{close_prompt_popup, sync_prompt_popup_for_parent};
 use crate::ui::settings_panel::{close_settings_panel, show_settings_panel};
 use crate::ui::window_icon::load_sized_app_icon;
 use crate::usage_display::provider_usage_display;
@@ -105,12 +105,16 @@ struct MenuProfileDrawSegment {
 
 struct AuxWindows {
     permission_overlay: HWND,
+    pomodoro_hud: HWND,
     fishing_hud: HWND,
     session_switcher: HWND,
 }
 
 struct WindowLayout {
     pet_visible_rect: PetVisibleRect,
+    pomodoro_visible: bool,
+    pomodoro_width: i32,
+    pomodoro_height: i32,
     fishing_visible: bool,
     fishing_width: i32,
     fishing_height: i32,
@@ -130,6 +134,7 @@ struct PetVisibleRect {
 pub(crate) unsafe fn run_window(port: u16) {
     let class_name = wide("ClaudieWindow");
     let overlay_class_name = wide("ClaudiePermissionOverlay");
+    let pomodoro_class_name = wide("ClaudiePomodoroHud");
     let fishing_class_name = wide("ClaudieFishingHud");
     let session_class_name = wide("ClaudieSessionSwitcher");
     let title = wide(&format!("claudie :{port}"));
@@ -153,6 +158,12 @@ pub(crate) unsafe fn run_window(port: u16) {
         ..wc
     };
     RegisterClassW(&overlay_wc);
+    let pomodoro_wc = WNDCLASSW {
+        lpfnWndProc: Some(pomodoro_hud_proc),
+        lpszClassName: pomodoro_class_name.as_ptr(),
+        ..wc
+    };
+    RegisterClassW(&pomodoro_wc);
     let fishing_wc = WNDCLASSW {
         lpfnWndProc: Some(fishing_hud_proc),
         lpszClassName: fishing_class_name.as_ptr(),
@@ -209,6 +220,14 @@ pub(crate) unsafe fn run_window(port: u16) {
         SetLayeredWindowAttributes(overlay_hwnd, TRANSPARENT_KEY, 255, LWA_COLORKEY);
     }
 
+    let pomodoro_hwnd = create_aux_window(
+        pomodoro_class_name.as_ptr(),
+        title.as_ptr(),
+        POMODORO_HUD_WIDTH,
+        POMODORO_HUD_HEIGHT,
+        hinstance,
+        hwnd,
+    );
     let fishing_hwnd = create_aux_window(
         fishing_class_name.as_ptr(),
         title.as_ptr(),
@@ -231,6 +250,7 @@ pub(crate) unsafe fn run_window(port: u16) {
         hwnd,
         AuxWindows {
             permission_overlay: overlay_hwnd,
+            pomodoro_hud: pomodoro_hwnd,
             fishing_hud: fishing_hwnd,
             session_switcher: session_hwnd,
         },
@@ -399,7 +419,7 @@ unsafe extern "system" fn window_proc(
                 if !overlay.is_null() {
                     ShowWindow(overlay, SW_HIDE);
                 }
-                sync_prompt_popup();
+                sync_prompt_popup_for_parent(hwnd);
                 if should_refresh_topmost() {
                     ensure_pet_topmost(hwnd);
                     ensure_aux_topmost(hwnd);
@@ -540,6 +560,9 @@ fn window_layout_for_state(state: &AppState) -> WindowLayout {
     let (session_width, session_height) = session_window_size_for_state(state);
     WindowLayout {
         pet_visible_rect,
+        pomodoro_visible: state.pomodoro.status != PomodoroStatus::Stopped,
+        pomodoro_width: POMODORO_HUD_WIDTH,
+        pomodoro_height: POMODORO_HUD_HEIGHT,
         fishing_visible: state.fishing.is_active(),
         fishing_width: FISHING_HUD_WIDTH,
         fishing_height: FISHING_HUD_HEIGHT,
@@ -747,6 +770,7 @@ fn desired_timer_interval(state: &AppState) -> u32 {
     let pending = !state.pending_permissions.is_empty() || !state.pending_choices.is_empty();
     if pending
         || state.mood.is_active_work()
+        || state.pomodoro.status != PomodoroStatus::Stopped
         || state.fishing.is_active()
         || matches!(
             state.mood,
@@ -791,6 +815,7 @@ unsafe fn sync_window_layout(hwnd: HWND, layout: &WindowLayout) {
     if GetWindowRect(hwnd, &mut pet_rect) == 0 {
         return;
     }
+    sync_pomodoro_window(&pet_rect, aux.pomodoro_hud, layout);
     sync_fishing_window(&pet_rect, aux.fishing_hud, layout);
     sync_session_window(&pet_rect, aux.session_switcher, layout);
 }
@@ -867,6 +892,26 @@ unsafe fn remember_pet_nominal_origin_from_window(hwnd: HWND, visible_rect: PetV
     }
 }
 
+unsafe fn sync_pomodoro_window(pet_rect: &RECT, hwnd: HWND, layout: &WindowLayout) {
+    if hwnd.is_null() {
+        return;
+    }
+    if !layout.pomodoro_visible {
+        ShowWindow(hwnd, SW_HIDE);
+        return;
+    }
+    let (x, y) = pomodoro_window_position(pet_rect, layout.pomodoro_width, layout.pomodoro_height);
+    SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        x,
+        y,
+        layout.pomodoro_width,
+        layout.pomodoro_height,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+    );
+}
+
 unsafe fn sync_fishing_window(pet_rect: &RECT, hwnd: HWND, layout: &WindowLayout) {
     if hwnd.is_null() {
         return;
@@ -905,6 +950,24 @@ unsafe fn sync_session_window(pet_rect: &RECT, hwnd: HWND, layout: &WindowLayout
         layout.session_height,
         SWP_NOACTIVATE | SWP_SHOWWINDOW,
     );
+}
+
+unsafe fn pomodoro_window_position(pet_rect: &RECT, width: i32, height: i32) -> (i32, i32) {
+    const GAP: i32 = 6;
+    let (_, screen_y, _, screen_h) = virtual_screen_bounds();
+    let screen_bottom = screen_y + screen_h;
+    let pet_w = pet_rect.right - pet_rect.left;
+    let x = pet_rect.left + (pet_w - width) / 2;
+    let above_y = pet_rect.top - height - GAP;
+    let below_y = pet_rect.bottom + GAP;
+    let y = if above_y >= screen_y {
+        above_y
+    } else if below_y + height <= screen_bottom {
+        below_y
+    } else {
+        above_y
+    };
+    clamp_window_position(x, y, (0, 0, width, height))
 }
 
 unsafe fn fishing_window_position(pet_rect: &RECT, width: i32, height: i32) -> (i32, i32) {
@@ -995,6 +1058,22 @@ unsafe fn cursor_over_pet(hwnd: HWND) -> bool {
     }
     let (x, y, w, h) = current_pet_rect_in_window();
     point.x >= x && point.x <= x + w && point.y >= y && point.y <= y + h
+}
+
+unsafe extern "system" fn pomodoro_hud_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            paint_pomodoro_hud(hwnd);
+            0
+        }
+        WM_ERASEBKGND => 1,
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
 }
 
 unsafe extern "system" fn fishing_hud_proc(
@@ -1237,6 +1316,7 @@ unsafe fn destroy_aux_windows(hwnd: HWND) {
     };
     for aux_hwnd in [
         windows.permission_overlay,
+        windows.pomodoro_hud,
         windows.fishing_hud,
         windows.session_switcher,
     ] {
@@ -1253,7 +1333,11 @@ unsafe fn ensure_aux_topmost(hwnd: HWND) {
     let Some(windows) = aux_windows(hwnd) else {
         return;
     };
-    for aux_hwnd in [windows.fishing_hud, windows.session_switcher] {
+    for aux_hwnd in [
+        windows.pomodoro_hud,
+        windows.fishing_hud,
+        windows.session_switcher,
+    ] {
         if !aux_hwnd.is_null() {
             SetWindowPos(
                 aux_hwnd,
@@ -1272,7 +1356,11 @@ unsafe fn invalidate_aux_windows(hwnd: HWND) {
     let Some(windows) = aux_windows(hwnd) else {
         return;
     };
-    for aux_hwnd in [windows.fishing_hud, windows.session_switcher] {
+    for aux_hwnd in [
+        windows.pomodoro_hud,
+        windows.fishing_hud,
+        windows.session_switcher,
+    ] {
         if !aux_hwnd.is_null() {
             InvalidateRect(aux_hwnd, std::ptr::null(), 0);
         }
@@ -1356,7 +1444,7 @@ unsafe fn show_context_menu(hwnd: HWND) {
         PostMessageW(hwnd, WM_NULL, 0, 0);
         CONTEXT_MENU_OPEN.store(false, Ordering::Relaxed);
         sync_current_window_layout(hwnd);
-        sync_prompt_popup();
+        sync_prompt_popup_for_parent(hwnd);
         ensure_pet_topmost(hwnd);
         ensure_aux_topmost(hwnd);
         let command = command as usize;
@@ -1780,6 +1868,10 @@ unsafe fn paint_window(hwnd: HWND) {
     }
 
     EndPaint(hwnd, &ps);
+}
+
+unsafe fn paint_pomodoro_hud(hwnd: HWND) {
+    paint_state_window(hwnd, render_pomodoro_hud_window);
 }
 
 unsafe fn paint_fishing_hud(hwnd: HWND) {

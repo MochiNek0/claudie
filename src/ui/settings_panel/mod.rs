@@ -9,17 +9,18 @@ use windows_sys::Win32::Foundation::HWND;
 use crate::app::pomodoro::PomodoroStatus;
 use crate::ui::slint_views::SettingsWindow;
 use crate::ui::window_icon::{apply_slint_window_icons, schedule_settings_window_icon_refresh};
+use crate::ui::window_position::center_window_on_screen;
 use controller::{SettingsController, mutate_app_state};
 
 thread_local! {
     static SETTINGS: RefCell<Option<SettingsWindow>> = const { RefCell::new(None) };
 }
 
-pub(crate) unsafe fn show_settings_panel(_parent: HWND) {
-    show_settings_panel_tab(0);
+pub(crate) unsafe fn show_settings_panel(parent: HWND) {
+    show_settings_panel_tab_for_parent(parent, 0);
 }
 
-pub(crate) fn show_settings_panel_tab(tab: i32) {
+fn show_settings_panel_tab_for_parent(parent: HWND, tab: i32) {
     SETTINGS.with(|slot| {
         // Always create a fresh window to avoid Slint rendering issues when
         // re-showing a previously hidden window (white screen bug).
@@ -34,7 +35,9 @@ pub(crate) fn show_settings_panel_tab(tab: i32) {
         let controller = Rc::new(RefCell::new(SettingsController::new(window.as_weak())));
         controller.borrow_mut().load_into_ui();
         wire_callbacks(&window, controller);
+        center_window_on_screen(window.window(), parent, (880.0, 760.0));
         let _ = window.show();
+        center_window_on_screen(window.window(), parent, (880.0, 760.0));
         apply_slint_window_icons(window.window());
         schedule_settings_window_icon_refresh(window.as_weak());
         *slot.borrow_mut() = Some(window);

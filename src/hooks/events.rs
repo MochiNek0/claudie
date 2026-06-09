@@ -45,7 +45,10 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
     let event = string_field(&payload, "hook_event_name")
         .or_else(|| string_field(&payload, "hookEventName"))
         .unwrap_or_else(|| "unknown".to_string());
-    let session_id = session_id_from_payload(&payload);
+    let explicit_session_id = explicit_session_id_from_payload(&payload);
+    let session_id = explicit_session_id
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
     let cwd = string_field(&payload, "cwd").unwrap_or_default();
     let tool_name = string_field(&payload, "tool_name")
         .or_else(|| string_field(&payload, "toolName"))
@@ -74,15 +77,17 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
 
     {
         let mut state = state.lock().expect("state poisoned");
+        let event_session_id =
+            event_session_id_for_state(&state, event.as_str(), explicit_session_id.as_deref());
         state.note_session_event(
-            &session_id,
+            &event_session_id,
             &cwd,
             event.as_str(),
             &tool_name,
             mood_for_tool_use(&tool_name, &payload),
         );
         if clears_pending_interaction(event.as_str()) {
-            clear_stale_interactions(&mut state, &session_id);
+            clear_stale_interactions(&mut state, &event_session_id);
         }
         let capture_official = state.llm_profiles.official_profile_active();
         update_quota_from_value(&mut state.quota, &payload, capture_official);
@@ -93,7 +98,7 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
         state.record_token_snapshot();
 
         if let Some(activity) = hook_activity(event.as_str(), &tool_name, &payload) {
-            apply_hook_activity(&mut state, activity, &payload);
+            apply_hook_activity_for_session(&mut state, activity, &payload, &event_session_id);
         }
 
         state.last_activity = Instant::now();
@@ -684,9 +689,22 @@ fn transcript_has_terminal_denial(path: &str, start: u64) -> bool {
         return false;
     }
     let text = text.to_ascii_lowercase();
+    let compact_json = text
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect::<String>();
     (text.contains("permission") && text.contains("denied"))
         || text.contains("user denied")
         || text.contains("denied by user")
+        || text.contains("user rejected")
+        || text.contains("rejected by user")
+        || text.contains("tool use denied")
+        || text.contains("operation was denied")
+        || text.contains("request was denied")
+        || compact_json.contains(r#""permissiondecision":"deny""#)
+        || compact_json.contains(r#""permission_decision":"deny""#)
+        || compact_json.contains(r#""behavior":"deny""#)
+        || compact_json.contains(r#""decision":"deny""#)
 }
 
 pub(crate) fn decide_current_permission(decision: PermissionDecision) {
@@ -920,7 +938,18 @@ fn hook_activity(event: &str, tool_name: &str, payload: &Value) -> Option<HookAc
     }
 }
 
+#[cfg(test)]
 fn apply_hook_activity(state: &mut AppState, activity: HookActivity, payload: &Value) {
+    let session_id = session_id_from_payload(payload);
+    apply_hook_activity_for_session(state, activity, payload, &session_id);
+}
+
+fn apply_hook_activity_for_session(
+    state: &mut AppState,
+    activity: HookActivity,
+    payload: &Value,
+    session_id: &str,
+) {
     match activity {
         HookActivity::Idle => {
             state.set_resting_mood(PetMood::Idle, false);
@@ -929,45 +958,50 @@ fn apply_hook_activity(state: &mut AppState, activity: HookActivity, payload: &V
             state.set_resting_mood(PetMood::Thinking, true);
         }
         HookActivity::StartTool(mood) => {
-            state.start_tool_activity(tool_key(payload), tool_name_from_payload(payload), mood);
+            state.start_tool_activity(
+                tool_key_for_session(payload, session_id),
+                tool_name_from_payload(payload),
+                mood,
+            );
         }
         HookActivity::FinishTool(mood) => {
             state.finish_tool_activity(
-                &candidate_tool_keys(payload),
+                &candidate_tool_keys_for_session(payload, session_id),
+                session_id,
                 &tool_name_from_payload(payload),
                 mood,
             );
         }
         HookActivity::FinishToolBatch => {
-            state.finish_session_tools(&session_id_from_payload(payload));
+            state.finish_session_tools(session_id);
         }
         HookActivity::Error => {
-            state.finish_session_tools(&session_id_from_payload(payload));
+            state.finish_session_work(session_id);
             state.last_error = summarize_payload(payload);
             state.set_resting_mood(PetMood::Error, true);
         }
         HookActivity::PermissionDenied => {
-            state.finish_session_tools(&session_id_from_payload(payload));
+            state.finish_session_work(session_id);
             if state.activity_mood().is_none() {
-                state.set_resting_mood(PetMood::Thinking, false);
+                state.set_resting_mood(PetMood::Idle, true);
             }
         }
         HookActivity::StartSubagent => {
-            state.start_subagent();
+            state.start_subagent_for_session(session_id);
         }
         HookActivity::FinishSubagent => {
-            state.finish_subagent();
+            state.finish_subagent_for_session(session_id);
         }
         HookActivity::Done => {
-            state.finish_session_tools(&session_id_from_payload(payload));
+            state.finish_session_work(session_id);
             if state.activity_mood().is_none() {
-                state.set_resting_mood(PetMood::Happy, false);
+                state.set_resting_mood(PetMood::Happy, true);
             }
         }
         HookActivity::EndSession => {
-            state.finish_session_tools(&session_id_from_payload(payload));
+            state.finish_session_work(session_id);
             if state.activity_mood().is_none() {
-                state.set_resting_mood(PetMood::Idle, false);
+                state.set_resting_mood(PetMood::Idle, true);
             }
         }
     }
@@ -1082,8 +1116,7 @@ fn task_tool_text(payload: &Value) -> String {
         .to_ascii_lowercase()
 }
 
-fn tool_key(payload: &Value) -> String {
-    let session_id = session_id_from_payload(payload);
+fn tool_key_for_session(payload: &Value, session_id: &str) -> String {
     let tool_name = tool_name_from_payload(payload);
     if let Some(id) = string_field(payload, "tool_use_id")
         .or_else(|| string_field(payload, "toolUseId"))
@@ -1096,16 +1129,54 @@ fn tool_key(payload: &Value) -> String {
     format!("{session_id}:tool:{tool_name}:{fingerprint}")
 }
 
+#[cfg(test)]
 fn session_id_from_payload(payload: &Value) -> String {
+    explicit_session_id_from_payload(payload).unwrap_or_else(|| "default".to_string())
+}
+
+fn explicit_session_id_from_payload(payload: &Value) -> Option<String> {
     string_field(payload, "session_id")
         .or_else(|| string_field(payload, "sessionId"))
         .or_else(|| string_field(payload, "sessionID"))
         .filter(|session_id| !session_id.trim().is_empty())
-        .unwrap_or_else(|| "default".to_string())
+        .map(|session_id| session_id.trim().to_string())
 }
 
-fn candidate_tool_keys(payload: &Value) -> Vec<String> {
-    vec![tool_key(payload)]
+fn event_session_id_for_state(
+    state: &AppState,
+    event: &str,
+    explicit_session_id: Option<&str>,
+) -> String {
+    if let Some(session_id) = explicit_session_id.filter(|session_id| !session_id.trim().is_empty())
+    {
+        return session_id.trim().to_string();
+    }
+    if event_uses_focused_session_when_missing_id(event) {
+        if let Some(session_id) = state.focused_session_id.as_deref() {
+            return session_id.to_string();
+        }
+    }
+    "default".to_string()
+}
+
+fn event_uses_focused_session_when_missing_id(event: &str) -> bool {
+    matches!(
+        event,
+        "PostToolUse"
+            | "PostToolBatch"
+            | "PermissionDenied"
+            | "PostToolUseFailure"
+            | "Stop"
+            | "SessionEnd"
+            | "StopFailure"
+            | "SubagentStop"
+            | "TaskCompleted"
+            | "PostCompact"
+    )
+}
+
+fn candidate_tool_keys_for_session(payload: &Value, session_id: &str) -> Vec<String> {
+    vec![tool_key_for_session(payload, session_id)]
 }
 
 fn tool_input_fingerprint(payload: &Value) -> Option<String> {
@@ -1434,6 +1505,49 @@ mod tests {
     }
 
     #[test]
+    fn stop_without_session_id_finishes_focused_session() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        process_hook(
+            json!({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "s1"
+            }),
+            state.clone(),
+        );
+
+        process_hook(json!({ "hook_event_name": "Stop" }), state.clone());
+
+        let state = state.lock().expect("state poisoned");
+        let session = state.sessions.get("s1").expect("focused session");
+        assert_eq!(session.status, ClaudeSessionStatus::Done);
+        assert_eq!(state.resting_mood, PetMood::Happy);
+        assert_eq!(state.mood, PetMood::Happy);
+    }
+
+    #[test]
+    fn permission_denied_without_session_id_clears_focused_popup() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        {
+            let mut state = state.lock().expect("state poisoned");
+            state.mark_session_waiting_permission("s1", "", "Edit", 1);
+            let mut permission = build_permission("Edit");
+            permission.session_id = "s1".to_string();
+            state.pending_permissions.push_back(permission);
+        }
+
+        process_hook(
+            json!({ "hook_event_name": "PermissionDenied" }),
+            state.clone(),
+        );
+
+        let state = state.lock().expect("state poisoned");
+        assert!(state.pending_permissions.is_empty());
+        let session = state.sessions.get("s1").expect("focused session");
+        assert_eq!(session.status, ClaudeSessionStatus::Done);
+        assert_eq!(state.resting_mood, PetMood::Idle);
+    }
+
+    #[test]
     fn camel_case_session_id_is_tracked_as_session() {
         let state = Arc::new(Mutex::new(AppState::new()));
 
@@ -1498,7 +1612,7 @@ mod tests {
         );
 
         assert_eq!(state.active_tools, 0);
-        assert_eq!(state.resting_mood, PetMood::Thinking);
+        assert_eq!(state.resting_mood, PetMood::Idle);
         assert_ne!(state.mood, PetMood::Error);
     }
 

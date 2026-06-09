@@ -138,16 +138,20 @@ pub(super) fn render_pet_window(
         pet_w,
         pet_h,
     );
-    draw_pet_status_hud(
-        hdc,
-        state,
-        pet_x + pet_offset_x,
-        pet_y + pet_offset_y,
-        pet_w,
-        pet_h,
-        rect.right - rect.left,
-        rect.bottom - rect.top,
-    );
+}
+
+pub(super) fn render_pomodoro_hud_window(hdc: HDC, rect: &RECT, state: &RenderState) {
+    fill_rect(hdc, rect, TRANSPARENT_KEY);
+    if state.pomodoro.status != PomodoroStatus::Stopped {
+        draw_pomodoro_hud(
+            hdc,
+            state,
+            0,
+            0,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+        );
+    }
 }
 
 pub(super) fn render_fishing_hud_window(hdc: HDC, rect: &RECT, state: &RenderState) {
@@ -617,37 +621,6 @@ fn choice_content_height(choice: &PendingChoice) -> i32 {
     height
 }
 
-fn draw_pet_status_hud(
-    hdc: HDC,
-    state: &RenderState,
-    pet_x: i32,
-    pet_y: i32,
-    pet_w: i32,
-    pet_h: i32,
-    scene_w: i32,
-    scene_h: i32,
-) {
-    if state.pomodoro.status != PomodoroStatus::Stopped {
-        let tomato_color = match state.pomodoro.mode {
-            PomodoroMode::Focus => rgb(224, 73, 61),
-            PomodoroMode::ShortBreak => rgb(65, 154, 192),
-            PomodoroMode::LongBreak => rgb(134, 105, 196),
-        };
-        let timer = format_remaining(state.pomodoro.remaining(&state.settings.pomodoro));
-        draw_pomodoro_badge(
-            hdc,
-            pet_x,
-            pet_y,
-            pet_w,
-            pet_h,
-            scene_w,
-            scene_h,
-            &timer,
-            tomato_color,
-        );
-    }
-}
-
 fn draw_session_switcher(hdc: HDC, state: &RenderState, x: i32, y: i32, w: i32, h: i32) {
     if !state.settings.show_session_switcher || state.sessions.len() <= 1 {
         return;
@@ -957,41 +930,26 @@ fn draw_fish_icon(hdc: HDC, x: i32, y: i32, body: u32) {
     filled_ellipse(hdc, x + 5, y + 8, 3, 3, theme::SURFACE);
 }
 
-fn draw_pomodoro_badge(
-    hdc: HDC,
-    pet_x: i32,
-    pet_y: i32,
-    pet_w: i32,
-    pet_h: i32,
-    scene_w: i32,
-    scene_h: i32,
-    timer: &str,
-    body: u32,
-) {
-    const BADGE_W: i32 = 82;
-    const BADGE_H: i32 = 28;
-    const VISIBLE_HEAD_Y_PERCENT: i32 = 35;
-    const GAP_FROM_HEAD: i32 = 2;
-    const SCREEN_PAD: i32 = 8;
-
-    let max_x = (scene_w - BADGE_W - SCREEN_PAD).max(SCREEN_PAD);
-    let x = (pet_x + pet_w / 2 - BADGE_W / 2).clamp(SCREEN_PAD, max_x);
-    let head_y = pet_y + pet_h * VISIBLE_HEAD_Y_PERCENT / 100;
-    let max_y = (scene_h - BADGE_H - SCREEN_PAD).max(SCREEN_PAD);
-    let y = (head_y - BADGE_H - GAP_FROM_HEAD).clamp(SCREEN_PAD, max_y);
+fn draw_pomodoro_hud(hdc: HDC, state: &RenderState, x: i32, y: i32, w: i32, h: i32) {
+    let body = match state.pomodoro.mode {
+        PomodoroMode::Focus => rgb(224, 73, 61),
+        PomodoroMode::ShortBreak => rgb(65, 154, 192),
+        PomodoroMode::LongBreak => rgb(134, 105, 196),
+    };
+    let timer = format_remaining(state.pomodoro.remaining(&state.settings.pomodoro));
     filled_round_rect(
         hdc,
         x,
         y,
-        BADGE_W,
-        BADGE_H,
+        w,
+        h,
         theme::RADIUS_FIELD,
         theme::SURFACE,
         theme::HAIRLINE,
     );
 
     draw_tomato_icon(hdc, x + 6, y + 5, body);
-    text_fit(hdc, x + 32, y + 7, BADGE_W - 36, timer, theme::INK);
+    text_fit(hdc, x + 32, y + 7, w - 36, &timer, theme::INK);
 }
 
 fn draw_tomato_icon(hdc: HDC, x: i32, y: i32, body: u32) {

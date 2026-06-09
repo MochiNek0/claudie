@@ -344,6 +344,7 @@ pub(crate) struct AppState {
     pub(crate) active_tool_keys: HashMap<String, ActiveTool>,
     pub(crate) active_tool_names: HashMap<String, VecDeque<String>>,
     pub(crate) active_subagents: usize,
+    pub(crate) active_subagent_sessions: HashMap<String, usize>,
     pub(crate) activity_spans: HashMap<String, ActivitySpan>,
     pub(crate) sessions: HashMap<String, ClaudeSession>,
     pub(crate) focused_session_id: Option<String>,
@@ -384,6 +385,7 @@ impl AppState {
             active_tool_keys: HashMap::new(),
             active_tool_names: HashMap::new(),
             active_subagents: 0,
+            active_subagent_sessions: HashMap::new(),
             activity_spans: HashMap::new(),
             sessions: HashMap::new(),
             focused_session_id: None,
@@ -492,6 +494,14 @@ impl AppState {
             self.last_activity = Instant::now();
             self.refresh_visual_mood();
         }
+    }
+
+    fn clear_session_activity_kind(&mut self, session_id: &str, kind: ActivityKind) -> bool {
+        let before = self.activity_spans.len();
+        self.activity_spans.retain(|_, span| {
+            span.kind == ActivityKind::Resting || span.session_id != session_id || span.kind != kind
+        });
+        self.activity_spans.len() != before
     }
 
     pub(crate) fn start_permission_activity(&mut self, id: u64, session_id: &str, mood: PetMood) {
@@ -884,6 +894,7 @@ impl AppState {
         self.start_tool_activity(key, "tool".to_string(), mood);
     }
 
+    #[cfg(test)]
     pub(crate) fn finish_tool_mood(&mut self, mood: PetMood) {
         if let Some(key) = self
             .active_tool_keys
@@ -904,6 +915,7 @@ impl AppState {
     pub(crate) fn finish_tool_activity(
         &mut self,
         keys: &[String],
+        session_id: &str,
         tool_name: &str,
         fallback_mood: PetMood,
     ) -> PetMood {
@@ -911,15 +923,13 @@ impl AppState {
             .iter()
             .find(|key| self.active_tool_keys.contains_key(*key))
             .cloned()
-            .or_else(|| self.pop_named_tool_key(tool_name));
+            .or_else(|| self.pop_named_tool_key_for_session(session_id, tool_name));
 
         let Some(key) = key else {
-            self.finish_tool_mood(fallback_mood);
             return fallback_mood;
         };
 
         let Some(tool) = self.active_tool_keys.remove(&key) else {
-            self.finish_tool_mood(fallback_mood);
             return fallback_mood;
         };
         self.remove_tool_name_key(&tool.tool_name, &key);
@@ -948,10 +958,8 @@ impl AppState {
             .filter(|key| tool_session_from_key(key) == session_id)
             .cloned()
             .collect::<Vec<_>>();
-        if keys.is_empty() {
-            return;
-        }
 
+        let removed_tools = keys.len();
         for key in keys {
             if let Some(tool) = self.active_tool_keys.remove(&key) {
                 self.remove_tool_name_key(&tool.tool_name, &key);
@@ -959,16 +967,25 @@ impl AppState {
                 self.decrement_active_tool_mood(tool.mood);
             }
         }
+        let changed = self.clear_session_activity_kind(session_id, ActivityKind::Tool);
+        if changed || removed_tools > 0 {
+            self.last_activity = Instant::now();
+            self.refresh_visual_mood();
+        }
+    }
+
+    pub(crate) fn finish_session_work(&mut self, session_id: &str) {
+        self.finish_session_tools(session_id);
+        self.finish_session_subagents(session_id);
         self.clear_session_activities(session_id);
-        self.last_activity = Instant::now();
-        self.refresh_visual_mood();
     }
 
     #[allow(dead_code)]
     pub(crate) fn clear_activity(&mut self) {
         self.finish_all_tools();
         self.active_subagents = 0;
-        self.activity_spans.remove(SUBAGENT_ACTIVITY_KEY);
+        self.active_subagent_sessions.clear();
+        self.clear_activity_spans_by_kind(ActivityKind::Subagent);
         self.refresh_visual_mood();
     }
 
@@ -984,16 +1001,34 @@ impl AppState {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn start_subagent(&mut self) {
+        self.start_subagent_for_session("");
+    }
+
+    pub(crate) fn start_subagent_for_session(&mut self, session_id: &str) {
+        let session_id = session_id.trim().to_string();
         self.active_subagents = self.active_subagents.saturating_add(1);
-        self.sync_subagent_span();
+        *self.active_subagent_sessions.entry(session_id).or_insert(0) += 1;
+        self.sync_subagent_spans();
         self.last_activity = Instant::now();
         self.refresh_visual_mood();
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn finish_subagent(&mut self) {
-        self.active_subagents = self.active_subagents.saturating_sub(1);
-        self.sync_subagent_span();
+        self.finish_subagent_for_session("");
+    }
+
+    pub(crate) fn finish_subagent_for_session(&mut self, session_id: &str) {
+        let session_id = session_id.trim();
+        let decremented = self.decrement_subagent_session(session_id)
+            || (!session_id.is_empty() && self.decrement_subagent_session(""));
+        if decremented {
+            self.active_subagents = self.active_subagents.saturating_sub(1);
+        }
+        self.sync_subagent_spans();
         self.last_activity = Instant::now();
         self.refresh_visual_mood();
     }
@@ -1170,21 +1205,47 @@ impl AppState {
             .retain(|_, span| span.kind == ActivityKind::Resting || !span.is_expired_at(now));
     }
 
-    fn sync_subagent_span(&mut self) {
-        if self.active_subagents > 0 {
+    fn sync_subagent_spans(&mut self) {
+        self.activity_spans
+            .retain(|_, span| span.kind != ActivityKind::Subagent);
+
+        for (session_id, count) in self.active_subagent_sessions.iter() {
+            if *count == 0 {
+                continue;
+            }
             self.activity_spans.insert(
-                SUBAGENT_ACTIVITY_KEY.to_string(),
+                subagent_activity_key(session_id),
                 ActivitySpan::new(
-                    SUBAGENT_ACTIVITY_KEY,
-                    "",
+                    subagent_activity_key(session_id),
+                    session_id.clone(),
                     ActivityKind::Subagent,
                     PetMood::Subagent,
                     false,
                 ),
             );
-        } else {
-            self.activity_spans.remove(SUBAGENT_ACTIVITY_KEY);
         }
+    }
+
+    fn finish_session_subagents(&mut self, session_id: &str) {
+        let session_id = session_id.trim();
+        let Some(count) = self.active_subagent_sessions.remove(session_id) else {
+            return;
+        };
+        self.active_subagents = self.active_subagents.saturating_sub(count);
+        self.sync_subagent_spans();
+        self.last_activity = Instant::now();
+        self.refresh_visual_mood();
+    }
+
+    fn decrement_subagent_session(&mut self, session_id: &str) -> bool {
+        let Some(count) = self.active_subagent_sessions.get_mut(session_id) else {
+            return false;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.active_subagent_sessions.remove(session_id);
+        }
+        true
     }
 
     fn sync_pomodoro_span(&mut self) {
@@ -1217,10 +1278,17 @@ impl AppState {
         }
     }
 
-    fn pop_named_tool_key(&mut self, tool_name: &str) -> Option<String> {
+    fn pop_named_tool_key_for_session(
+        &mut self,
+        session_id: &str,
+        tool_name: &str,
+    ) -> Option<String> {
         let name_key = normalize_tool_name_key(tool_name);
         let queue = self.active_tool_names.get_mut(&name_key)?;
-        let key = queue.pop_front();
+        let position = queue
+            .iter()
+            .position(|key| tool_session_from_key(key) == session_id)?;
+        let key = queue.remove(position);
         if queue.is_empty() {
             self.active_tool_names.remove(&name_key);
         }
@@ -1739,10 +1807,7 @@ fn session_status_for_event(
         }
         "PreCompact" => (ClaudeSessionStatus::Compacting, "Compacting".to_string()),
         "PostCompact" => (ClaudeSessionStatus::Done, "Compacted".to_string()),
-        "PermissionDenied" => (
-            ClaudeSessionStatus::Streaming,
-            "Permission denied".to_string(),
-        ),
+        "PermissionDenied" => (ClaudeSessionStatus::Done, "Permission denied".to_string()),
         "PostToolUseFailure" | "StopFailure" => {
             (ClaudeSessionStatus::Error, "Hook failure".to_string())
         }
@@ -1773,6 +1838,14 @@ fn normalize_tool_name_key(tool_name: &str) -> String {
 
 fn tool_activity_key(key: &str) -> String {
     format!("tool:{key}")
+}
+
+fn subagent_activity_key(session_id: &str) -> String {
+    if session_id.is_empty() {
+        SUBAGENT_ACTIVITY_KEY.to_string()
+    } else {
+        format!("{SUBAGENT_ACTIVITY_KEY}:{session_id}")
+    }
 }
 
 fn permission_activity_key(id: u64) -> String {
@@ -1864,6 +1937,36 @@ mod tests {
         assert!(state.active_tool_keys.contains_key("s2:id:bash-1"));
         assert!(!state.active_tool_keys.contains_key("s1:id:write-1"));
         assert_eq!(state.activity_mood(), Some(PetMood::Building));
+    }
+
+    #[test]
+    fn finish_tool_activity_does_not_fall_back_to_other_sessions() {
+        let mut state = AppState::new();
+        state.start_tool_activity(
+            "s1:id:bash-1".to_string(),
+            "Bash".to_string(),
+            PetMood::Building,
+        );
+
+        state.finish_tool_activity(&[], "s2", "Bash", PetMood::Building);
+
+        assert_eq!(state.active_tools, 1);
+        assert!(state.active_tool_keys.contains_key("s1:id:bash-1"));
+        assert_eq!(state.activity_mood(), Some(PetMood::Building));
+    }
+
+    #[test]
+    fn finish_session_work_clears_matching_subagents() {
+        let mut state = AppState::new();
+        state.start_subagent_for_session("s1");
+        state.start_subagent_for_session("s2");
+
+        state.finish_session_work("s1");
+
+        assert_eq!(state.active_subagents, 1);
+        assert_eq!(state.active_subagent_sessions.get("s2").copied(), Some(1));
+        assert!(!state.active_subagent_sessions.contains_key("s1"));
+        assert!(state.activity_spans.contains_key("subagent:s2"));
     }
 
     #[test]

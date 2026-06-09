@@ -8,7 +8,7 @@ slint::slint! {
         in property <bool> active: false;
         callback clicked();
 
-        border-radius: 8px;
+        border-radius: 999px;
         border-width: 1px;
         border-color: root.active ? #0a84ff : (root.enabled ? #cfd8e6 : #e5e7eb);
         background: root.active ? #0a84ff : (root.enabled ? #ffffff : #f3f4f6);
@@ -35,8 +35,10 @@ slint::slint! {
         }
 
         label := Text {
-            width: 100%;
-            height: 100%;
+            x: 8px;
+            y: 4px;
+            width: root.width - 16px;
+            height: root.height - 8px;
             text: root.text;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -51,7 +53,7 @@ slint::slint! {
         in property <bool> enabled: true;
         callback clicked();
 
-        border-radius: 7px;
+        border-radius: 999px;
         background: touch.pressed && root.enabled ? #dbeafe : (touch.has-hover && root.enabled ? #eef6ff : transparent);
 
         touch := TouchArea {
@@ -65,8 +67,10 @@ slint::slint! {
         }
 
         Text {
-            width: 100%;
-            height: 100%;
+            x: 8px;
+            y: 4px;
+            width: root.width - 16px;
+            height: root.height - 8px;
             text: root.text;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -80,7 +84,7 @@ slint::slint! {
         in property <string> text;
         callback clicked();
 
-        border-radius: 6px;
+        border-radius: 8px;
         background: touch.pressed ? #dbeafe : (touch.has-hover ? #eef6ff : transparent);
 
         touch := TouchArea {
@@ -105,12 +109,12 @@ slint::slint! {
     }
 
     component MonoLineEdit inherits LineEdit {
-        font-family: "Cascadia Mono, Consolas";
+        font-family: "Inter, Segoe UI";
         font-size: 12px;
     }
 
     component MonoTextEdit inherits TextEdit {
-        font-family: "Cascadia Mono, Consolas";
+        font-family: "Inter, Segoe UI";
         font-size: 12px;
     }
 
@@ -118,7 +122,7 @@ slint::slint! {
         in-out property <bool> checked: false;
         callback toggled(bool);
 
-        border-radius: 12px;
+        border-radius: 8px;
         border-width: 1px;
         border-color: root.checked ? #0a84ff : #cfd8e6;
         background: root.checked ? #0a84ff : #ffffff;
@@ -138,8 +142,59 @@ slint::slint! {
             y: 2px;
             width: 20px;
             height: 20px;
-            border-radius: 10px;
+            border-radius: 8px;
             background: root.checked ? #ffffff : #cfd8e6;
+        }
+    }
+
+    component SettingsTabButton inherits Rectangle {
+        in property <string> text;
+        in property <image> icon_source;
+        in property <bool> active: false;
+        callback clicked();
+
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: root.active ? #0a84ff : transparent;
+        background: root.active ? #0a84ff : (touch.has-hover ? #eef6ff : transparent);
+
+        states [
+            pressed when touch.pressed : {
+                background: root.active ? #0060c6 : #dbeafe;
+                border-color: root.active ? #0060c6 : #bfdbfe;
+            }
+        ]
+
+        touch := TouchArea {
+            width: 100%;
+            height: 100%;
+            mouse-cursor: pointer;
+            clicked => {
+                root.clicked();
+            }
+        }
+
+        Image {
+            x: 10px;
+            y: (root.height - 16px) / 2;
+            width: 16px;
+            height: 16px;
+            source: root.icon_source;
+            image-fit: contain;
+            colorize: root.active ? #ffffff : #64748b;
+        }
+
+        Text {
+            x: 34px;
+            y: 4px;
+            width: root.width - 42px;
+            height: root.height - 8px;
+            text: root.text;
+            overflow: elide;
+            vertical-alignment: center;
+            font-size: 13px;
+            font-weight: 600;
+            color: root.active ? #ffffff : #334155;
         }
     }
 
@@ -246,6 +301,68 @@ slint::slint! {
             x: root.width - 32px; y: 2px; width: 30px; height: root.height - 4px;
             text: "+";
             clicked => { root.value = min(root.maximum, root.value + 1); }
+        }
+    }
+
+    component PomodoroDurationTile inherits Rectangle {
+        in property <string> title;
+        in property <string> hint;
+        in property <brush> accent;
+        in-out property <int> value: 25;
+
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: #dae0ea;
+        background: #ffffff;
+
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 4px;
+            border-radius: 8px;
+            background: root.accent;
+        }
+
+        Text {
+            x: 16px;
+            y: 16px;
+            width: root.width - 32px;
+            text: root.title;
+            color: #111827;
+            font-size: 14px;
+            font-weight: 700;
+            overflow: elide;
+        }
+
+        Text {
+            x: 16px;
+            y: 38px;
+            width: root.width - 32px;
+            text: root.hint;
+            color: #64748b;
+            font-size: 12px;
+            overflow: elide;
+        }
+
+        PointerSpinBox {
+            x: 16px;
+            y: 70px;
+            width: root.width - 58px;
+            height: 32px;
+            minimum: 1;
+            maximum: 240;
+            value <=> root.value;
+        }
+
+        Text {
+            x: root.width - 36px;
+            y: 76px;
+            width: 28px;
+            text: "min";
+            color: #64748b;
+            font-size: 12px;
+            vertical-alignment: center;
         }
     }
 
@@ -380,11 +497,19 @@ slint::slint! {
     }
 
     export component SettingsWindow inherits Window {
-        width: 880px;
-        height: 760px;
+        min-width: 400px;
+        preferred-width: 800px;
+        max-width: 800px;
+        min-height: 300px;
+        preferred-height: 600px;
+        max-height: 600px;
         title: "claudie Settings";
         icon: @image-url("../../assets/icon.ico");
         background: #f4f7fc;
+        default-font-family: "Inter, Segoe UI";
+        default-font-size: 13px;
+
+        property <length> content_width: 584px;
 
         in-out property <int> active_tab: 0;
         in-out property <float> pet_scale: 80;
@@ -501,6 +626,7 @@ slint::slint! {
         callback skip_pomodoro();
         callback stop_pomodoro();
 
+        if false: Rectangle {
         // Frosted card: 16px window margin, 8pt-grid radius.
         Rectangle {
             x: 16px;
@@ -762,6 +888,308 @@ slint::slint! {
             width: 800px;
             height: 20px;
             text: root.status_message;
+            color: #6b7280;
+            font-size: 12px;
+        }
+        }
+
+        Rectangle { x: 0px; y: 0px; width: root.width; height: root.height; background: #f4f7fc; }
+        Rectangle {
+            x: 8px;
+            y: 8px;
+            width: root.width - 16px;
+            height: root.height - 16px;
+            background: #ffffff;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #e4e8f0;
+        }
+        TouchArea { x: 0px; y: 0px; width: root.width; height: root.height; }
+
+        Rectangle {
+            x: 16px;
+            y: 16px;
+            width: 144px;
+            height: root.height - 32px;
+            background: #f8fafc;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #e7edf5;
+        }
+
+        Text {
+            x: 28px;
+            y: 28px;
+            width: 120px;
+            text: "claudie";
+            font-size: 20px;
+            font-weight: 700;
+            color: #111827;
+        }
+        Text {
+            x: 28px;
+            y: 54px;
+            width: 120px;
+            text: "Settings";
+            font-size: 12px;
+            font-weight: 600;
+            color: #64748b;
+        }
+
+        SettingsTabButton { x: 24px; y: 84px; width: 128px; height: 36px; text: "Basic"; icon_source: @image-url("../../assets/lucide/sliders-horizontal.svg"); active: root.active_tab == 0; clicked => { root.active_tab = 0; } }
+        SettingsTabButton { x: 24px; y: 128px; width: 128px; height: 36px; text: "Pomodoro"; icon_source: @image-url("../../assets/lucide/timer.svg"); active: root.active_tab == 1; clicked => { root.active_tab = 1; } }
+        SettingsTabButton { x: 24px; y: 172px; width: 128px; height: 36px; text: "LLM Profiles"; icon_source: @image-url("../../assets/lucide/bot.svg"); active: root.active_tab == 2; clicked => { root.active_tab = 2; } }
+        SettingsTabButton { x: 24px; y: 216px; width: 128px; height: 36px; text: "Stats"; icon_source: @image-url("../../assets/lucide/chart-no-axes-column.svg"); active: root.active_tab == 3; clicked => { root.active_tab = 3; } }
+
+        Rectangle { x: 168px; y: 16px; width: 1px; height: root.height - 32px; background: #e7edf5; }
+
+        ScrollView {
+            x: 176px;
+            y: 16px;
+            width: root.width - 192px;
+            height: root.height - 56px;
+            viewport-width: root.content_width;
+            viewport-height: root.active_tab == 0 ? 608px : (root.active_tab == 1 ? 456px : (root.active_tab == 2 ? 568px : 536px));
+
+            if active_tab == 0: Rectangle {
+                width: root.content_width;
+                height: 608px;
+                background: transparent;
+
+                Text { x: 0px; y: 0px; text: "Pet renderer"; font-size: 17px; font-weight: 700; color: #111827; }
+                Text { x: 0px; y: 28px; width: 576px; text: "Tune the desktop pet size and map each mood to a GIF filename."; font-size: 13px; color: #6b7280; }
+
+                Text { x: 0px; y: 64px; text: "Pet size"; color: #6b7280; font-size: 12px; }
+                PointerSlider {
+                    x: 0px; y: 84px; width: 220px; height: 32px;
+                    minimum: 50; maximum: 150; step: 1;
+                    value <=> root.pet_scale;
+                    changed(value) => { root.pet_scale_changed(value); }
+                }
+                Text { x: 232px; y: 90px; width: 52px; text: Math.round(root.pet_scale) + "%"; color: #111827; font-size: 13px; }
+                Text { x: 300px; y: 64px; text: "Sleep after"; color: #6b7280; font-size: 12px; }
+                PointerSlider {
+                    x: 300px; y: 84px; width: 220px; height: 32px;
+                    minimum: 15; maximum: 1800; step: 15;
+                    value <=> root.sleep_after;
+                    changed(value) => { root.sleep_after_changed(value); }
+                }
+                Text { x: 532px; y: 90px; width: 52px; text: Math.round(root.sleep_after) + "s"; color: #111827; font-size: 13px; }
+
+                Text { x: 0px; y: 128px; text: "Pet asset directory"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 0px; y: 148px; width: 284px; height: 32px; text <=> root.pet_dir; }
+                Text { x: 300px; y: 128px; text: "GIF directory"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 300px; y: 148px; width: 284px; height: 32px; text <=> root.gif_dir; }
+
+                Text { x: 0px; y: 204px; text: "Idle"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 0px; y: 224px; width: 134px; height: 32px; text <=> root.anim_idle; }
+                Text { x: 150px; y: 204px; text: "Thinking"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 150px; y: 224px; width: 134px; height: 32px; text <=> root.anim_thinking; }
+                Text { x: 300px; y: 204px; text: "Typing"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 300px; y: 224px; width: 134px; height: 32px; text <=> root.anim_typing; }
+                Text { x: 450px; y: 204px; text: "Building"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 450px; y: 224px; width: 134px; height: 32px; text <=> root.anim_building; }
+
+                Text { x: 0px; y: 268px; text: "Search"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 0px; y: 288px; width: 134px; height: 32px; text <=> root.anim_search; }
+                Text { x: 150px; y: 268px; text: "Happy"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 150px; y: 288px; width: 134px; height: 32px; text <=> root.anim_happy; }
+                Text { x: 300px; y: 268px; text: "Error"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 300px; y: 288px; width: 134px; height: 32px; text <=> root.anim_error; }
+                Text { x: 450px; y: 268px; text: "Sleeping"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 450px; y: 288px; width: 134px; height: 32px; text <=> root.anim_sleeping; }
+
+                Text { x: 0px; y: 332px; text: "Subagent"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 0px; y: 352px; width: 134px; height: 32px; text <=> root.anim_subagent; }
+                Text { x: 150px; y: 332px; text: "Pomodoro"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 150px; y: 352px; width: 134px; height: 32px; text <=> root.anim_pomodoro; }
+                Text { x: 300px; y: 332px; text: "Wave"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 300px; y: 352px; width: 134px; height: 32px; text <=> root.anim_wave; }
+                Text { x: 450px; y: 332px; text: "Stretch"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 450px; y: 352px; width: 134px; height: 32px; text <=> root.anim_stretch; }
+
+                Text { x: 0px; y: 396px; text: "Fishing"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 0px; y: 416px; width: 134px; height: 32px; text <=> root.anim_fishing; }
+                Text { x: 150px; y: 396px; text: "Reel"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 150px; y: 416px; width: 134px; height: 32px; text <=> root.anim_fishing_reel; }
+                Text { x: 300px; y: 396px; text: "Caught"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 300px; y: 416px; width: 134px; height: 32px; text <=> root.anim_fishing_caught; }
+                Text { x: 450px; y: 396px; text: "Missed"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 450px; y: 416px; width: 134px; height: 32px; text <=> root.anim_fishing_missed; }
+
+                Text { x: 0px; y: 472px; text: "Session switcher"; color: #6b7280; font-size: 12px; }
+                Text { x: 0px; y: 494px; width: 480px; text: "Show the compact focus panel when more than one Claude Code session is active."; color: #111827; font-size: 13px; }
+                TogglePill { x: 538px; y: 482px; width: 46px; height: 24px; checked <=> root.show_session_switcher; }
+
+                ActionButton { x: 408px; y: 556px; width: 80px; height: 32px; text: "Save"; clicked => { root.save_basic(); } }
+                ActionButton { x: 504px; y: 556px; width: 80px; height: 32px; text: "Reset"; clicked => { root.reset_basic(); } }
+            }
+
+            if active_tab == 1: Rectangle {
+                width: root.content_width;
+                height: 456px;
+                background: transparent;
+
+                Text { x: 0px; y: 0px; text: "Pomodoro"; font-size: 17px; font-weight: 700; color: #111827; }
+                Text { x: 0px; y: 28px; width: 576px; text: "Set focus and break lengths, then control the active timer."; font-size: 13px; color: #6b7280; }
+
+                Rectangle {
+                    x: 0px;
+                    y: 64px;
+                    width: 584px;
+                    height: 128px;
+                    background: #f2f7ff;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: #d8e7ff;
+                }
+                Rectangle { x: 0px; y: 64px; width: 5px; height: 128px; background: #0a84ff; border-radius: 8px; }
+                Rectangle { x: 24px; y: 88px; width: 52px; height: 52px; background: #ffffff; border-radius: 8px; border-width: 1px; border-color: #d8e7ff; }
+                Image { x: 38px; y: 102px; width: 24px; height: 24px; source: @image-url("../../assets/lucide/timer.svg"); image-fit: contain; colorize: #0a84ff; }
+                Text { x: 96px; y: 86px; width: 160px; text: "Current cycle"; color: #64748b; font-size: 12px; font-weight: 700; }
+                Text { x: 96px; y: 108px; width: 456px; height: 48px; text: root.pomodoro_status; wrap: word-wrap; color: #111827; font-size: 15px; font-weight: 700; }
+                Text { x: 96px; y: 162px; width: 456px; text: "Tune the rhythm below, then use the controls without leaving this panel."; color: #64748b; font-size: 12px; overflow: elide; }
+
+                Text { x: 0px; y: 216px; text: "Durations"; color: #111827; font-size: 14px; font-weight: 700; }
+                ActionButton { x: 504px; y: 206px; width: 80px; height: 32px; text: "Save"; clicked => { root.save_pomodoro(); } }
+
+                PomodoroDurationTile {
+                    x: 0px; y: 248px; width: 184px; height: 116px;
+                    title: "Focus";
+                    hint: "Deep work";
+                    accent: #0a84ff;
+                    value <=> root.focus_minutes;
+                }
+                PomodoroDurationTile {
+                    x: 200px; y: 248px; width: 184px; height: 116px;
+                    title: "Short break";
+                    hint: "Quick reset";
+                    accent: #2a9d8f;
+                    value <=> root.short_break_minutes;
+                }
+                PomodoroDurationTile {
+                    x: 400px; y: 248px; width: 184px; height: 116px;
+                    title: "Long break";
+                    hint: "Full recharge";
+                    accent: #7c5cc4;
+                    value <=> root.long_break_minutes;
+                }
+
+                Rectangle { x: 0px; y: 392px; width: 584px; height: 48px; background: #f8fafc; border-radius: 8px; border-width: 1px; border-color: #e7edf5; }
+                ActionButton { x: 16px; y: 400px; width: 112px; height: 32px; text: "Start"; active: true; clicked => { root.start_pomodoro(); } }
+                ActionButton { x: 144px; y: 400px; width: 112px; height: 32px; text: root.pause_resume_label; clicked => { root.pause_resume_pomodoro(); } }
+                ActionButton { x: 272px; y: 400px; width: 112px; height: 32px; text: "Skip"; clicked => { root.skip_pomodoro(); } }
+                ActionButton { x: 456px; y: 400px; width: 112px; height: 32px; text: "Stop"; clicked => { root.stop_pomodoro(); } }
+            }
+
+            if active_tab == 2: Rectangle {
+                width: root.content_width;
+                height: 568px;
+                background: transparent;
+
+                Text { x: 0px; y: 0px; text: "Provider profiles"; font-size: 17px; font-weight: 700; color: #111827; }
+                Text { x: 0px; y: 28px; width: 576px; text: "Keep Claude Code provider settings tidy without leaving the pet."; font-size: 13px; color: #6b7280; }
+
+                Text { x: 0px; y: 72px; text: "Profile"; color: #6b7280; font-size: 12px; }
+                PointerComboBox {
+                    x: 0px; y: 92px; width: 244px; height: 32px;
+                    model: root.profile_model;
+                    current-index <=> root.selected_profile_index;
+                    selected(index) => { root.select_profile(index); }
+                }
+                Text { x: 256px; y: 98px; width: 40px; text: root.profile_position; color: #6b7280; font-size: 12px; }
+                ActionButton { x: 304px; y: 92px; width: 60px; height: 32px; text: "New"; clicked => { root.new_profile(); } }
+                ActionButton { x: 372px; y: 92px; width: 124px; height: 32px; text: "Import Current"; clicked => { root.import_profile(); } }
+                ActionButton { x: 504px; y: 92px; width: 80px; height: 32px; text: "Delete"; clicked => { root.delete_profile(); } }
+
+                Text { x: 0px; y: 136px; text: "Profile ID"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 0px; y: 156px; width: 284px; height: 32px; text <=> root.profile_id; }
+                Text { x: 300px; y: 136px; text: "Name"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 300px; y: 156px; width: 284px; height: 32px; text <=> root.profile_name; }
+
+                Text { x: 0px; y: 200px; text: "Model"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 0px; y: 220px; width: 284px; height: 32px; text <=> root.model; }
+                Text { x: 300px; y: 200px; text: "Base URL"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 300px; y: 220px; width: 284px; height: 32px; text <=> root.base_url; }
+
+                Text { x: 0px; y: 264px; text: "API key"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 0px; y: 284px; width: 284px; height: 32px; input-type: InputType.password; text <=> root.api_key; }
+                Text { x: 300px; y: 264px; text: "Auth token (proxy)"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 300px; y: 284px; width: 284px; height: 32px; input-type: InputType.password; text <=> root.auth_token; }
+
+                Text { x: 0px; y: 328px; text: "Opus"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 0px; y: 348px; width: 184px; height: 32px; text <=> root.opus_model; }
+                Text { x: 200px; y: 328px; text: "Sonnet"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 200px; y: 348px; width: 184px; height: 32px; text <=> root.sonnet_model; }
+                Text { x: 400px; y: 328px; text: "Haiku"; color: #6b7280; font-size: 12px; }
+                MonoLineEdit { x: 400px; y: 348px; width: 184px; height: 32px; text <=> root.haiku_model; }
+
+                Text { x: 0px; y: 392px; text: "Extra env"; color: #6b7280; font-size: 12px; }
+                MonoTextEdit { x: 0px; y: 412px; width: 284px; height: 72px; text <=> root.extra_env; }
+                Text { x: 300px; y: 392px; text: "OpenAI body"; color: #6b7280; font-size: 12px; }
+                MonoTextEdit { x: 300px; y: 412px; width: 284px; height: 72px; text <=> root.openai_extra_body; }
+
+                Rectangle { x: 0px; y: 504px; width: 432px; height: 52px; background: #f2f5fa; border-radius: 8px; border-width: 1px; border-color: #dae0ea; }
+                Text { x: 14px; y: 514px; width: 216px; text: root.profile_usage_title; overflow: elide; color: #111827; font-size: 13px; font-weight: 600; }
+                Text { x: 14px; y: 534px; width: 216px; text: root.profile_usage_summary; overflow: elide; color: #475569; font-size: 11px; }
+                StatBarRow { x: 232px; y: 508px; width: 184px; height: 18px; label: "5h"; value: root.profile_usage_five_hour_value; bar: root.profile_usage_five_hour_bar; accent: root.profile_usage_five_hour_bar >= 90 ? #d64545 : (root.profile_usage_five_hour_bar >= 70 ? #d88a24 : #0a84ff); }
+                StatBarRow { x: 232px; y: 530px; width: 184px; height: 18px; label: "7d"; value: root.profile_usage_seven_day_value; bar: root.profile_usage_seven_day_bar; accent: root.profile_usage_seven_day_bar >= 90 ? #d64545 : (root.profile_usage_seven_day_bar >= 70 ? #d88a24 : #7c5cc4); }
+
+                ActionButton { x: 448px; y: 514px; width: 64px; height: 32px; text: "Save"; clicked => { root.save_profile(); } }
+                ActionButton { x: 520px; y: 514px; width: 64px; height: 32px; text: "Use"; clicked => { root.use_profile(); } }
+            }
+
+            if active_tab == 3: Rectangle {
+                width: root.content_width;
+                height: 536px;
+                background: transparent;
+
+                Text { x: 0px; y: 0px; text: "Session ledger"; font-size: 17px; font-weight: 700; color: #111827; }
+                Text { x: 0px; y: 28px; width: 576px; text: "A quiet local record of Claude Code activity observed by claudie."; font-size: 13px; color: #6b7280; }
+
+                Rectangle { x: 0px; y: 72px; width: 284px; height: 240px; background: #f2f5fa; border-radius: 8px; border-width: 1px; border-color: #dae0ea; }
+                Text { x: 24px; y: 92px; width: 236px; text: root.stats_today_title; color: #111827; font-size: 14px; font-weight: 600; }
+                Text { x: 24px; y: 116px; width: 236px; height: 28px; text: root.stats_today_summary; overflow: elide; color: #111827; font-size: 12px; }
+                StatBarRow { x: 24px; y: 152px; width: 236px; height: 20px; label: "Write"; value: root.stats_today_write_value; bar: root.stats_today_write_bar; accent: #2a9d8f; }
+                StatBarRow { x: 24px; y: 176px; width: 236px; height: 20px; label: "Bash"; value: root.stats_today_bash_value; bar: root.stats_today_bash_bar; accent: #4577c3; }
+                StatBarRow { x: 24px; y: 200px; width: 236px; height: 20px; label: "Search"; value: root.stats_today_search_value; bar: root.stats_today_search_bar; accent: #d88a24; }
+                StatBarRow { x: 24px; y: 224px; width: 236px; height: 20px; label: "Agent"; value: root.stats_today_subagent_value; bar: root.stats_today_subagent_bar; accent: #7c5cc4; }
+                StatBarRow { x: 24px; y: 248px; width: 236px; height: 20px; label: "Perm"; value: root.stats_today_permission_value; bar: root.stats_today_permission_bar; accent: #0a84ff; }
+                StatBarRow { x: 24px; y: 272px; width: 236px; height: 20px; label: "Choice"; value: root.stats_today_choice_value; bar: root.stats_today_choice_bar; accent: #6b8f3f; }
+
+                Rectangle { x: 300px; y: 72px; width: 284px; height: 240px; background: #f2f5fa; border-radius: 8px; border-width: 1px; border-color: #dae0ea; }
+                Text { x: 324px; y: 92px; width: 236px; text: root.stats_recent_title; color: #111827; font-size: 14px; font-weight: 600; }
+                Text { x: 324px; y: 116px; width: 236px; height: 28px; text: root.stats_recent_summary; overflow: elide; color: #111827; font-size: 12px; }
+                StatBarRow { x: 324px; y: 152px; width: 236px; height: 20px; label: "Write"; value: root.stats_recent_write_value; bar: root.stats_recent_write_bar; accent: #2a9d8f; }
+                StatBarRow { x: 324px; y: 176px; width: 236px; height: 20px; label: "Bash"; value: root.stats_recent_bash_value; bar: root.stats_recent_bash_bar; accent: #4577c3; }
+                StatBarRow { x: 324px; y: 200px; width: 236px; height: 20px; label: "Search"; value: root.stats_recent_search_value; bar: root.stats_recent_search_bar; accent: #d88a24; }
+                StatBarRow { x: 324px; y: 224px; width: 236px; height: 20px; label: "Agent"; value: root.stats_recent_subagent_value; bar: root.stats_recent_subagent_bar; accent: #7c5cc4; }
+                StatBarRow { x: 324px; y: 248px; width: 236px; height: 20px; label: "Perm"; value: root.stats_recent_permission_value; bar: root.stats_recent_permission_bar; accent: #0a84ff; }
+                StatBarRow { x: 324px; y: 272px; width: 236px; height: 20px; label: "Choice"; value: root.stats_recent_choice_value; bar: root.stats_recent_choice_bar; accent: #6b8f3f; }
+
+                Rectangle { x: 0px; y: 336px; width: 284px; height: 168px; background: #ffffff; border-radius: 8px; border-width: 1px; border-color: #dae0ea; }
+                Text { x: 24px; y: 356px; width: 236px; text: "Tokens today"; color: #111827; font-size: 14px; font-weight: 600; }
+                StatBarRow { x: 24px; y: 386px; width: 236px; height: 18px; label: "Input"; value: root.stats_today_input_value; bar: root.stats_today_input_bar; accent: #2a9d8f; }
+                StatBarRow { x: 24px; y: 408px; width: 236px; height: 18px; label: "Output"; value: root.stats_today_output_value; bar: root.stats_today_output_bar; accent: #4577c3; }
+                StatBarRow { x: 24px; y: 430px; width: 236px; height: 18px; label: "Cache W"; value: root.stats_today_cache_write_value; bar: root.stats_today_cache_write_bar; accent: #d88a24; }
+                StatBarRow { x: 24px; y: 452px; width: 236px; height: 18px; label: "Cache R"; value: root.stats_today_cache_read_value; bar: root.stats_today_cache_read_bar; accent: #7c5cc4; }
+
+                Rectangle { x: 300px; y: 336px; width: 284px; height: 168px; background: #ffffff; border-radius: 8px; border-width: 1px; border-color: #dae0ea; }
+                Text { x: 324px; y: 356px; width: 236px; text: "Tokens last 7 days"; color: #111827; font-size: 14px; font-weight: 600; }
+                StatBarRow { x: 324px; y: 386px; width: 236px; height: 18px; label: "Input"; value: root.stats_recent_input_value; bar: root.stats_recent_input_bar; accent: #2a9d8f; }
+                StatBarRow { x: 324px; y: 408px; width: 236px; height: 18px; label: "Output"; value: root.stats_recent_output_value; bar: root.stats_recent_output_bar; accent: #4577c3; }
+                StatBarRow { x: 324px; y: 430px; width: 236px; height: 18px; label: "Cache W"; value: root.stats_recent_cache_write_value; bar: root.stats_recent_cache_write_bar; accent: #d88a24; }
+                StatBarRow { x: 324px; y: 452px; width: 236px; height: 18px; label: "Cache R"; value: root.stats_recent_cache_read_value; bar: root.stats_recent_cache_read_bar; accent: #7c5cc4; }
+            }
+        }
+
+        Text {
+            x: 176px;
+            y: root.height - 32px;
+            width: root.width - 192px;
+            height: 20px;
+            text: root.status_message;
+            overflow: elide;
             color: #6b7280;
             font-size: 12px;
         }
