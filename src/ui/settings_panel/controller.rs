@@ -17,6 +17,9 @@ use crate::ui::slint_views::SettingsWindow;
 pub(super) struct SettingsController {
     weak: slint::Weak<SettingsWindow>,
     settings: UserSettings,
+    // Live edits of the mood GIF fields, in the fixed order used by
+    // basic.rs; the Slint model is only rebuilt on refresh/reset.
+    anim_values: Vec<String>,
     llm_db: LlmProfileDb,
     profile_index: usize,
     _timer: Timer,
@@ -35,6 +38,7 @@ impl SettingsController {
         Self {
             weak,
             settings: load_user_settings(),
+            anim_values: Vec::new(),
             llm_db,
             profile_index,
             _timer: timer,

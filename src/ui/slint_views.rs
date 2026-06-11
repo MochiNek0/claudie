@@ -1,26 +1,88 @@
 slint::slint! {
     import { LineEdit, TextEdit, ScrollView } from "std-widgets.slint";
 
+    // Shared design tokens for the Slint-rendered windows. The GDI HUD keeps
+    // its own copies in src/ui/theme.rs; keep palette changes in sync.
+    export global Theme {
+        // Accent
+        out property <color> accent: #0a84ff;
+        out property <color> accent-bright: #3094ff;
+        out property <color> accent-deep: #0060c6;
+        out property <color> accent-soft: #eef6ff;
+        out property <color> accent-softer: #dbeafe;
+        out property <color> accent-tint: #f2f7ff;
+        out property <color> accent-tint-border: #d8e7ff;
+        // Ink
+        out property <color> ink: #111827;
+        out property <color> ink-secondary: #475569;
+        out property <color> ink-muted: #64748b;
+        out property <color> ink-faint: #6b7280;
+        out property <color> ink-disabled: #9ca3af;
+        // Surfaces
+        out property <color> window-bg: #f4f7fc;
+        out property <color> surface: #ffffff;
+        out property <color> sunken: #f2f5fa;
+        out property <color> sunken-alt: #f8fafc;
+        out property <color> track: #dbe4f0;
+        // Lines
+        out property <color> border: #cfd8e6;
+        out property <color> control-border: #9aa7ba;
+        out property <color> card-border: #dae0ea;
+        out property <color> hairline: #e7edf5;
+        out property <color> outline: #e4e8f0;
+        out property <color> disabled-bg: #f3f4f6;
+        out property <color> disabled-border: #e5e7eb;
+        // Status
+        out property <color> danger: #d64545;
+        out property <color> danger-deep: #b13a3a;
+        out property <color> danger-border: #ecc4c4;
+        out property <color> danger-soft: #fdf1f1;
+        out property <color> danger-softer: #f8dddd;
+        out property <color> warning: #d97706;
+        // Charts
+        out property <color> chart-teal: #2a9d8f;
+        out property <color> chart-blue: #4577c3;
+        out property <color> chart-amber: #d88a24;
+        out property <color> chart-purple: #7c5cc4;
+        out property <color> chart-olive: #6b8f3f;
+        // Motion
+        out property <duration> fast: 120ms;
+    }
+
     component ActionButton inherits Rectangle {
         in property <string> text;
         in property <bool> enabled: true;
         // Filled accent treatment, used for the selected settings tab.
         in property <bool> active: false;
+        // "secondary" (default) | "primary" | "danger".
+        in property <string> kind: "secondary";
         callback clicked();
+
+        property <bool> filled: root.active || root.kind == "primary";
+        property <bool> danger: root.kind == "danger";
 
         border-radius: 999px;
         border-width: 1px;
-        border-color: root.active ? #0a84ff : (root.enabled ? #cfd8e6 : #e5e7eb);
-        background: root.active ? #0a84ff : (root.enabled ? #ffffff : #f3f4f6);
+        border-color: !root.enabled ? Theme.disabled-border
+            : (root.filled ? Theme.accent
+            : (root.danger ? Theme.danger-border : Theme.border));
+        background: !root.enabled ? Theme.disabled-bg
+            : (root.filled ? Theme.accent : Theme.surface);
+
+        animate background, border-color { duration: Theme.fast; easing: ease-out; }
 
         states [
-            hover when touch.has-hover && root.enabled && !root.active : {
-                background: #eef6ff;
-                border-color: #0a84ff;
-            }
             pressed when touch.pressed && root.enabled : {
-                background: #dbeafe;
-                border-color: #0060c6;
+                background: root.filled ? Theme.accent-deep
+                    : (root.danger ? Theme.danger-softer : Theme.accent-softer);
+                border-color: root.danger ? Theme.danger-deep : Theme.accent-deep;
+            }
+            hover when touch.has-hover && root.enabled && root.filled : {
+                background: Theme.accent-bright;
+            }
+            hover-outline when touch.has-hover && root.enabled && !root.filled : {
+                background: root.danger ? Theme.danger-soft : Theme.accent-soft;
+                border-color: root.danger ? Theme.danger : Theme.accent;
             }
         ]
 
@@ -44,7 +106,9 @@ slint::slint! {
             vertical-alignment: center;
             font-size: 13px;
             font-weight: 600;
-            color: root.active ? #ffffff : (root.enabled ? #111827 : #9ca3af);
+            color: !root.enabled ? Theme.ink-disabled
+                : (root.filled ? #ffffff
+                : (root.danger ? Theme.danger : Theme.ink));
         }
     }
 
@@ -54,7 +118,8 @@ slint::slint! {
         callback clicked();
 
         border-radius: 999px;
-        background: touch.pressed && root.enabled ? #dbeafe : (touch.has-hover && root.enabled ? #eef6ff : transparent);
+        background: touch.pressed && root.enabled ? Theme.accent-softer : (touch.has-hover && root.enabled ? Theme.accent-soft : transparent);
+        animate background { duration: Theme.fast; easing: ease-out; }
 
         touch := TouchArea {
             width: 100%;
@@ -76,7 +141,7 @@ slint::slint! {
             vertical-alignment: center;
             font-size: 15px;
             font-weight: 600;
-            color: root.enabled ? #475569 : #9ca3af;
+            color: root.enabled ? Theme.ink-secondary : Theme.ink-disabled;
         }
     }
 
@@ -85,7 +150,8 @@ slint::slint! {
         callback clicked();
 
         border-radius: 8px;
-        background: touch.pressed ? #dbeafe : (touch.has-hover ? #eef6ff : transparent);
+        background: touch.pressed ? Theme.accent-softer : (touch.has-hover ? Theme.accent-soft : transparent);
+        animate background { duration: Theme.fast; easing: ease-out; }
 
         touch := TouchArea {
             width: 100%;
@@ -104,7 +170,7 @@ slint::slint! {
             overflow: elide;
             vertical-alignment: center;
             font-size: 13px;
-            color: #111827;
+            color: Theme.ink;
         }
     }
 
@@ -118,14 +184,46 @@ slint::slint! {
         font-size: 12px;
     }
 
+    // Caption label stacked over a single-line input. Keeps form rows on the
+    // 52px pitch used across the settings tabs.
+    component FieldGroup inherits Rectangle {
+        in property <string> label;
+        in-out property <string> value;
+        in property <InputType> input-type: InputType.text;
+        callback edited(string);
+
+        height: 52px;
+        background: transparent;
+
+        Text {
+            x: 0px;
+            y: 0px;
+            text: root.label;
+            color: Theme.ink-faint;
+            font-size: 12px;
+        }
+        MonoLineEdit {
+            x: 0px;
+            y: 20px;
+            width: root.width;
+            height: 32px;
+            input-type: root.input-type;
+            text <=> root.value;
+            edited(text) => {
+                root.edited(text);
+            }
+        }
+    }
+
     component TogglePill inherits Rectangle {
         in-out property <bool> checked: false;
         callback toggled(bool);
 
-        border-radius: 8px;
+        border-radius: self.height / 2;
         border-width: 1px;
-        border-color: root.checked ? #0a84ff : #cfd8e6;
-        background: root.checked ? #0a84ff : #ffffff;
+        border-color: root.checked ? Theme.accent : Theme.border;
+        background: root.checked ? Theme.accent : Theme.surface;
+        animate background, border-color { duration: Theme.fast; easing: ease-out; }
 
         TouchArea {
             width: 100%;
@@ -138,12 +236,14 @@ slint::slint! {
         }
 
         Rectangle {
-            x: root.checked ? root.width - 22px : 2px;
+            x: root.checked ? root.width - self.width - 2px : 2px;
             y: 2px;
-            width: 20px;
-            height: 20px;
-            border-radius: 8px;
-            background: root.checked ? #ffffff : #cfd8e6;
+            width: root.height - 4px;
+            height: root.height - 4px;
+            border-radius: self.height / 2;
+            background: root.checked ? Theme.surface : Theme.border;
+            animate x { duration: Theme.fast; easing: ease-out; }
+            animate background { duration: Theme.fast; }
         }
     }
 
@@ -155,13 +255,14 @@ slint::slint! {
 
         border-radius: 8px;
         border-width: 1px;
-        border-color: root.active ? #0a84ff : transparent;
-        background: root.active ? #0a84ff : (touch.has-hover ? #eef6ff : transparent);
+        border-color: root.active ? Theme.accent : transparent;
+        background: root.active ? Theme.accent : (touch.has-hover ? Theme.accent-soft : transparent);
+        animate background, border-color { duration: Theme.fast; easing: ease-out; }
 
         states [
             pressed when touch.pressed : {
-                background: root.active ? #0060c6 : #dbeafe;
-                border-color: root.active ? #0060c6 : #bfdbfe;
+                background: root.active ? Theme.accent-deep : Theme.accent-softer;
+                border-color: root.active ? Theme.accent-deep : Theme.accent-softer;
             }
         ]
 
@@ -181,7 +282,7 @@ slint::slint! {
             height: 16px;
             source: root.icon_source;
             image-fit: contain;
-            colorize: root.active ? #ffffff : #64748b;
+            colorize: root.active ? #ffffff : Theme.ink-muted;
         }
 
         Text {
@@ -194,7 +295,7 @@ slint::slint! {
             vertical-alignment: center;
             font-size: 13px;
             font-weight: 600;
-            color: root.active ? #ffffff : #334155;
+            color: root.active ? #ffffff : Theme.ink-secondary;
         }
     }
 
@@ -227,7 +328,7 @@ slint::slint! {
             width: 100%;
             height: 8px;
             border-radius: 4px;
-            background: #dbe4f0;
+            background: Theme.track;
         }
 
         Rectangle {
@@ -236,7 +337,7 @@ slint::slint! {
             width: root.handle-x + root.handle-size / 2;
             height: 8px;
             border-radius: 4px;
-            background: #0a84ff;
+            background: Theme.accent;
         }
 
         Rectangle {
@@ -245,9 +346,10 @@ slint::slint! {
             width: root.handle-size;
             height: root.handle-size;
             border-radius: root.handle-size / 2;
-            background: touch.pressed ? #0060c6 : #ffffff;
+            background: touch.pressed ? Theme.accent-deep : Theme.surface;
             border-width: 2px;
-            border-color: #0a84ff;
+            border-color: Theme.accent;
+            animate background { duration: Theme.fast; }
         }
 
         touch := TouchArea {
@@ -272,8 +374,8 @@ slint::slint! {
 
         border-radius: 8px;
         border-width: 1px;
-        border-color: #cfd8e6;
-        background: #ffffff;
+        border-color: Theme.border;
+        background: Theme.surface;
 
         TouchArea {
             width: 100%;
@@ -290,7 +392,7 @@ slint::slint! {
             horizontal-alignment: center;
             vertical-alignment: center;
             font-size: 13px;
-            color: #111827;
+            color: Theme.ink;
         }
         GhostButton {
             x: 2px; y: 2px; width: 30px; height: root.height - 4px;
@@ -312,8 +414,8 @@ slint::slint! {
 
         border-radius: 8px;
         border-width: 1px;
-        border-color: #dae0ea;
-        background: #ffffff;
+        border-color: Theme.card-border;
+        background: Theme.surface;
 
         Rectangle {
             x: 0px;
@@ -329,7 +431,7 @@ slint::slint! {
             y: 16px;
             width: root.width - 32px;
             text: root.title;
-            color: #111827;
+            color: Theme.ink;
             font-size: 14px;
             font-weight: 700;
             overflow: elide;
@@ -340,7 +442,7 @@ slint::slint! {
             y: 38px;
             width: root.width - 32px;
             text: root.hint;
-            color: #64748b;
+            color: Theme.ink-muted;
             font-size: 12px;
             overflow: elide;
         }
@@ -360,7 +462,7 @@ slint::slint! {
             y: 76px;
             width: 28px;
             text: "min";
-            color: #64748b;
+            color: Theme.ink-muted;
             font-size: 12px;
             vertical-alignment: center;
         }
@@ -373,8 +475,9 @@ slint::slint! {
 
         border-radius: 8px;
         border-width: 1px;
-        border-color: touch.has-hover ? #0a84ff : #cfd8e6;
-        background: touch.pressed ? #dbeafe : (touch.has-hover ? #eef6ff : #ffffff);
+        border-color: touch.has-hover ? Theme.accent : Theme.border;
+        background: touch.pressed ? Theme.accent-softer : (touch.has-hover ? Theme.accent-soft : Theme.surface);
+        animate background, border-color { duration: Theme.fast; easing: ease-out; }
 
         property <string> current-value: root.current-index >= 0 && root.current-index < root.model.length ? root.model[root.current-index] : "";
 
@@ -396,7 +499,7 @@ slint::slint! {
             overflow: elide;
             vertical-alignment: center;
             font-size: 13px;
-            color: #111827;
+            color: Theme.ink;
         }
         Text {
             x: root.width - 30px;
@@ -406,7 +509,7 @@ slint::slint! {
             text: "⌄";
             horizontal-alignment: center;
             vertical-alignment: center;
-            color: touch.has-hover ? #0a84ff : #64748b;
+            color: touch.has-hover ? Theme.accent : Theme.ink-muted;
             font-size: 18px;
         }
 
@@ -420,10 +523,10 @@ slint::slint! {
             Rectangle {
                 width: 100%;
                 height: 100%;
-                background: #ffffff;
+                background: Theme.surface;
                 border-radius: 8px;
                 border-width: 1px;
-                border-color: #cfd8e6;
+                border-color: Theme.border;
             }
             ScrollView {
                 x: 4px;
@@ -452,7 +555,7 @@ slint::slint! {
         in property <string> label;
         in property <string> value;
         in property <float> bar: 0;
-        in property <brush> accent: #0a84ff;
+        in property <brush> accent: Theme.accent;
 
         background: transparent;
 
@@ -464,7 +567,7 @@ slint::slint! {
             text: root.label;
             overflow: elide;
             vertical-alignment: center;
-            color: #475569;
+            color: Theme.ink-secondary;
             font-size: 12px;
         }
         Rectangle {
@@ -473,7 +576,7 @@ slint::slint! {
             width: root.width - 116px;
             height: 6px;
             border-radius: 3px;
-            background: #dbe4f0;
+            background: Theme.track;
         }
         Rectangle {
             x: 70px;
@@ -491,9 +594,14 @@ slint::slint! {
             text: root.value;
             horizontal-alignment: right;
             vertical-alignment: center;
-            color: #111827;
+            color: Theme.ink;
             font-size: 12px;
         }
+    }
+
+    struct AnimField {
+        label: string,
+        value: string,
     }
 
     export component SettingsWindow inherits Window {
@@ -505,7 +613,7 @@ slint::slint! {
         max-height: 600px;
         title: "claudie Settings";
         icon: @image-url("../../assets/icon.ico");
-        background: #f4f7fc;
+        background: Theme.window-bg;
         default-font-family: "Inter, Segoe UI";
         default-font-size: 13px;
 
@@ -517,22 +625,9 @@ slint::slint! {
         in-out property <bool> show_session_switcher: true;
         in-out property <string> pet_dir;
         in-out property <string> gif_dir;
-        in-out property <string> anim_idle;
-        in-out property <string> anim_thinking;
-        in-out property <string> anim_typing;
-        in-out property <string> anim_building;
-        in-out property <string> anim_search;
-        in-out property <string> anim_happy;
-        in-out property <string> anim_error;
-        in-out property <string> anim_sleeping;
-        in-out property <string> anim_subagent;
-        in-out property <string> anim_pomodoro;
-        in-out property <string> anim_wave;
-        in-out property <string> anim_stretch;
-        in-out property <string> anim_fishing;
-        in-out property <string> anim_fishing_reel;
-        in-out property <string> anim_fishing_caught;
-        in-out property <string> anim_fishing_missed;
+        // Mood GIF filenames; order is fixed in settings_panel/controller/basic.rs.
+        in property <[AnimField]> anim_fields;
+        callback anim_field_changed(int, string);
 
         in-out property <int> focus_minutes: 25;
         in-out property <int> short_break_minutes: 5;
@@ -626,283 +721,16 @@ slint::slint! {
         callback skip_pomodoro();
         callback stop_pomodoro();
 
-        if false: Rectangle {
-        // Frosted card: 16px window margin, 8pt-grid radius.
-        Rectangle {
-            x: 16px;
-            y: 16px;
-            width: 848px;
-            height: 728px;
-            background: white;
-            border-radius: 16px;
-            border-width: 1px;
-            border-color: #e4e8f0;
-        }
-
-        // H1 (modular scale, base 13 * 1.25^3 ≈ 24).
-        Text {
-            x: 40px;
-            y: 28px;
-            text: "claudie Settings";
-            font-size: 24px;
-            font-weight: 600;
-            color: #111827;
-        }
-
-        Text {
-            x: 40px;
-            y: 64px;
-            width: 760px;
-            text: "Keep the pet light, tune the local runtime, and manage Claude Code profiles.";
-            font-size: 13px;
-            color: #6b7280;
-        }
-
-        // Tab bar: 40px (8*5) buttons, 8px gutters, active tab filled.
-        ActionButton { x: 40px; y: 104px; width: 104px; height: 40px; text: "Basic"; active: root.active_tab == 0; clicked => { root.active_tab = 0; } }
-        ActionButton { x: 152px; y: 104px; width: 120px; height: 40px; text: "Pomodoro"; active: root.active_tab == 1; clicked => { root.active_tab = 1; } }
-        ActionButton { x: 280px; y: 104px; width: 140px; height: 40px; text: "LLM Profiles"; active: root.active_tab == 2; clicked => { root.active_tab = 2; } }
-        ActionButton { x: 428px; y: 104px; width: 96px; height: 40px; text: "Stats"; active: root.active_tab == 3; clicked => { root.active_tab = 3; } }
-
-        // Content region: x 40, width 800 (8*100), 4-column field grid
-        // (col 188 + 16 gutter), row pitch 64, fields 32 high.
-        if active_tab == 0: Rectangle {
-            x: 40px;
-            y: 160px;
-            width: 800px;
-            height: 556px;
-            background: transparent;
-
-            Text { x: 0px; y: 0px; text: "Pet renderer"; font-size: 16px; font-weight: 600; color: #111827; }
-            Text { x: 0px; y: 26px; width: 760px; text: "Tune the desktop pet size and map each mood to a GIF filename."; font-size: 13px; color: #6b7280; }
-
-            Text { x: 0px; y: 64px; text: "Pet size"; color: #6b7280; font-size: 12px; }
-            PointerSlider {
-                x: 0px; y: 84px; width: 300px; height: 32px;
-                minimum: 50; maximum: 150; step: 1;
-                value <=> root.pet_scale;
-                changed(value) => { root.pet_scale_changed(value); }
-            }
-            Text { x: 312px; y: 90px; width: 80px; text: Math.round(root.pet_scale) + "%"; color: #111827; font-size: 13px; }
-            Text { x: 408px; y: 64px; text: "Sleep after"; color: #6b7280; font-size: 12px; }
-            PointerSlider {
-                x: 408px; y: 84px; width: 300px; height: 32px;
-                minimum: 15; maximum: 1800; step: 15;
-                value <=> root.sleep_after;
-                changed(value) => { root.sleep_after_changed(value); }
-            }
-            Text { x: 720px; y: 90px; width: 80px; text: Math.round(root.sleep_after) + "s"; color: #111827; font-size: 13px; }
-
-            Text { x: 0px; y: 128px; text: "Pet asset directory"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 0px; y: 148px; width: 392px; height: 32px; text <=> root.pet_dir; }
-            Text { x: 408px; y: 128px; text: "GIF directory"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 408px; y: 148px; width: 392px; height: 32px; text <=> root.gif_dir; }
-
-            Text { x: 0px; y: 192px; text: "Idle"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 0px; y: 212px; width: 188px; height: 32px; text <=> root.anim_idle; }
-            Text { x: 204px; y: 192px; text: "Thinking"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 204px; y: 212px; width: 188px; height: 32px; text <=> root.anim_thinking; }
-            Text { x: 408px; y: 192px; text: "Typing"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 408px; y: 212px; width: 188px; height: 32px; text <=> root.anim_typing; }
-            Text { x: 612px; y: 192px; text: "Building"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 612px; y: 212px; width: 188px; height: 32px; text <=> root.anim_building; }
-
-            Text { x: 0px; y: 256px; text: "Search"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 0px; y: 276px; width: 188px; height: 32px; text <=> root.anim_search; }
-            Text { x: 204px; y: 256px; text: "Happy"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 204px; y: 276px; width: 188px; height: 32px; text <=> root.anim_happy; }
-            Text { x: 408px; y: 256px; text: "Error"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 408px; y: 276px; width: 188px; height: 32px; text <=> root.anim_error; }
-            Text { x: 612px; y: 256px; text: "Sleeping"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 612px; y: 276px; width: 188px; height: 32px; text <=> root.anim_sleeping; }
-
-            Text { x: 0px; y: 320px; text: "Subagent"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 0px; y: 340px; width: 188px; height: 32px; text <=> root.anim_subagent; }
-            Text { x: 204px; y: 320px; text: "Pomodoro"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 204px; y: 340px; width: 188px; height: 32px; text <=> root.anim_pomodoro; }
-            Text { x: 408px; y: 320px; text: "Wave"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 408px; y: 340px; width: 188px; height: 32px; text <=> root.anim_wave; }
-            Text { x: 612px; y: 320px; text: "Stretch"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 612px; y: 340px; width: 188px; height: 32px; text <=> root.anim_stretch; }
-
-            Text { x: 0px; y: 384px; text: "Fishing"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 0px; y: 404px; width: 188px; height: 32px; text <=> root.anim_fishing; }
-            Text { x: 204px; y: 384px; text: "Reel"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 204px; y: 404px; width: 188px; height: 32px; text <=> root.anim_fishing_reel; }
-            Text { x: 408px; y: 384px; text: "Caught"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 408px; y: 404px; width: 188px; height: 32px; text <=> root.anim_fishing_caught; }
-            Text { x: 612px; y: 384px; text: "Missed"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 612px; y: 404px; width: 188px; height: 32px; text <=> root.anim_fishing_missed; }
-
-            Text { x: 0px; y: 456px; text: "Session switcher"; color: #6b7280; font-size: 12px; }
-            Text { x: 0px; y: 478px; width: 420px; text: "Show the compact focus panel when more than one Claude Code session is active."; color: #111827; font-size: 13px; }
-            TogglePill { x: 440px; y: 464px; width: 46px; height: 24px; checked <=> root.show_session_switcher; }
-
-            ActionButton { x: 592px; y: 504px; width: 96px; height: 40px; text: "Save"; clicked => { root.save_basic(); } }
-            ActionButton { x: 704px; y: 504px; width: 96px; height: 40px; text: "Reset"; clicked => { root.reset_basic(); } }
-        }
-
-        if active_tab == 1: Rectangle {
-            x: 40px;
-            y: 160px;
-            width: 800px;
-            height: 556px;
-            background: transparent;
-
-            Text { x: 0px; y: 0px; text: "Pomodoro"; font-size: 16px; font-weight: 600; color: #111827; }
-            Text { x: 0px; y: 26px; width: 760px; text: "Set focus and break lengths, then control the active timer."; font-size: 13px; color: #6b7280; }
-
-            Text { x: 0px; y: 72px; text: "Focus min"; color: #6b7280; font-size: 12px; }
-            PointerSpinBox {
-                x: 0px; y: 92px; width: 120px; height: 32px;
-                minimum: 1; maximum: 240; value <=> root.focus_minutes;
-            }
-            Text { x: 136px; y: 72px; text: "Short break"; color: #6b7280; font-size: 12px; }
-            PointerSpinBox {
-                x: 136px; y: 92px; width: 120px; height: 32px;
-                minimum: 1; maximum: 240; value <=> root.short_break_minutes;
-            }
-            Text { x: 272px; y: 72px; text: "Long break"; color: #6b7280; font-size: 12px; }
-            PointerSpinBox {
-                x: 272px; y: 92px; width: 120px; height: 32px;
-                minimum: 1; maximum: 240; value <=> root.long_break_minutes;
-            }
-            ActionButton { x: 408px; y: 92px; width: 112px; height: 32px; text: "Save"; clicked => { root.save_pomodoro(); } }
-
-            Rectangle { x: 0px; y: 176px; width: 520px; height: 96px; background: #f2f5fa; border-radius: 12px; border-width: 1px; border-color: #dae0ea; }
-            Text { x: 24px; y: 200px; width: 472px; text: root.pomodoro_status; color: #111827; font-size: 14px; }
-
-            ActionButton { x: 0px; y: 312px; width: 112px; height: 40px; text: "Start"; clicked => { root.start_pomodoro(); } }
-            ActionButton { x: 128px; y: 312px; width: 112px; height: 40px; text: root.pause_resume_label; clicked => { root.pause_resume_pomodoro(); } }
-            ActionButton { x: 256px; y: 312px; width: 112px; height: 40px; text: "Skip"; clicked => { root.skip_pomodoro(); } }
-            ActionButton { x: 384px; y: 312px; width: 112px; height: 40px; text: "Stop"; clicked => { root.stop_pomodoro(); } }
-        }
-
-        if active_tab == 2: Rectangle {
-            x: 40px;
-            y: 160px;
-            width: 800px;
-            height: 556px;
-            background: transparent;
-
-            Text { x: 0px; y: 0px; text: "Provider profiles"; font-size: 16px; font-weight: 600; color: #111827; }
-            Text { x: 0px; y: 26px; width: 760px; text: "Keep Claude Code provider settings tidy without leaving the pet."; font-size: 13px; color: #6b7280; }
-
-            Text { x: 0px; y: 72px; text: "Profile"; color: #6b7280; font-size: 12px; }
-            PointerComboBox {
-                x: 0px; y: 92px; width: 340px; height: 32px;
-                model: root.profile_model;
-                current-index <=> root.selected_profile_index;
-                selected(index) => { root.select_profile(index); }
-            }
-            Text { x: 352px; y: 98px; width: 110px; text: root.profile_position; color: #6b7280; font-size: 12px; }
-            ActionButton { x: 472px; y: 92px; width: 72px; height: 32px; text: "New"; clicked => { root.new_profile(); } }
-            ActionButton { x: 552px; y: 92px; width: 130px; height: 32px; text: "Import Current"; clicked => { root.import_profile(); } }
-            ActionButton { x: 690px; y: 92px; width: 110px; height: 32px; text: "Delete"; clicked => { root.delete_profile(); } }
-
-            Text { x: 0px; y: 136px; text: "Profile ID"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 0px; y: 156px; width: 392px; height: 32px; text <=> root.profile_id; }
-            Text { x: 408px; y: 136px; text: "Name"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 408px; y: 156px; width: 392px; height: 32px; text <=> root.profile_name; }
-
-            Text { x: 0px; y: 200px; text: "Model"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 0px; y: 220px; width: 392px; height: 32px; text <=> root.model; }
-            Text { x: 408px; y: 200px; text: "Base URL"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 408px; y: 220px; width: 392px; height: 32px; text <=> root.base_url; }
-
-            Text { x: 0px; y: 264px; text: "API key"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 0px; y: 284px; width: 392px; height: 32px; input-type: InputType.password; text <=> root.api_key; }
-            Text { x: 408px; y: 264px; text: "Auth token (proxy)"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 408px; y: 284px; width: 392px; height: 32px; input-type: InputType.password; text <=> root.auth_token; }
-
-            Text { x: 0px; y: 328px; text: "Opus"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 0px; y: 348px; width: 256px; height: 32px; text <=> root.opus_model; }
-            Text { x: 272px; y: 328px; text: "Sonnet"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 272px; y: 348px; width: 256px; height: 32px; text <=> root.sonnet_model; }
-            Text { x: 544px; y: 328px; text: "Haiku"; color: #6b7280; font-size: 12px; }
-            MonoLineEdit { x: 544px; y: 348px; width: 256px; height: 32px; text <=> root.haiku_model; }
-
-            Text { x: 0px; y: 392px; text: "Extra env"; color: #6b7280; font-size: 12px; }
-            MonoTextEdit { x: 0px; y: 412px; width: 392px; height: 72px; text <=> root.extra_env; }
-            Text { x: 408px; y: 392px; text: "OpenAI body"; color: #6b7280; font-size: 12px; }
-            MonoTextEdit { x: 408px; y: 412px; width: 392px; height: 72px; text <=> root.openai_extra_body; }
-
-            Rectangle { x: 0px; y: 496px; width: 560px; height: 48px; background: #f2f5fa; border-radius: 10px; border-width: 1px; border-color: #dae0ea; }
-            Text { x: 14px; y: 506px; width: 340px; text: root.profile_usage_title; overflow: elide; color: #111827; font-size: 13px; font-weight: 600; }
-            Text { x: 14px; y: 526px; width: 340px; text: root.profile_usage_summary; overflow: elide; color: #475569; font-size: 11px; }
-            StatBarRow { x: 368px; y: 500px; width: 174px; height: 18px; label: "5h"; value: root.profile_usage_five_hour_value; bar: root.profile_usage_five_hour_bar; accent: root.profile_usage_five_hour_bar >= 90 ? #d64545 : (root.profile_usage_five_hour_bar >= 70 ? #d88a24 : #0a84ff); }
-            StatBarRow { x: 368px; y: 522px; width: 174px; height: 18px; label: "7d"; value: root.profile_usage_seven_day_value; bar: root.profile_usage_seven_day_bar; accent: root.profile_usage_seven_day_bar >= 90 ? #d64545 : (root.profile_usage_seven_day_bar >= 70 ? #d88a24 : #7c5cc4); }
-
-            ActionButton { x: 592px; y: 504px; width: 96px; height: 40px; text: "Save"; clicked => { root.save_profile(); } }
-            ActionButton { x: 704px; y: 504px; width: 96px; height: 40px; text: "Use"; clicked => { root.use_profile(); } }
-        }
-
-        if active_tab == 3: Rectangle {
-            x: 40px;
-            y: 160px;
-            width: 800px;
-            height: 556px;
-            background: transparent;
-
-            Text { x: 0px; y: 0px; text: "Session ledger"; font-size: 16px; font-weight: 600; color: #111827; }
-            Text { x: 0px; y: 26px; width: 760px; text: "A quiet local record of Claude Code activity observed by claudie."; font-size: 13px; color: #6b7280; }
-
-            Rectangle { x: 0px; y: 72px; width: 392px; height: 240px; background: #f2f5fa; border-radius: 12px; border-width: 1px; border-color: #dae0ea; }
-            Text { x: 24px; y: 92px; width: 344px; text: root.stats_today_title; color: #111827; font-size: 14px; font-weight: 600; }
-            Text { x: 24px; y: 116px; width: 344px; height: 28px; text: root.stats_today_summary; overflow: elide; color: #111827; font-size: 12px; }
-            StatBarRow { x: 24px; y: 152px; width: 344px; height: 20px; label: "Write"; value: root.stats_today_write_value; bar: root.stats_today_write_bar; accent: #2a9d8f; }
-            StatBarRow { x: 24px; y: 176px; width: 344px; height: 20px; label: "Bash"; value: root.stats_today_bash_value; bar: root.stats_today_bash_bar; accent: #4577c3; }
-            StatBarRow { x: 24px; y: 200px; width: 344px; height: 20px; label: "Search"; value: root.stats_today_search_value; bar: root.stats_today_search_bar; accent: #d88a24; }
-            StatBarRow { x: 24px; y: 224px; width: 344px; height: 20px; label: "Agent"; value: root.stats_today_subagent_value; bar: root.stats_today_subagent_bar; accent: #7c5cc4; }
-            StatBarRow { x: 24px; y: 248px; width: 344px; height: 20px; label: "Perm"; value: root.stats_today_permission_value; bar: root.stats_today_permission_bar; accent: #0a84ff; }
-            StatBarRow { x: 24px; y: 272px; width: 344px; height: 20px; label: "Choice"; value: root.stats_today_choice_value; bar: root.stats_today_choice_bar; accent: #6b8f3f; }
-
-            Rectangle { x: 408px; y: 72px; width: 392px; height: 240px; background: #f2f5fa; border-radius: 12px; border-width: 1px; border-color: #dae0ea; }
-            Text { x: 432px; y: 92px; width: 344px; text: root.stats_recent_title; color: #111827; font-size: 14px; font-weight: 600; }
-            Text { x: 432px; y: 116px; width: 344px; height: 28px; text: root.stats_recent_summary; overflow: elide; color: #111827; font-size: 12px; }
-            StatBarRow { x: 432px; y: 152px; width: 344px; height: 20px; label: "Write"; value: root.stats_recent_write_value; bar: root.stats_recent_write_bar; accent: #2a9d8f; }
-            StatBarRow { x: 432px; y: 176px; width: 344px; height: 20px; label: "Bash"; value: root.stats_recent_bash_value; bar: root.stats_recent_bash_bar; accent: #4577c3; }
-            StatBarRow { x: 432px; y: 200px; width: 344px; height: 20px; label: "Search"; value: root.stats_recent_search_value; bar: root.stats_recent_search_bar; accent: #d88a24; }
-            StatBarRow { x: 432px; y: 224px; width: 344px; height: 20px; label: "Agent"; value: root.stats_recent_subagent_value; bar: root.stats_recent_subagent_bar; accent: #7c5cc4; }
-            StatBarRow { x: 432px; y: 248px; width: 344px; height: 20px; label: "Perm"; value: root.stats_recent_permission_value; bar: root.stats_recent_permission_bar; accent: #0a84ff; }
-            StatBarRow { x: 432px; y: 272px; width: 344px; height: 20px; label: "Choice"; value: root.stats_recent_choice_value; bar: root.stats_recent_choice_bar; accent: #6b8f3f; }
-
-            Rectangle { x: 0px; y: 328px; width: 392px; height: 160px; background: #ffffff; border-radius: 12px; border-width: 1px; border-color: #dae0ea; }
-            Text { x: 24px; y: 348px; width: 344px; text: "Tokens today"; color: #111827; font-size: 14px; font-weight: 600; }
-            StatBarRow { x: 24px; y: 378px; width: 344px; height: 18px; label: "Input"; value: root.stats_today_input_value; bar: root.stats_today_input_bar; accent: #2a9d8f; }
-            StatBarRow { x: 24px; y: 400px; width: 344px; height: 18px; label: "Output"; value: root.stats_today_output_value; bar: root.stats_today_output_bar; accent: #4577c3; }
-            StatBarRow { x: 24px; y: 422px; width: 344px; height: 18px; label: "Cache W"; value: root.stats_today_cache_write_value; bar: root.stats_today_cache_write_bar; accent: #d88a24; }
-            StatBarRow { x: 24px; y: 444px; width: 344px; height: 18px; label: "Cache R"; value: root.stats_today_cache_read_value; bar: root.stats_today_cache_read_bar; accent: #7c5cc4; }
-
-            Rectangle { x: 408px; y: 328px; width: 392px; height: 160px; background: #ffffff; border-radius: 12px; border-width: 1px; border-color: #dae0ea; }
-            Text { x: 432px; y: 348px; width: 344px; text: "Tokens last 7 days"; color: #111827; font-size: 14px; font-weight: 600; }
-            StatBarRow { x: 432px; y: 378px; width: 344px; height: 18px; label: "Input"; value: root.stats_recent_input_value; bar: root.stats_recent_input_bar; accent: #2a9d8f; }
-            StatBarRow { x: 432px; y: 400px; width: 344px; height: 18px; label: "Output"; value: root.stats_recent_output_value; bar: root.stats_recent_output_bar; accent: #4577c3; }
-            StatBarRow { x: 432px; y: 422px; width: 344px; height: 18px; label: "Cache W"; value: root.stats_recent_cache_write_value; bar: root.stats_recent_cache_write_bar; accent: #d88a24; }
-            StatBarRow { x: 432px; y: 444px; width: 344px; height: 18px; label: "Cache R"; value: root.stats_recent_cache_read_value; bar: root.stats_recent_cache_read_bar; accent: #7c5cc4; }
-        }
-
-        Text {
-            x: 40px;
-            y: 724px;
-            width: 800px;
-            height: 20px;
-            text: root.status_message;
-            color: #6b7280;
-            font-size: 12px;
-        }
-        }
-
-        Rectangle { x: 0px; y: 0px; width: root.width; height: root.height; background: #f4f7fc; }
+        Rectangle { x: 0px; y: 0px; width: root.width; height: root.height; background: Theme.window-bg; }
         Rectangle {
             x: 8px;
             y: 8px;
             width: root.width - 16px;
             height: root.height - 16px;
-            background: #ffffff;
+            background: Theme.surface;
             border-radius: 8px;
             border-width: 1px;
-            border-color: #e4e8f0;
+            border-color: Theme.outline;
         }
         TouchArea { x: 0px; y: 0px; width: root.width; height: root.height; }
 
@@ -911,10 +739,10 @@ slint::slint! {
             y: 16px;
             width: 144px;
             height: root.height - 32px;
-            background: #f8fafc;
+            background: Theme.sunken-alt;
             border-radius: 8px;
             border-width: 1px;
-            border-color: #e7edf5;
+            border-color: Theme.hairline;
         }
 
         Text {
@@ -924,7 +752,7 @@ slint::slint! {
             text: "claudie";
             font-size: 20px;
             font-weight: 700;
-            color: #111827;
+            color: Theme.ink;
         }
         Text {
             x: 28px;
@@ -933,7 +761,7 @@ slint::slint! {
             text: "Settings";
             font-size: 12px;
             font-weight: 600;
-            color: #64748b;
+            color: Theme.ink-muted;
         }
 
         SettingsTabButton { x: 24px; y: 84px; width: 128px; height: 36px; text: "Basic"; icon_source: @image-url("../../assets/lucide/sliders-horizontal.svg"); active: root.active_tab == 0; clicked => { root.active_tab = 0; } }
@@ -941,7 +769,7 @@ slint::slint! {
         SettingsTabButton { x: 24px; y: 172px; width: 128px; height: 36px; text: "LLM Profiles"; icon_source: @image-url("../../assets/lucide/bot.svg"); active: root.active_tab == 2; clicked => { root.active_tab = 2; } }
         SettingsTabButton { x: 24px; y: 216px; width: 128px; height: 36px; text: "Stats"; icon_source: @image-url("../../assets/lucide/chart-no-axes-column.svg"); active: root.active_tab == 3; clicked => { root.active_tab = 3; } }
 
-        Rectangle { x: 168px; y: 16px; width: 1px; height: root.height - 32px; background: #e7edf5; }
+        Rectangle { x: 168px; y: 16px; width: 1px; height: root.height - 32px; background: Theme.hairline; }
 
         ScrollView {
             x: 176px;
@@ -956,72 +784,43 @@ slint::slint! {
                 height: 608px;
                 background: transparent;
 
-                Text { x: 0px; y: 0px; text: "Pet renderer"; font-size: 17px; font-weight: 700; color: #111827; }
-                Text { x: 0px; y: 28px; width: 576px; text: "Tune the desktop pet size and map each mood to a GIF filename."; font-size: 13px; color: #6b7280; }
+                Text { x: 0px; y: 0px; text: "Pet renderer"; font-size: 17px; font-weight: 700; color: Theme.ink; }
+                Text { x: 0px; y: 28px; width: 576px; text: "Tune the desktop pet size and map each mood to a GIF filename."; font-size: 13px; color: Theme.ink-faint; }
 
-                Text { x: 0px; y: 64px; text: "Pet size"; color: #6b7280; font-size: 12px; }
+                Text { x: 0px; y: 64px; text: "Pet size"; color: Theme.ink-faint; font-size: 12px; }
                 PointerSlider {
                     x: 0px; y: 84px; width: 220px; height: 32px;
                     minimum: 50; maximum: 150; step: 1;
                     value <=> root.pet_scale;
                     changed(value) => { root.pet_scale_changed(value); }
                 }
-                Text { x: 232px; y: 90px; width: 52px; text: Math.round(root.pet_scale) + "%"; color: #111827; font-size: 13px; }
-                Text { x: 300px; y: 64px; text: "Sleep after"; color: #6b7280; font-size: 12px; }
+                Text { x: 232px; y: 90px; width: 52px; text: Math.round(root.pet_scale) + "%"; color: Theme.ink; font-size: 13px; }
+                Text { x: 300px; y: 64px; text: "Sleep after"; color: Theme.ink-faint; font-size: 12px; }
                 PointerSlider {
                     x: 300px; y: 84px; width: 220px; height: 32px;
                     minimum: 15; maximum: 1800; step: 15;
                     value <=> root.sleep_after;
                     changed(value) => { root.sleep_after_changed(value); }
                 }
-                Text { x: 532px; y: 90px; width: 52px; text: Math.round(root.sleep_after) + "s"; color: #111827; font-size: 13px; }
+                Text { x: 532px; y: 90px; width: 52px; text: Math.round(root.sleep_after) + "s"; color: Theme.ink; font-size: 13px; }
 
-                Text { x: 0px; y: 128px; text: "Pet asset directory"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 0px; y: 148px; width: 284px; height: 32px; text <=> root.pet_dir; }
-                Text { x: 300px; y: 128px; text: "GIF directory"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 300px; y: 148px; width: 284px; height: 32px; text <=> root.gif_dir; }
+                FieldGroup { x: 0px; y: 128px; width: 284px; label: "Pet asset directory"; value <=> root.pet_dir; }
+                FieldGroup { x: 300px; y: 128px; width: 284px; label: "GIF directory"; value <=> root.gif_dir; }
 
-                Text { x: 0px; y: 204px; text: "Idle"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 0px; y: 224px; width: 134px; height: 32px; text <=> root.anim_idle; }
-                Text { x: 150px; y: 204px; text: "Thinking"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 150px; y: 224px; width: 134px; height: 32px; text <=> root.anim_thinking; }
-                Text { x: 300px; y: 204px; text: "Typing"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 300px; y: 224px; width: 134px; height: 32px; text <=> root.anim_typing; }
-                Text { x: 450px; y: 204px; text: "Building"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 450px; y: 224px; width: 134px; height: 32px; text <=> root.anim_building; }
+                for field[i] in root.anim_fields: FieldGroup {
+                    x: Math.mod(i, 4) * 150px;
+                    y: 204px + Math.floor(i / 4) * 64px;
+                    width: 134px;
+                    label: field.label;
+                    value: field.value;
+                    edited(text) => { root.anim_field_changed(i, text); }
+                }
 
-                Text { x: 0px; y: 268px; text: "Search"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 0px; y: 288px; width: 134px; height: 32px; text <=> root.anim_search; }
-                Text { x: 150px; y: 268px; text: "Happy"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 150px; y: 288px; width: 134px; height: 32px; text <=> root.anim_happy; }
-                Text { x: 300px; y: 268px; text: "Error"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 300px; y: 288px; width: 134px; height: 32px; text <=> root.anim_error; }
-                Text { x: 450px; y: 268px; text: "Sleeping"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 450px; y: 288px; width: 134px; height: 32px; text <=> root.anim_sleeping; }
-
-                Text { x: 0px; y: 332px; text: "Subagent"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 0px; y: 352px; width: 134px; height: 32px; text <=> root.anim_subagent; }
-                Text { x: 150px; y: 332px; text: "Pomodoro"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 150px; y: 352px; width: 134px; height: 32px; text <=> root.anim_pomodoro; }
-                Text { x: 300px; y: 332px; text: "Wave"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 300px; y: 352px; width: 134px; height: 32px; text <=> root.anim_wave; }
-                Text { x: 450px; y: 332px; text: "Stretch"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 450px; y: 352px; width: 134px; height: 32px; text <=> root.anim_stretch; }
-
-                Text { x: 0px; y: 396px; text: "Fishing"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 0px; y: 416px; width: 134px; height: 32px; text <=> root.anim_fishing; }
-                Text { x: 150px; y: 396px; text: "Reel"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 150px; y: 416px; width: 134px; height: 32px; text <=> root.anim_fishing_reel; }
-                Text { x: 300px; y: 396px; text: "Caught"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 300px; y: 416px; width: 134px; height: 32px; text <=> root.anim_fishing_caught; }
-                Text { x: 450px; y: 396px; text: "Missed"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 450px; y: 416px; width: 134px; height: 32px; text <=> root.anim_fishing_missed; }
-
-                Text { x: 0px; y: 472px; text: "Session switcher"; color: #6b7280; font-size: 12px; }
-                Text { x: 0px; y: 494px; width: 480px; text: "Show the compact focus panel when more than one Claude Code session is active."; color: #111827; font-size: 13px; }
+                Text { x: 0px; y: 472px; text: "Session switcher"; color: Theme.ink-faint; font-size: 12px; }
+                Text { x: 0px; y: 494px; width: 480px; text: "Show the compact focus panel when more than one Claude Code session is active."; color: Theme.ink; font-size: 13px; }
                 TogglePill { x: 538px; y: 482px; width: 46px; height: 24px; checked <=> root.show_session_switcher; }
 
-                ActionButton { x: 408px; y: 556px; width: 80px; height: 32px; text: "Save"; clicked => { root.save_basic(); } }
+                ActionButton { x: 408px; y: 556px; width: 80px; height: 32px; text: "Save"; kind: "primary"; clicked => { root.save_basic(); } }
                 ActionButton { x: 504px; y: 556px; width: 80px; height: 32px; text: "Reset"; clicked => { root.reset_basic(); } }
             }
 
@@ -1030,56 +829,56 @@ slint::slint! {
                 height: 456px;
                 background: transparent;
 
-                Text { x: 0px; y: 0px; text: "Pomodoro"; font-size: 17px; font-weight: 700; color: #111827; }
-                Text { x: 0px; y: 28px; width: 576px; text: "Set focus and break lengths, then control the active timer."; font-size: 13px; color: #6b7280; }
+                Text { x: 0px; y: 0px; text: "Pomodoro"; font-size: 17px; font-weight: 700; color: Theme.ink; }
+                Text { x: 0px; y: 28px; width: 576px; text: "Set focus and break lengths, then control the active timer."; font-size: 13px; color: Theme.ink-faint; }
 
                 Rectangle {
                     x: 0px;
                     y: 64px;
                     width: 584px;
                     height: 128px;
-                    background: #f2f7ff;
+                    background: Theme.accent-tint;
                     border-radius: 8px;
                     border-width: 1px;
-                    border-color: #d8e7ff;
+                    border-color: Theme.accent-tint-border;
                 }
-                Rectangle { x: 0px; y: 64px; width: 5px; height: 128px; background: #0a84ff; border-radius: 8px; }
-                Rectangle { x: 24px; y: 88px; width: 52px; height: 52px; background: #ffffff; border-radius: 8px; border-width: 1px; border-color: #d8e7ff; }
-                Image { x: 38px; y: 102px; width: 24px; height: 24px; source: @image-url("../../assets/lucide/timer.svg"); image-fit: contain; colorize: #0a84ff; }
-                Text { x: 96px; y: 86px; width: 160px; text: "Current cycle"; color: #64748b; font-size: 12px; font-weight: 700; }
-                Text { x: 96px; y: 108px; width: 456px; height: 48px; text: root.pomodoro_status; wrap: word-wrap; color: #111827; font-size: 15px; font-weight: 700; }
-                Text { x: 96px; y: 162px; width: 456px; text: "Tune the rhythm below, then use the controls without leaving this panel."; color: #64748b; font-size: 12px; overflow: elide; }
+                Rectangle { x: 0px; y: 64px; width: 5px; height: 128px; background: Theme.accent; border-radius: 8px; }
+                Rectangle { x: 24px; y: 88px; width: 52px; height: 52px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.accent-tint-border; }
+                Image { x: 38px; y: 102px; width: 24px; height: 24px; source: @image-url("../../assets/lucide/timer.svg"); image-fit: contain; colorize: Theme.accent; }
+                Text { x: 96px; y: 86px; width: 160px; text: "Current cycle"; color: Theme.ink-muted; font-size: 12px; font-weight: 700; }
+                Text { x: 96px; y: 108px; width: 456px; height: 48px; text: root.pomodoro_status; wrap: word-wrap; color: Theme.ink; font-size: 15px; font-weight: 700; }
+                Text { x: 96px; y: 162px; width: 456px; text: "Tune the rhythm below, then use the controls without leaving this panel."; color: Theme.ink-muted; font-size: 12px; overflow: elide; }
 
-                Text { x: 0px; y: 216px; text: "Durations"; color: #111827; font-size: 14px; font-weight: 700; }
+                Text { x: 0px; y: 216px; text: "Durations"; color: Theme.ink; font-size: 14px; font-weight: 700; }
                 ActionButton { x: 504px; y: 206px; width: 80px; height: 32px; text: "Save"; clicked => { root.save_pomodoro(); } }
 
                 PomodoroDurationTile {
                     x: 0px; y: 248px; width: 184px; height: 116px;
                     title: "Focus";
                     hint: "Deep work";
-                    accent: #0a84ff;
+                    accent: Theme.accent;
                     value <=> root.focus_minutes;
                 }
                 PomodoroDurationTile {
                     x: 200px; y: 248px; width: 184px; height: 116px;
                     title: "Short break";
                     hint: "Quick reset";
-                    accent: #2a9d8f;
+                    accent: Theme.chart-teal;
                     value <=> root.short_break_minutes;
                 }
                 PomodoroDurationTile {
                     x: 400px; y: 248px; width: 184px; height: 116px;
                     title: "Long break";
                     hint: "Full recharge";
-                    accent: #7c5cc4;
+                    accent: Theme.chart-purple;
                     value <=> root.long_break_minutes;
                 }
 
-                Rectangle { x: 0px; y: 392px; width: 584px; height: 48px; background: #f8fafc; border-radius: 8px; border-width: 1px; border-color: #e7edf5; }
-                ActionButton { x: 16px; y: 400px; width: 112px; height: 32px; text: "Start"; active: true; clicked => { root.start_pomodoro(); } }
+                Rectangle { x: 0px; y: 392px; width: 584px; height: 48px; background: Theme.sunken-alt; border-radius: 8px; border-width: 1px; border-color: Theme.hairline; }
+                ActionButton { x: 16px; y: 400px; width: 112px; height: 32px; text: "Start"; kind: "primary"; clicked => { root.start_pomodoro(); } }
                 ActionButton { x: 144px; y: 400px; width: 112px; height: 32px; text: root.pause_resume_label; clicked => { root.pause_resume_pomodoro(); } }
                 ActionButton { x: 272px; y: 400px; width: 112px; height: 32px; text: "Skip"; clicked => { root.skip_pomodoro(); } }
-                ActionButton { x: 456px; y: 400px; width: 112px; height: 32px; text: "Stop"; clicked => { root.stop_pomodoro(); } }
+                ActionButton { x: 456px; y: 400px; width: 112px; height: 32px; text: "Stop"; kind: "danger"; clicked => { root.stop_pomodoro(); } }
             }
 
             if active_tab == 2: Rectangle {
@@ -1087,56 +886,47 @@ slint::slint! {
                 height: 568px;
                 background: transparent;
 
-                Text { x: 0px; y: 0px; text: "Provider profiles"; font-size: 17px; font-weight: 700; color: #111827; }
-                Text { x: 0px; y: 28px; width: 576px; text: "Keep Claude Code provider settings tidy without leaving the pet."; font-size: 13px; color: #6b7280; }
+                Text { x: 0px; y: 0px; text: "Provider profiles"; font-size: 17px; font-weight: 700; color: Theme.ink; }
+                Text { x: 0px; y: 28px; width: 576px; text: "Keep Claude Code provider settings tidy without leaving the pet."; font-size: 13px; color: Theme.ink-faint; }
 
-                Text { x: 0px; y: 72px; text: "Profile"; color: #6b7280; font-size: 12px; }
+                Text { x: 0px; y: 72px; text: "Profile"; color: Theme.ink-faint; font-size: 12px; }
                 PointerComboBox {
                     x: 0px; y: 92px; width: 244px; height: 32px;
                     model: root.profile_model;
                     current-index <=> root.selected_profile_index;
                     selected(index) => { root.select_profile(index); }
                 }
-                Text { x: 256px; y: 98px; width: 40px; text: root.profile_position; color: #6b7280; font-size: 12px; }
+                Text { x: 256px; y: 98px; width: 40px; text: root.profile_position; color: Theme.ink-faint; font-size: 12px; }
                 ActionButton { x: 304px; y: 92px; width: 60px; height: 32px; text: "New"; clicked => { root.new_profile(); } }
                 ActionButton { x: 372px; y: 92px; width: 124px; height: 32px; text: "Import Current"; clicked => { root.import_profile(); } }
-                ActionButton { x: 504px; y: 92px; width: 80px; height: 32px; text: "Delete"; clicked => { root.delete_profile(); } }
+                ActionButton { x: 504px; y: 92px; width: 80px; height: 32px; text: "Delete"; kind: "danger"; clicked => { root.delete_profile(); } }
 
-                Text { x: 0px; y: 136px; text: "Profile ID"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 0px; y: 156px; width: 284px; height: 32px; text <=> root.profile_id; }
-                Text { x: 300px; y: 136px; text: "Name"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 300px; y: 156px; width: 284px; height: 32px; text <=> root.profile_name; }
+                FieldGroup { x: 0px; y: 136px; width: 284px; label: "Profile ID"; value <=> root.profile_id; }
+                FieldGroup { x: 300px; y: 136px; width: 284px; label: "Name"; value <=> root.profile_name; }
 
-                Text { x: 0px; y: 200px; text: "Model"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 0px; y: 220px; width: 284px; height: 32px; text <=> root.model; }
-                Text { x: 300px; y: 200px; text: "Base URL"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 300px; y: 220px; width: 284px; height: 32px; text <=> root.base_url; }
+                FieldGroup { x: 0px; y: 200px; width: 284px; label: "Model"; value <=> root.model; }
+                FieldGroup { x: 300px; y: 200px; width: 284px; label: "Base URL"; value <=> root.base_url; }
 
-                Text { x: 0px; y: 264px; text: "API key"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 0px; y: 284px; width: 284px; height: 32px; input-type: InputType.password; text <=> root.api_key; }
-                Text { x: 300px; y: 264px; text: "Auth token (proxy)"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 300px; y: 284px; width: 284px; height: 32px; input-type: InputType.password; text <=> root.auth_token; }
+                FieldGroup { x: 0px; y: 264px; width: 284px; label: "API key"; input-type: InputType.password; value <=> root.api_key; }
+                FieldGroup { x: 300px; y: 264px; width: 284px; label: "Auth token (proxy)"; input-type: InputType.password; value <=> root.auth_token; }
 
-                Text { x: 0px; y: 328px; text: "Opus"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 0px; y: 348px; width: 184px; height: 32px; text <=> root.opus_model; }
-                Text { x: 200px; y: 328px; text: "Sonnet"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 200px; y: 348px; width: 184px; height: 32px; text <=> root.sonnet_model; }
-                Text { x: 400px; y: 328px; text: "Haiku"; color: #6b7280; font-size: 12px; }
-                MonoLineEdit { x: 400px; y: 348px; width: 184px; height: 32px; text <=> root.haiku_model; }
+                FieldGroup { x: 0px; y: 328px; width: 184px; label: "Opus"; value <=> root.opus_model; }
+                FieldGroup { x: 200px; y: 328px; width: 184px; label: "Sonnet"; value <=> root.sonnet_model; }
+                FieldGroup { x: 400px; y: 328px; width: 184px; label: "Haiku"; value <=> root.haiku_model; }
 
-                Text { x: 0px; y: 392px; text: "Extra env"; color: #6b7280; font-size: 12px; }
+                Text { x: 0px; y: 392px; text: "Extra env"; color: Theme.ink-faint; font-size: 12px; }
                 MonoTextEdit { x: 0px; y: 412px; width: 284px; height: 72px; text <=> root.extra_env; }
-                Text { x: 300px; y: 392px; text: "OpenAI body"; color: #6b7280; font-size: 12px; }
+                Text { x: 300px; y: 392px; text: "OpenAI body"; color: Theme.ink-faint; font-size: 12px; }
                 MonoTextEdit { x: 300px; y: 412px; width: 284px; height: 72px; text <=> root.openai_extra_body; }
 
-                Rectangle { x: 0px; y: 504px; width: 432px; height: 52px; background: #f2f5fa; border-radius: 8px; border-width: 1px; border-color: #dae0ea; }
-                Text { x: 14px; y: 514px; width: 216px; text: root.profile_usage_title; overflow: elide; color: #111827; font-size: 13px; font-weight: 600; }
-                Text { x: 14px; y: 534px; width: 216px; text: root.profile_usage_summary; overflow: elide; color: #475569; font-size: 11px; }
-                StatBarRow { x: 232px; y: 508px; width: 184px; height: 18px; label: "5h"; value: root.profile_usage_five_hour_value; bar: root.profile_usage_five_hour_bar; accent: root.profile_usage_five_hour_bar >= 90 ? #d64545 : (root.profile_usage_five_hour_bar >= 70 ? #d88a24 : #0a84ff); }
-                StatBarRow { x: 232px; y: 530px; width: 184px; height: 18px; label: "7d"; value: root.profile_usage_seven_day_value; bar: root.profile_usage_seven_day_bar; accent: root.profile_usage_seven_day_bar >= 90 ? #d64545 : (root.profile_usage_seven_day_bar >= 70 ? #d88a24 : #7c5cc4); }
+                Rectangle { x: 0px; y: 504px; width: 432px; height: 52px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
+                Text { x: 14px; y: 514px; width: 216px; text: root.profile_usage_title; overflow: elide; color: Theme.ink; font-size: 13px; font-weight: 600; }
+                Text { x: 14px; y: 534px; width: 216px; text: root.profile_usage_summary; overflow: elide; color: Theme.ink-secondary; font-size: 11px; }
+                StatBarRow { x: 232px; y: 508px; width: 184px; height: 18px; label: "5h"; value: root.profile_usage_five_hour_value; bar: root.profile_usage_five_hour_bar; accent: root.profile_usage_five_hour_bar >= 90 ? Theme.danger : (root.profile_usage_five_hour_bar >= 70 ? Theme.chart-amber : Theme.accent); }
+                StatBarRow { x: 232px; y: 530px; width: 184px; height: 18px; label: "7d"; value: root.profile_usage_seven_day_value; bar: root.profile_usage_seven_day_bar; accent: root.profile_usage_seven_day_bar >= 90 ? Theme.danger : (root.profile_usage_seven_day_bar >= 70 ? Theme.chart-amber : Theme.chart-purple); }
 
                 ActionButton { x: 448px; y: 514px; width: 64px; height: 32px; text: "Save"; clicked => { root.save_profile(); } }
-                ActionButton { x: 520px; y: 514px; width: 64px; height: 32px; text: "Use"; clicked => { root.use_profile(); } }
+                ActionButton { x: 520px; y: 514px; width: 64px; height: 32px; text: "Use"; kind: "primary"; clicked => { root.use_profile(); } }
             }
 
             if active_tab == 3: Rectangle {
@@ -1144,42 +934,42 @@ slint::slint! {
                 height: 536px;
                 background: transparent;
 
-                Text { x: 0px; y: 0px; text: "Session ledger"; font-size: 17px; font-weight: 700; color: #111827; }
-                Text { x: 0px; y: 28px; width: 576px; text: "A quiet local record of Claude Code activity observed by claudie."; font-size: 13px; color: #6b7280; }
+                Text { x: 0px; y: 0px; text: "Session ledger"; font-size: 17px; font-weight: 700; color: Theme.ink; }
+                Text { x: 0px; y: 28px; width: 576px; text: "A quiet local record of Claude Code activity observed by claudie."; font-size: 13px; color: Theme.ink-faint; }
 
-                Rectangle { x: 0px; y: 72px; width: 284px; height: 240px; background: #f2f5fa; border-radius: 8px; border-width: 1px; border-color: #dae0ea; }
-                Text { x: 24px; y: 92px; width: 236px; text: root.stats_today_title; color: #111827; font-size: 14px; font-weight: 600; }
-                Text { x: 24px; y: 116px; width: 236px; height: 28px; text: root.stats_today_summary; overflow: elide; color: #111827; font-size: 12px; }
-                StatBarRow { x: 24px; y: 152px; width: 236px; height: 20px; label: "Write"; value: root.stats_today_write_value; bar: root.stats_today_write_bar; accent: #2a9d8f; }
-                StatBarRow { x: 24px; y: 176px; width: 236px; height: 20px; label: "Bash"; value: root.stats_today_bash_value; bar: root.stats_today_bash_bar; accent: #4577c3; }
-                StatBarRow { x: 24px; y: 200px; width: 236px; height: 20px; label: "Search"; value: root.stats_today_search_value; bar: root.stats_today_search_bar; accent: #d88a24; }
-                StatBarRow { x: 24px; y: 224px; width: 236px; height: 20px; label: "Agent"; value: root.stats_today_subagent_value; bar: root.stats_today_subagent_bar; accent: #7c5cc4; }
-                StatBarRow { x: 24px; y: 248px; width: 236px; height: 20px; label: "Perm"; value: root.stats_today_permission_value; bar: root.stats_today_permission_bar; accent: #0a84ff; }
-                StatBarRow { x: 24px; y: 272px; width: 236px; height: 20px; label: "Choice"; value: root.stats_today_choice_value; bar: root.stats_today_choice_bar; accent: #6b8f3f; }
+                Rectangle { x: 0px; y: 72px; width: 284px; height: 240px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
+                Text { x: 24px; y: 92px; width: 236px; text: root.stats_today_title; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                Text { x: 24px; y: 116px; width: 236px; height: 28px; text: root.stats_today_summary; overflow: elide; color: Theme.ink; font-size: 12px; }
+                StatBarRow { x: 24px; y: 152px; width: 236px; height: 20px; label: "Write"; value: root.stats_today_write_value; bar: root.stats_today_write_bar; accent: Theme.chart-teal; }
+                StatBarRow { x: 24px; y: 176px; width: 236px; height: 20px; label: "Bash"; value: root.stats_today_bash_value; bar: root.stats_today_bash_bar; accent: Theme.chart-blue; }
+                StatBarRow { x: 24px; y: 200px; width: 236px; height: 20px; label: "Search"; value: root.stats_today_search_value; bar: root.stats_today_search_bar; accent: Theme.chart-amber; }
+                StatBarRow { x: 24px; y: 224px; width: 236px; height: 20px; label: "Agent"; value: root.stats_today_subagent_value; bar: root.stats_today_subagent_bar; accent: Theme.chart-purple; }
+                StatBarRow { x: 24px; y: 248px; width: 236px; height: 20px; label: "Perm"; value: root.stats_today_permission_value; bar: root.stats_today_permission_bar; accent: Theme.accent; }
+                StatBarRow { x: 24px; y: 272px; width: 236px; height: 20px; label: "Choice"; value: root.stats_today_choice_value; bar: root.stats_today_choice_bar; accent: Theme.chart-olive; }
 
-                Rectangle { x: 300px; y: 72px; width: 284px; height: 240px; background: #f2f5fa; border-radius: 8px; border-width: 1px; border-color: #dae0ea; }
-                Text { x: 324px; y: 92px; width: 236px; text: root.stats_recent_title; color: #111827; font-size: 14px; font-weight: 600; }
-                Text { x: 324px; y: 116px; width: 236px; height: 28px; text: root.stats_recent_summary; overflow: elide; color: #111827; font-size: 12px; }
-                StatBarRow { x: 324px; y: 152px; width: 236px; height: 20px; label: "Write"; value: root.stats_recent_write_value; bar: root.stats_recent_write_bar; accent: #2a9d8f; }
-                StatBarRow { x: 324px; y: 176px; width: 236px; height: 20px; label: "Bash"; value: root.stats_recent_bash_value; bar: root.stats_recent_bash_bar; accent: #4577c3; }
-                StatBarRow { x: 324px; y: 200px; width: 236px; height: 20px; label: "Search"; value: root.stats_recent_search_value; bar: root.stats_recent_search_bar; accent: #d88a24; }
-                StatBarRow { x: 324px; y: 224px; width: 236px; height: 20px; label: "Agent"; value: root.stats_recent_subagent_value; bar: root.stats_recent_subagent_bar; accent: #7c5cc4; }
-                StatBarRow { x: 324px; y: 248px; width: 236px; height: 20px; label: "Perm"; value: root.stats_recent_permission_value; bar: root.stats_recent_permission_bar; accent: #0a84ff; }
-                StatBarRow { x: 324px; y: 272px; width: 236px; height: 20px; label: "Choice"; value: root.stats_recent_choice_value; bar: root.stats_recent_choice_bar; accent: #6b8f3f; }
+                Rectangle { x: 300px; y: 72px; width: 284px; height: 240px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
+                Text { x: 324px; y: 92px; width: 236px; text: root.stats_recent_title; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                Text { x: 324px; y: 116px; width: 236px; height: 28px; text: root.stats_recent_summary; overflow: elide; color: Theme.ink; font-size: 12px; }
+                StatBarRow { x: 324px; y: 152px; width: 236px; height: 20px; label: "Write"; value: root.stats_recent_write_value; bar: root.stats_recent_write_bar; accent: Theme.chart-teal; }
+                StatBarRow { x: 324px; y: 176px; width: 236px; height: 20px; label: "Bash"; value: root.stats_recent_bash_value; bar: root.stats_recent_bash_bar; accent: Theme.chart-blue; }
+                StatBarRow { x: 324px; y: 200px; width: 236px; height: 20px; label: "Search"; value: root.stats_recent_search_value; bar: root.stats_recent_search_bar; accent: Theme.chart-amber; }
+                StatBarRow { x: 324px; y: 224px; width: 236px; height: 20px; label: "Agent"; value: root.stats_recent_subagent_value; bar: root.stats_recent_subagent_bar; accent: Theme.chart-purple; }
+                StatBarRow { x: 324px; y: 248px; width: 236px; height: 20px; label: "Perm"; value: root.stats_recent_permission_value; bar: root.stats_recent_permission_bar; accent: Theme.accent; }
+                StatBarRow { x: 324px; y: 272px; width: 236px; height: 20px; label: "Choice"; value: root.stats_recent_choice_value; bar: root.stats_recent_choice_bar; accent: Theme.chart-olive; }
 
-                Rectangle { x: 0px; y: 336px; width: 284px; height: 168px; background: #ffffff; border-radius: 8px; border-width: 1px; border-color: #dae0ea; }
-                Text { x: 24px; y: 356px; width: 236px; text: "Tokens today"; color: #111827; font-size: 14px; font-weight: 600; }
-                StatBarRow { x: 24px; y: 386px; width: 236px; height: 18px; label: "Input"; value: root.stats_today_input_value; bar: root.stats_today_input_bar; accent: #2a9d8f; }
-                StatBarRow { x: 24px; y: 408px; width: 236px; height: 18px; label: "Output"; value: root.stats_today_output_value; bar: root.stats_today_output_bar; accent: #4577c3; }
-                StatBarRow { x: 24px; y: 430px; width: 236px; height: 18px; label: "Cache W"; value: root.stats_today_cache_write_value; bar: root.stats_today_cache_write_bar; accent: #d88a24; }
-                StatBarRow { x: 24px; y: 452px; width: 236px; height: 18px; label: "Cache R"; value: root.stats_today_cache_read_value; bar: root.stats_today_cache_read_bar; accent: #7c5cc4; }
+                Rectangle { x: 0px; y: 336px; width: 284px; height: 168px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
+                Text { x: 24px; y: 356px; width: 236px; text: "Tokens today"; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                StatBarRow { x: 24px; y: 386px; width: 236px; height: 18px; label: "Input"; value: root.stats_today_input_value; bar: root.stats_today_input_bar; accent: Theme.chart-teal; }
+                StatBarRow { x: 24px; y: 408px; width: 236px; height: 18px; label: "Output"; value: root.stats_today_output_value; bar: root.stats_today_output_bar; accent: Theme.chart-blue; }
+                StatBarRow { x: 24px; y: 430px; width: 236px; height: 18px; label: "Cache W"; value: root.stats_today_cache_write_value; bar: root.stats_today_cache_write_bar; accent: Theme.chart-amber; }
+                StatBarRow { x: 24px; y: 452px; width: 236px; height: 18px; label: "Cache R"; value: root.stats_today_cache_read_value; bar: root.stats_today_cache_read_bar; accent: Theme.chart-purple; }
 
-                Rectangle { x: 300px; y: 336px; width: 284px; height: 168px; background: #ffffff; border-radius: 8px; border-width: 1px; border-color: #dae0ea; }
-                Text { x: 324px; y: 356px; width: 236px; text: "Tokens last 7 days"; color: #111827; font-size: 14px; font-weight: 600; }
-                StatBarRow { x: 324px; y: 386px; width: 236px; height: 18px; label: "Input"; value: root.stats_recent_input_value; bar: root.stats_recent_input_bar; accent: #2a9d8f; }
-                StatBarRow { x: 324px; y: 408px; width: 236px; height: 18px; label: "Output"; value: root.stats_recent_output_value; bar: root.stats_recent_output_bar; accent: #4577c3; }
-                StatBarRow { x: 324px; y: 430px; width: 236px; height: 18px; label: "Cache W"; value: root.stats_recent_cache_write_value; bar: root.stats_recent_cache_write_bar; accent: #d88a24; }
-                StatBarRow { x: 324px; y: 452px; width: 236px; height: 18px; label: "Cache R"; value: root.stats_recent_cache_read_value; bar: root.stats_recent_cache_read_bar; accent: #7c5cc4; }
+                Rectangle { x: 300px; y: 336px; width: 284px; height: 168px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
+                Text { x: 324px; y: 356px; width: 236px; text: "Tokens last 7 days"; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                StatBarRow { x: 324px; y: 386px; width: 236px; height: 18px; label: "Input"; value: root.stats_recent_input_value; bar: root.stats_recent_input_bar; accent: Theme.chart-teal; }
+                StatBarRow { x: 324px; y: 408px; width: 236px; height: 18px; label: "Output"; value: root.stats_recent_output_value; bar: root.stats_recent_output_bar; accent: Theme.chart-blue; }
+                StatBarRow { x: 324px; y: 430px; width: 236px; height: 18px; label: "Cache W"; value: root.stats_recent_cache_write_value; bar: root.stats_recent_cache_write_bar; accent: Theme.chart-amber; }
+                StatBarRow { x: 324px; y: 452px; width: 236px; height: 18px; label: "Cache R"; value: root.stats_recent_cache_read_value; bar: root.stats_recent_cache_read_bar; accent: Theme.chart-purple; }
             }
         }
 
@@ -1190,7 +980,7 @@ slint::slint! {
             height: 20px;
             text: root.status_message;
             overflow: elide;
-            color: #6b7280;
+            color: Theme.ink-faint;
             font-size: 12px;
         }
     }
@@ -1281,7 +1071,7 @@ slint::slint! {
             wrap: word-wrap;
             font-family: "Cascadia Mono, Consolas";
             font-size: 12px;
-            color: #111827;
+            color: Theme.ink;
         }
 
         if data.kind != 5 && data.kind != 7: Text {
@@ -1296,7 +1086,7 @@ slint::slint! {
                 : (data.kind == 3 ? 14px : 13px));
             font-weight: root.is_heading ? 700 : 400;
             font-italic: data.kind == 6;
-            color: data.kind == 6 ? #6b7280 : #111827;
+            color: data.kind == 6 ? Theme.ink-faint : Theme.ink;
         }
     }
 
@@ -1308,70 +1098,105 @@ slint::slint! {
         property <length> label_h: data.label_lines * 19px;
         property <length> desc_h: data.description == "" ? 0px : data.desc_lines * 17px + 4px;
         property <bool> show_other: data.selected && data.is_other;
+        property <bool> is_header: data.is_question_header;
 
         width: 100%;
-        height: data.is_question_header
+        height: root.is_header
             ? data.desc_lines * 17px + 14px
             : 16px + self.label_h + self.desc_h + (self.show_other ? 38px : 0px);
-        background: data.is_question_header
+        background: root.is_header
             ? transparent
-            : (data.selected ? #eef6ff : #ffffff);
+            : (data.selected ? Theme.accent-soft
+            : (touch.has-hover ? Theme.sunken-alt : Theme.surface));
         border-radius: 8px;
-        border-width: data.is_question_header ? 0px : 1px;
-        border-color: data.selected ? #0a84ff : #dae0ea;
+        border-width: root.is_header ? 0px : 1px;
+        border-color: data.selected ? Theme.accent : Theme.card-border;
+        clip: !root.is_header;
+        animate background, border-color { duration: Theme.fast; easing: ease-out; }
 
-        if !data.is_question_header: TouchArea {
+        touch := TouchArea {
             width: 100%;
             height: 100%;
+            enabled: !root.is_header;
             mouse-cursor: pointer;
             clicked => { root.toggle(); }
         }
 
-        if data.is_question_header: Text {
+        if !root.is_header && data.selected: Rectangle {
+            x: 0px; y: 0px;
+            width: 3px;
+            height: 100%;
+            background: Theme.accent;
+        }
+
+        if root.is_header: Text {
             x: 4px; y: 8px;
             width: parent.width - 8px;
             height: parent.height - 10px;
             text: data.description;
             font-size: 12px;
             font-weight: 600;
-            color: #475569;
+            color: Theme.ink-secondary;
             wrap: word-wrap;
         }
 
-        if !data.is_question_header: Text {
-            x: 12px; y: 6px;
-            width: 24px; height: 22px;
-            text: data.multi_select
-                ? (data.selected ? "☑" : "☐")
-                : (data.selected ? "●" : "○");
-            font-size: 18px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-            color: data.selected ? #0a84ff : #6b7280;
+        // Drawn checkbox (multi-select questions).
+        if !root.is_header && data.multi_select: Rectangle {
+            x: 14px; y: 9px;
+            width: 18px;
+            height: 18px;
+            border-radius: 5px;
+            border-width: data.selected ? 0px : 1.5px;
+            border-color: Theme.control-border;
+            background: data.selected ? Theme.accent : Theme.surface;
+            animate background { duration: Theme.fast; }
+
+            if data.selected: Path {
+                x: 0px; y: 0px;
+                width: 18px;
+                height: 18px;
+                viewbox-width: 18;
+                viewbox-height: 18;
+                commands: "M 4.5 9.5 L 7.5 12.5 L 13.5 6.5";
+                stroke: #ffffff;
+                stroke-width: 2px;
+            }
         }
 
-        if !data.is_question_header: Text {
+        // Drawn radio (single-select questions): thick accent ring when on.
+        if !root.is_header && !data.multi_select: Rectangle {
+            x: 14px; y: 9px;
+            width: 18px;
+            height: 18px;
+            border-radius: 9px;
+            border-width: data.selected ? 5px : 1.5px;
+            border-color: data.selected ? Theme.accent : Theme.control-border;
+            background: Theme.surface;
+            animate border-width, border-color { duration: Theme.fast; }
+        }
+
+        if !root.is_header: Text {
             x: 40px; y: 8px;
             width: parent.width - 52px;
             height: root.label_h;
             text: data.label;
             font-size: 13px;
             font-weight: 600;
-            color: #111827;
+            color: Theme.ink;
             wrap: word-wrap;
         }
 
-        if !data.is_question_header && data.description != "": Text {
+        if !root.is_header && data.description != "": Text {
             x: 40px; y: 8px + root.label_h + 4px;
             width: parent.width - 52px;
             height: data.desc_lines * 17px;
             text: data.description;
             font-size: 12px;
-            color: #6b7280;
+            color: Theme.ink-faint;
             wrap: word-wrap;
         }
 
-        if !data.is_question_header && root.show_other: LineEdit {
+        if !root.is_header && root.show_other: LineEdit {
             x: 40px; y: 8px + root.label_h + root.desc_h + 4px;
             width: parent.width - 52px;
             height: 30px;
@@ -1390,7 +1215,7 @@ slint::slint! {
         min-height: 496px;
         title: "claudie request";
         icon: @image-url("../../assets/icon.ico");
-        background: #f4f7fc;
+        background: Theme.window-bg;
 
         in property <bool> is_choice: false;
         in property <string> title_text;
@@ -1418,10 +1243,10 @@ slint::slint! {
             y: 16px;
             width: 608px;
             height: root.height - 32px;
-            background: white;
+            background: Theme.surface;
             border-radius: 12px;
             border-width: 1px;
-            border-color: #e4e8f0;
+            border-color: Theme.outline;
         }
 
         VerticalLayout {
@@ -1429,25 +1254,57 @@ slint::slint! {
             y: 32px;
             width: 576px;
             height: root.height - 64px;
-            spacing: 16px;
+            spacing: 14px;
 
-            Text { height: 28px; text: root.title_text; font-size: 20px; font-weight: 600; color: #111827; overflow: elide; }
-            Text { height: 18px; text: root.subtitle_text; font-size: 13px; color: #6b7280; overflow: elide; }
+            HorizontalLayout {
+                height: 48px;
+                spacing: 14px;
+
+                Rectangle {
+                    width: 48px;
+                    border-radius: 12px;
+                    background: Theme.accent-tint;
+                    border-width: 1px;
+                    border-color: Theme.accent-tint-border;
+
+                    Image {
+                        x: (parent.width - 24px) / 2;
+                        y: (parent.height - 24px) / 2;
+                        width: 24px;
+                        height: 24px;
+                        source: root.is_choice
+                            ? @image-url("../../assets/lucide/list-checks.svg")
+                            : @image-url("../../assets/lucide/shield-check.svg");
+                        image-fit: contain;
+                        colorize: Theme.accent;
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 2px;
+                    alignment: center;
+                    Text { text: root.title_text; font-size: 18px; font-weight: 700; color: Theme.ink; overflow: elide; }
+                    Text { text: root.subtitle_text; font-size: 13px; color: Theme.ink-faint; overflow: elide; }
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.hairline; }
 
             // Detail vs. options split follows the golden ratio (~3:2): plans
             // hand the larger share to the detail panel, question lists invert it.
             Rectangle {
                 vertical-stretch: root.detail_dominant ? 3 : 2;
                 min-height: 120px;
-                background: #f2f5fa;
+                background: Theme.sunken;
                 border-radius: 12px;
                 border-width: 1px;
-                border-color: #dae0ea;
+                border-color: Theme.card-border;
+                clip: true;
 
                 ScrollView {
                     x: 12px; y: 12px;
                     width: parent.width - 24px;
-                    height: parent.height - 24px;
+                    height: parent.height - 24px - 26px;
                     VerticalLayout {
                         padding: 0px;
                         spacing: 8px;
@@ -1456,14 +1313,26 @@ slint::slint! {
                         }
                     }
                 }
-            }
 
-            Text {
-                height: 16px;
-                text: root.meta_text;
-                font-size: 12px;
-                color: #9ca3af;
-                overflow: elide;
+                // Session/CWD strip lives inside the card instead of floating
+                // between panels.
+                Rectangle {
+                    x: 0px;
+                    y: parent.height - 27px;
+                    width: parent.width;
+                    height: 1px;
+                    background: Theme.card-border;
+                }
+                Text {
+                    x: 14px;
+                    y: parent.height - 23px;
+                    width: parent.width - 28px;
+                    height: 18px;
+                    text: root.meta_text;
+                    font-size: 11px;
+                    color: Theme.ink-disabled;
+                    overflow: elide;
+                }
             }
 
             if is_choice: ScrollView {
@@ -1484,14 +1353,14 @@ slint::slint! {
                 height: 16px;
                 text: "Use Ctrl+Shift+Y for Allow and Ctrl+Shift+N for Deny.";
                 font-size: 12px;
-                color: #6b7280;
+                color: Theme.ink-faint;
             }
 
             if is_choice && !submit_enabled: Text {
                 height: 16px;
                 text: root.submit_hint;
                 font-size: 12px;
-                color: #d97706;
+                color: Theme.warning;
                 horizontal-alignment: center;
                 overflow: elide;
             }
@@ -1499,14 +1368,16 @@ slint::slint! {
             HorizontalLayout {
                 height: 40px;
                 spacing: 12px;
-                alignment: end;
 
-                if !is_choice: ActionButton { width: 96px; text: "Allow"; clicked => { root.allow_once(); } }
+                if !is_choice: ActionButton { width: 96px; kind: "danger"; text: "Deny"; clicked => { root.deny(); } }
+                if is_choice: ActionButton { width: 96px; kind: "danger"; text: "Cancel"; clicked => { root.cancel_choice(); } }
+
+                Rectangle { horizontal-stretch: 1; }
+
                 if !is_choice: ActionButton { width: 104px; text: "Always"; clicked => { root.allow_always(); } }
-                if !is_choice: ActionButton { width: 96px; text: "Deny"; clicked => { root.deny(); } }
+                if !is_choice: ActionButton { width: 96px; kind: "primary"; text: "Allow"; clicked => { root.allow_once(); } }
 
-                if is_choice: ActionButton { width: 104px; text: "Submit"; enabled: root.submit_enabled; clicked => { root.submit_choice(); } }
-                if is_choice: ActionButton { width: 96px; text: "Cancel"; clicked => { root.cancel_choice(); } }
+                if is_choice: ActionButton { width: 104px; kind: "primary"; text: "Submit"; enabled: root.submit_enabled; clicked => { root.submit_choice(); } }
             }
         }
     }
