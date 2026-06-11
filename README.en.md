@@ -31,11 +31,13 @@ claudie is inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerz
   | `Stop` | Task complete |
   | `SessionEnd` | Session ended, clear pending interactions |
 
-- **Permission requests**: intercepts `PermissionRequest` hooks and shows Allow / Always / Deny controls in the pet window.
+- **Permission requests**: intercepts `PermissionRequest` hooks and shows Allow / Always / Deny controls in the pet window. Deny writes back `continue=false` with `interrupt=true`, matching a terminal "No" — it stops the current turn rather than feeding the rejection back as a retriable tool error.
 - **Choice cards**: supports interactive `PreToolUse` choices for `AskUserQuestion` and `ExitPlanMode`, with options plus Submit / Cancel.
+- **Multi-session switcher**: tracks each Claude Code session's status (streaming / waiting permission / waiting choice / idle) and renders a separate switcher panel beside the pet; scroll the mouse wheel to change the focused session, which drives the pet mood and HUD.
+- **System tray**: registers a tray icon in the notification area whose left/right-click menu mirrors the pet's right-click menu.
 - **Hotkeys**: `Ctrl+Shift+Y` allows a permission or submits a choice; `Ctrl+Shift+N` denies a permission or cancels a choice.
 - **Pomodoro timer**: built-in Pomodoro with Start / Stop / Pause / Resume / Skip and notifications on phase completion.
-- **Fishing minigame**: click on the pet to start fishing through a "waiting → reeling → caught/missed" sequence; maintain tension by keeping the mouse inside a moving target zone during the reeling phase.
+- **Fishing minigame**: click on the pet to start fishing through a "waiting → reeling → caught/missed" sequence; maintain tension by keeping the mouse inside a moving target zone during the reeling phase. Each phase has its own GIF (`fishing` / `reel` / `caught` / `missed`); legacy single-`fishing` configs on the bundled GIF directory are auto-migrated to the four-asset layout.
 - **Pet interaction**: short left-click plays `wave` / `stretch`; click-and-move still drags the window; focus sessions can use the `pomodoro` animation.
 - **Idle sleep**: auto-sleeps after inactivity and wakes on new activity.
 - **Window and asset settings**: pet scaling, window position memory, GIF directory, and mood-to-GIF mapping.
@@ -44,7 +46,7 @@ claudie is inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerz
 - **Session ledger**: records daily prompts, tool categories, permission/choice counts, errors, completed focus sessions, and token usage; Stats shows today and the last 7 days.
 - **Official usage monitoring**: real-time Claude Code 5h/7d usage limits in the right-click menu and Settings panel, with subscription plan detection (Max/Pro/Team) and auto-refresh via OAuth polling.
 - **Secrets encrypted storage**: sensitive credentials encrypted/decrypted transparently with Windows DPAPI.
-- **OpenAI-compatible proxy**: converts Claude Code Anthropic Messages requests to OpenAI Chat Completions with tools, streaming, image forwarding, reasoning output, parallel tool calls, tool-history fallback, context compression, summaries, and capability caching.
+- **OpenAI-compatible proxy**: converts Claude Code Anthropic Messages requests to OpenAI Chat Completions with tools, streaming, image forwarding, reasoning output, parallel tool calls, tool-history fallback, context compression, summaries, and capability caching. Incoming requests are authenticated with a Bearer token (Claude Code's `ANTHROPIC_AUTH_TOKEN`); upstream 429/529 `Retry-After` headers are forwarded back to Claude Code, and transient upstream unavailability is uniformly returned as HTTP 529 to match Anthropic's overload semantics.
 - **Windows-only**: ships the desktop pet UI, hook/proxy services, Settings panel, and permission/choice interactions for Windows.
 
 ## Quick Start
@@ -104,6 +106,7 @@ Current proxy capabilities:
 - Image content forwarding is supported. By default claudie detects vision support from the model name; force it with `CLAUDIE_PROXY_FORWARD_IMAGES=always` or disable it with `CLAUDIE_PROXY_FORWARD_IMAGES=never`.
 - Recognized OpenAI/Azure/DeepSeek/Qwen/Kimi/GLM/OpenRouter upstreams keep the compat prompt off by default; generic OneAPI/NewAPI-style upstreams get it by default. Control it with `CLAUDIE_PROXY_COMPAT_PROMPT=0/1`.
 - If an upstream rejects native tool history, the proxy retries with text transcript mode and caches the result under `proxy_cache/capabilities/`.
+- When the upstream returns 429 or 529, claudie reads its `Retry-After` header and forwards it back to Claude Code to trigger native backoff; connection failures, timeouts, and other transient upstream errors are uniformly reported as HTTP 529.
 
 Context optimization is enabled by default. claudie compresses very long tool results and text; when estimated input exceeds the threshold, it keeps recent messages and summarizes older history in chunks. The cache stores summary text or capability probe results only, not API keys or full original request bodies.
 
@@ -169,8 +172,9 @@ Key files:
 - `src/official_usage.rs`: Claude Code OAuth usage API polling and credential management.
 - `src/usage_display.rs`: usage percentage bars, reset countdown, subscription plan formatting.
 - `src/time_util.rs`: RFC3339/epoch timestamp parsing and percentage value extraction.
-- `src/ui/window/mod.rs`: main window lifecycle, hotkeys, right-click menu, dragging, and profile menu.
-- `src/ui/window/render.rs`: HUD, pet drawing, permission overlay, and choice cards.
+- `src/ui/window/mod.rs`: main window lifecycle, hotkeys, right-click menu, dragging, profile menu, system tray icon, and the multi-session switcher auxiliary window.
+- `src/ui/window/render.rs`: HUD, pet drawing, permission overlay, choice cards, and session switcher row rendering.
+- `src/ui/window_position.rs`: monitor-aware centering and bounds helpers used by Slint popups and the Settings window.
 - `src/ui/slint_views.rs` and `src/ui/settings_panel/`: Settings / Prompt declarations and controllers.
 
 Other directories:
@@ -208,6 +212,10 @@ assets/claudie/
   pomodoro.gif
   wave.gif
   stretch.gif
+  fishing.gif
+  reel.gif
+  caught.gif
+  missed.gif
 ```
 
 The Settings panel can adjust the GIF directory and file name mapped to each mood. When replacing art assets, keep the file name mapping consistent.

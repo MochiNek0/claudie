@@ -49,7 +49,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `src/official_usage.rs`: Claude Code OAuth usage API polling thread and credential management.
 - `src/usage_display.rs`: official usage percentage bars, reset countdown, subscription plan formatting, and UI display adapter.
 - `src/app/`: core domain state.
-- `src/app/mod.rs`: `AppState`, `PetMood`, sessions, pending permissions/choices, quota snapshots, fishing, pomodoro, stats, and mood decay.
+- `src/app/mod.rs`: `AppState`, `PetMood`, multi-session tracking (`sessions`, `focused_session_id`, switcher ordering), pending permissions/choices, quota snapshots, fishing, pomodoro, stats, and mood decay.
 - `src/app/fishing.rs`: fishing minigame state machine with waiting/reeling/caught/missed phases and tension zone tracking.
 - `src/app/pomodoro.rs`: focus/short-break/long-break timer state and transitions.
 - `src/app/stats.rs`: local daily ledger, local date bucketing, tool classification, token counters, and fishing stats.
@@ -60,15 +60,15 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `src/hooks/quota.rs`: token, model, provider, quota, rate-limit, and official usage window capture from payloads/transcripts.
 - `src/hooks/claude_settings.rs`: hook settings generation, merge, install, uninstall, and one-time backup handling.
 - `src/proxy/`: local Anthropic Messages to OpenAI Chat Completions compatibility proxy.
-- `src/proxy/mod.rs`: proxy server, active profile lookup, optimization handoff, upstream call/retry flow, and `/v1/messages` routing.
-- `src/proxy/http.rs`: minimal HTTP request/response helpers.
+- `src/proxy/mod.rs`: proxy server, active profile lookup, Bearer-token request auth (`proxy_auth_authorized`), optimization handoff, upstream call/retry flow, upstream `Retry-After` forwarding, and `/v1/messages` routing.
+- `src/proxy/http.rs`: minimal HTTP request/response helpers, including extra-header responses.
 - `src/proxy/provider.rs`: provider/model capability detection, image forwarding policy, reasoning model detection, and compat prompt defaults.
 - `src/proxy/request_conv.rs`: Anthropic request to OpenAI request conversion, tools, images, reasoning effort, and `OpenAI body` merge.
 - `src/proxy/response_conv.rs`: OpenAI response to Anthropic response conversion.
 - `src/proxy/streaming.rs`: OpenAI SSE streaming to Anthropic streaming event translation.
 - `src/proxy/tool_history.rs`: fallback text transcript mode for providers that reject native tool history.
 - `src/proxy/capability_cache.rs`: upstream tool-history capability cache.
-- `src/proxy/upstream.rs`: OpenAI-compatible upstream transport and error mapping.
+- `src/proxy/upstream.rs`: OpenAI-compatible upstream transport, error mapping, and 429/529 `Retry-After` capture.
 - `src/proxy_optimizer/`: long-context compression, chunk summaries, and on-disk cache.
 - `src/proxy_optimizer/mod.rs`: `optimize_openai_request` orchestration and shared helpers.
 - `src/proxy_optimizer/config.rs`: `ProxyOptimizationConfig`, `SummaryMode`, env parsing, and cache-key signature inputs.
@@ -86,8 +86,9 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `src/ui/theme.rs`: shared colors, radii, and typography tokens for settings and overlays.
 - `src/ui/slint_views.rs`: Slint declarations for Settings and Prompt windows.
 - `src/ui/window_icon.rs`: Slint/Winit/Win32 icon bridge for auxiliary windows.
-- `src/ui/window/mod.rs`: main transparent pet window, hotkeys, context menu, dragging/clicking, profile menu, official usage display, position persistence, and fishing minigame click trigger.
-- `src/ui/window/render.rs`: render snapshot, HUD, pet drawing, permission overlay, choice card drawing, and fishing HUD overlay.
+- `src/ui/window/mod.rs`: main transparent pet window, hotkeys, context menu, dragging/clicking, profile menu, official usage display, position persistence, system tray icon (`Shell_NotifyIconW`), multi-session switcher auxiliary window, and fishing minigame click trigger.
+- `src/ui/window/render.rs`: render snapshot, HUD, pet drawing, permission overlay, choice card drawing, session switcher row rendering, and fishing HUD overlay.
+- `src/ui/window_position.rs`: monitor-aware window centering and bounds helpers used by auxiliary Slint windows (permission/choice popup, settings).
 - `src/ui/prompt_popup.rs`: Slint permission/choice popup snapshots and callbacks.
 - `src/ui/settings_panel/`: Settings window Slint bridge, tab controllers, and live timers.
 - `src/ui/settings_panel/mod.rs`: settings panel top-level refcell bridge and timer thread lifecycle.
@@ -121,21 +122,28 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - Installed hook events are defined in `src/hooks/claude_settings.rs`; event semantics belong in `src/hooks/events.rs`. The event handler also tolerates common camelCase field variants and some compatibility event names.
 - Mood transitions should go through `AppState::set_mood`, `set_resting_mood`, `start_tool_activity`, `finish_tool_activity`, `start_subagent`, `finish_subagent`, or `decay_mood` so timestamps and renderer priority stay correct.
 - `PreToolUse` mood classification treats edit/write tools as `Typing`, shell tools as `Building`, read/search tools as `Search`, and `Task` based on task text.
-- Permission requests are `PendingPermission` values and complete through `decide_current_permission`. Choice requests are `PendingChoice` values and complete through `submit_current_choice` or `deny_current_choice`.
+- Permission requests are `PendingPermission` values and complete through `decide_current_permission`. Choice requests are `PendingChoice` values and complete through `submit_current_choice` or `deny_current_choice`. Denying a permission or choice writes `continue=false` + `stopReason` to the hook response and adds `interrupt=true` on deny — this matches a terminal "No" (interrupt the turn) rather than feeding a tool-error back to the model. Denial also calls `finish_session_work` so the pet does not stay in a working mood when the tool will not run.
+- Tool events (`PreToolUse`, `PostToolUse`) MUST NOT clear pending interactions — parallel tools completing must not accidentally close a permission/choice popup belonging to a different tool call.
+- `session_status_for_event` returns `Option`; late events such as `SubagentStop`/`TaskCompleted` for an already-ended session do not roll the session back into `Streaming`.
+- The terminal-denial detector in `src/hooks/events.rs` only matches Claude Code's own structured denial markers in transcript lines, so reading source code or logs that mention "permission/denied" does not falsely dismiss popups.
+- Claude Code may run several sessions in parallel. `AppState` keeps a `sessions` map keyed by session id with status (`Streaming`, `WaitingPermission`, `WaitingChoice`, `Idle`, …), CWD, and last-activity timestamp; `focused_session_id` drives which session the pet mood and HUD reflect. The session switcher auxiliary window (toggle: `Settings -> Basic -> show_session_switcher`, default on) renders one row per session and lets the user scroll/click to switch focus. Hide it when only one session is active.
 - Daily stats should be recorded via `AppState` methods and stored by `src/app/stats.rs`; UI code should display counters, not derive business stats.
 - Keep the hook server small and synchronous. Put Claude-event behavior in `src/hooks/events.rs`, not in the HTTP parser.
 - Keep OpenAI proxy transport and Anthropic/OpenAI conversion in `src/proxy/`; keep context optimization and cache logic in `src/proxy_optimizer/`; keep profile persistence and Claude env behavior in `src/settings/`.
 - The proxy defaults `parallel_tool_calls=true` when tools are present and the model supports tools. Users can set `{"parallel_tool_calls": false}` in `OpenAI body` for older/smaller upstreams.
+- The proxy authenticates incoming requests against a Bearer token derived from the active profile (`proxy_auth_token`); the OAuth token Claude Code sends via `ANTHROPIC_AUTH_TOKEN` is the expected value. Requests without a matching token get `401 Unauthorized`.
+- Upstream errors map to Anthropic-style responses. 429/529 from the upstream forward the upstream `Retry-After` header back to Claude Code so its native retry/backoff kicks in; transient upstream unavailability is reported as HTTP 529 (not 503) to align with Anthropic's overload semantics.
 - Recognized OpenAI/Azure/DeepSeek/Qwen/Kimi/GLM/OpenRouter hosts keep the compat prompt off by default; Generic providers get it unless `CLAUDIE_PROXY_COMPAT_PROMPT=0` is set.
 - Vision/image forwarding is auto-detected by model name and can be forced with `CLAUDIE_PROXY_FORWARD_IMAGES=always` or disabled with `CLAUDIE_PROXY_FORWARD_IMAGES=never`.
 - UI code uses raw Win32 handles and unsafe calls. Keep unsafe usage close to Win32 boundaries and prefer small helper functions for repeated patterns.
+- A Win32 tray icon (`Shell_NotifyIconW`, id `1`, callback `WM_APP+1`) is installed on window creation and removed on destroy; the tray menu mirrors the right-click context menu.
 - Settings and prompt windows use Slint declarations in `src/ui/slint_views.rs`; keep Rust callback/state logic in `src/ui/settings_panel/` and `src/ui/prompt_popup.rs`.
 - Use `util::wide` for strings passed to Win32 APIs.
 - Do not block the UI thread with noticeable network or filesystem work.
 - When settings change, update both persisted files and in-memory `AppState`.
 - Secrets in `src/settings/secrets.rs` use Windows DPAPI (`CryptProtectData`/`CryptUnprotectData`) for encryption at rest. The `Secrets` struct wraps a `serde_json::Value` and serializes encrypted. Secrets are scoped to the current Windows user — they cannot be decrypted by another user or on another machine.
 - Official usage polling runs in a dedicated thread spawned at startup. It polls the Claude Code OAuth API (`/api/v2/organizations/.../usage` and `/api/v2/billing/subscription`) every 60 seconds with a cached `token.json` from the Claude Code config directory. Results are stored in `AppState` and displayed in the Settings panel Usage tab and the right-click menu live quota bar.
-- The fishing minigame in `src/app/fishing.rs` is a turn-based state machine: `Inactive → Waiting → Reeling → Caught | Missed`. Left-click on the pet starts the game. During the `Reeling` phase, the player must click when the tension bar is within the green zone. Fishing stats are recorded in `daily_stats.json` alongside tool usage stats. The game interacts with the pet GIF renderer to show mood changes during play.
+- The fishing minigame in `src/app/fishing.rs` is a turn-based state machine: `Inactive → Waiting → Reeling → Caught | Missed`. Left-click on the pet starts the game. During the `Reeling` phase, the player must click when the tension bar is within the green zone. Each phase maps to its own GIF (`fishing` / `fishing_reel` / `fishing_caught` / `fishing_missed`); the loader migrates legacy single-`fishing` configs to the four-asset default when the user is still on the bundled GIF directory. Fishing stats are recorded in `daily_stats.json` alongside tool usage stats.
 
 ## Maintenance Guidelines
 
@@ -165,12 +173,14 @@ cargo run --release
 Manual checks worth doing for relevant changes:
 
 - Pet window opens without a console in release builds and restores its last saved position.
+- A tray icon appears in the system notification area; clicking/right-clicking it surfaces the same menu as the pet's right-click menu.
+- When two or more Claude Code sessions are active, the session switcher row appears alongside the pet; scrolling/clicking changes the focused session and the pet mood/HUD follow.
 - Right-click menu opens Settings, Pomodoro actions, LLM Profile submenu, and Exit.
 - Settings tabs switch cleanly between Basic, Pomodoro, LLM Profiles, and Stats.
 - GIF resources load from configured or bundled assets.
 - Short left-click plays an interaction animation; click-and-move still drags the window.
 - `POST /hook` updates mood/events and stats.
-- Permission requests show Allow, Always, and Deny controls.
+- Permission requests show Allow, Always, and Deny controls. Deny interrupts the current turn (the model stops, not retries with an error); a parallel tool finishing in the meantime does not dismiss the popup.
 - Choice requests show options plus Submit and Cancel controls.
 - LLM Profiles can save/use/import/delete profiles and switch from the right-click menu.
 - OpenAI-format profiles route Claude Code through `http://127.0.0.1:17388`, forward `OpenAI body`, stream correctly when requested, and compress/summarize long conversations without losing recent messages.

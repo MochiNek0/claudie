@@ -31,20 +31,22 @@ claudie 受 [rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/cla
   | `Stop` | 任务结束 |
   | `SessionEnd` | 会话结束，清除待处理交互 |
 
-- **权限请求**：通过 `PermissionRequest` hook 接管权限请求，在宠物窗口中显示 Allow / Always / Deny。
+- **权限请求**：通过 `PermissionRequest` hook 接管权限请求，在宠物窗口中显示 Allow / Always / Deny。Deny 会写回 `continue=false`、`interrupt=true`，等同于终端里直接回答 "No"——中断本轮而不是把否决当作可重试的工具反馈喂回模型。
 - **选择卡片**：支持 `PreToolUse` 中的 `AskUserQuestion` 和 `ExitPlanMode`，显示选项、Submit 和 Cancel。
+- **多会话切换**：跟踪 Claude Code 各会话状态（streaming / waiting permission / waiting choice / idle），在宠物旁渲染独立的会话切换面板，鼠标滚轮即可切换关注的会话，焦点会话决定宠物的 mood 与 HUD。
+- **系统托盘**：在通知区域注册托盘图标，左键/右键托盘菜单与宠物的右键菜单一致。
 - **快捷键**：`Ctrl+Shift+Y` 允许权限或提交选择；`Ctrl+Shift+N` 拒绝权限或取消选择。
 - **番茄钟**：内置 Pomodoro，支持 Start / Stop / Pause / Resume / Skip，阶段结束时弹出通知。
 - **宠物互动**：短按左键播放 `wave` / `stretch` 互动动画，按住移动仍可拖动窗口；专注阶段可使用 `pomodoro` 动画。
 - **空闲睡眠**：长时间无活动后进入睡眠，有新活动时唤醒。
 - **窗口与资源设置**：支持宠物缩放、窗口位置记忆、GIF 目录和 mood -> GIF 映射。
-- **钓鱼小游戏**：在宠物上点击即可开始钓鱼，经历「等待 → 提竿 → 收线 → 上钩/脱钩」流程；收线阶段需在移动目标区维持张力以填满进度条。
+- **钓鱼小游戏**：在宠物上点击即可开始钓鱼，经历「等待 → 提竿 → 收线 → 上钩/脱钩」流程；收线阶段需在移动目标区维持张力以填满进度条。每个阶段都有独立 GIF（`fishing` / `reel` / `caught` / `missed`），仍使用内置目录的旧配置会被自动迁移到四段动画。
 - **Settings 面板**：Basic、Pomodoro、LLM Profiles、Stats 四个标签页，使用 Slint 原生窗口。
 - **LLM Profiles**：保存官方或自定义 LLM profile，可写入 Claude Code settings，并可从右键菜单快速切换。
 - **会话小账本**：按天记录 prompts、工具分类、权限/选择、错误、番茄钟完成数和 token 用量；Stats 页展示今日与最近 7 天。
 - **官方用量监控**：右键菜单与设置面板实时显示 Claude Code 官方 5 小时/7 天用量限制，支持 Max/Pro/Team 订阅计划识别和自动刷新（OAuth 轮询）。
 - **Secrets 加密存储**：敏感凭据使用 Windows DPAPI 加密保存，透明加密/解密。
-- **OpenAI 兼容代理**：把 Claude Code 的 Anthropic Messages 请求转换到 OpenAI Chat Completions，支持工具调用、流式响应、图片转发、reasoning 输出、并行工具调用、工具历史降级、上下文压缩、历史总结和能力缓存。
+- **OpenAI 兼容代理**：把 Claude Code 的 Anthropic Messages 请求转换到 OpenAI Chat Completions，支持工具调用、流式响应、图片转发、reasoning 输出、并行工具调用、工具历史降级、上下文压缩、历史总结和能力缓存。代理使用 Bearer Token 鉴权传入请求（即 Claude Code 的 `ANTHROPIC_AUTH_TOKEN`）；上游 429/529 的 `Retry-After` 会原样回传给 Claude Code，临时不可用统一映射为 HTTP 529，对齐 Anthropic 的过载语义。
 - **Windows-only**：应用只支持 Windows，包含桌面宠物 UI、hook/proxy 服务、Settings 面板和权限/选择交互。
 
 ## 快速开始
@@ -104,6 +106,7 @@ CLAUDIE_API_FORMAT=openai
 - 支持图片内容转发；默认根据模型名判断 vision 能力，也可用 `CLAUDIE_PROXY_FORWARD_IMAGES=always` 或 `CLAUDIE_PROXY_FORWARD_IMAGES=never` 强制控制。
 - 对识别出的 OpenAI/Azure/DeepSeek/Qwen/Kimi/GLM/OpenRouter 上游，兼容提示默认关闭；泛用 OneAPI/NewAPI 类上游默认开启。可用 `CLAUDIE_PROXY_COMPAT_PROMPT=0/1` 控制。
 - 若上游拒绝原生工具历史，代理会重试文本 transcript 模式，并把能力探测结果缓存到 `proxy_cache/capabilities/`。
+- 上游返回 429 或 529 时会读取 `Retry-After` 头并透传给 Claude Code，触发其原生退避；上游连接失败、超时等临时错误统一返回 HTTP 529。
 
 上下文优化默认开启。claudie 会压缩超长工具结果和普通文本；当估算输入超过阈值时，保留最近消息并对较早对话分块总结。缓存只保存摘要文本或能力探测结果，不保存 API key 或完整原始请求体。
 
@@ -169,8 +172,9 @@ src/
 - `src/official_usage.rs`：Claude Code OAuth 用量 API 轮询和凭据管理。
 - `src/usage_display.rs`：用量百分比条、重置倒计时、订阅计划格式化。
 - `src/time_util.rs`：RFC3339/epoch 时间戳解析、百分比值提取。
-- `src/ui/window/mod.rs`：主窗口生命周期、热键、右键菜单、拖动和 profile 菜单。
-- `src/ui/window/render.rs`：HUD、宠物绘制、权限 overlay、选择卡片。
+- `src/ui/window/mod.rs`：主窗口生命周期、热键、右键菜单、拖动、profile 菜单、系统托盘图标和多会话切换器辅助窗口。
+- `src/ui/window/render.rs`：HUD、宠物绘制、权限 overlay、选择卡片、会话切换行渲染。
+- `src/ui/window_position.rs`：多显示器感知的窗口居中与边界辅助函数，供 Slint 弹窗/设置窗使用。
 - `src/ui/slint_views.rs` 与 `src/ui/settings_panel/`：Settings / Prompt 窗口声明与控制器。
 
 其它目录：
@@ -208,6 +212,10 @@ assets/claudie/
   pomodoro.gif
   wave.gif
   stretch.gif
+  fishing.gif
+  reel.gif
+  caught.gif
+  missed.gif
 ```
 
 Settings 面板可以调整 GIF 目录和每个 mood 对应的文件名。替换资源时保持文件名映射一致即可。
