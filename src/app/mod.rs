@@ -540,8 +540,12 @@ impl AppState {
         tool_name: &str,
         tool_mood: PetMood,
     ) {
-        let (status, detail) = session_status_for_event(event, tool_name, tool_mood);
-        self.set_session_status(session_id, cwd, status, detail, None);
+        match session_status_for_event(event, tool_name, tool_mood) {
+            Some((status, detail)) => {
+                self.set_session_status(session_id, cwd, status, detail, None)
+            }
+            None => self.touch_session(session_id, cwd),
+        }
     }
 
     pub(crate) fn mark_session_waiting_permission(
@@ -656,22 +660,7 @@ impl AppState {
     ) {
         let session_id = normalize_session_id(session_id);
         let now = Instant::now();
-        if !self.sessions.contains_key(&session_id) {
-            let order = self.next_session_order;
-            self.next_session_order = self.next_session_order.saturating_add(1);
-            self.sessions.insert(
-                session_id.clone(),
-                ClaudeSession {
-                    id: session_id.clone(),
-                    cwd: String::new(),
-                    status: ClaudeSessionStatus::Idle,
-                    detail: String::new(),
-                    order,
-                    last_seen: now,
-                    waiting_interaction_sequence: None,
-                },
-            );
-        }
+        self.ensure_session_entry(&session_id, now);
 
         if let Some(session) = self.sessions.get_mut(&session_id) {
             if !cwd.trim().is_empty() {
@@ -685,6 +674,42 @@ impl AppState {
         self.prune_stale_sessions(now);
         self.reconcile_focused_session(Some(&session_id));
         self.refresh_visual_mood();
+    }
+
+    fn touch_session(&mut self, session_id: &str, cwd: &str) {
+        let session_id = normalize_session_id(session_id);
+        let now = Instant::now();
+        self.ensure_session_entry(&session_id, now);
+
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            if !cwd.trim().is_empty() {
+                session.cwd = cwd.trim().to_string();
+            }
+            session.last_seen = now;
+        }
+        self.prune_stale_sessions(now);
+        self.reconcile_focused_session(Some(&session_id));
+        self.refresh_visual_mood();
+    }
+
+    fn ensure_session_entry(&mut self, session_id: &str, now: Instant) {
+        if self.sessions.contains_key(session_id) {
+            return;
+        }
+        let order = self.next_session_order;
+        self.next_session_order = self.next_session_order.saturating_add(1);
+        self.sessions.insert(
+            session_id.to_string(),
+            ClaudeSession {
+                id: session_id.to_string(),
+                cwd: String::new(),
+                status: ClaudeSessionStatus::Idle,
+                detail: String::new(),
+                order,
+                last_seen: now,
+                waiting_interaction_sequence: None,
+            },
+        );
     }
 
     fn prune_stale_sessions(&mut self, now: Instant) {
@@ -1786,39 +1811,42 @@ fn session_status_for_event(
     event: &str,
     tool_name: &str,
     tool_mood: PetMood,
-) -> (ClaudeSessionStatus, String) {
+) -> Option<(ClaudeSessionStatus, String)> {
     match event {
-        "SessionStart" => (ClaudeSessionStatus::Idle, "Session started".to_string()),
-        "SessionResume" => (ClaudeSessionStatus::Idle, "Session resumed".to_string()),
-        "UserPromptSubmit" => (ClaudeSessionStatus::Streaming, "Streaming".to_string()),
+        "SessionStart" => Some((ClaudeSessionStatus::Idle, "Session started".to_string())),
+        "SessionResume" => Some((ClaudeSessionStatus::Idle, "Session resumed".to_string())),
+        "UserPromptSubmit" => Some((ClaudeSessionStatus::Streaming, "Streaming".to_string())),
         "PreToolUse" | "WorktreeCreate" => {
             let tool = if tool_name.trim().is_empty() {
                 "tool"
             } else {
                 tool_name.trim()
             };
-            (
+            Some((
                 ClaudeSessionStatus::Tool,
                 format!("{} {}", tool_mood_label(tool_mood), tool),
-            )
+            ))
         }
         "PostToolUse" | "PostToolBatch" => {
-            (ClaudeSessionStatus::Streaming, "Streaming".to_string())
+            Some((ClaudeSessionStatus::Streaming, "Streaming".to_string()))
         }
-        "PreCompact" => (ClaudeSessionStatus::Compacting, "Compacting".to_string()),
-        "PostCompact" => (ClaudeSessionStatus::Done, "Compacted".to_string()),
-        "PermissionDenied" => (ClaudeSessionStatus::Done, "Permission denied".to_string()),
+        "PreCompact" => Some((ClaudeSessionStatus::Compacting, "Compacting".to_string())),
+        "PostCompact" => Some((ClaudeSessionStatus::Done, "Compacted".to_string())),
+        "PermissionDenied" => Some((ClaudeSessionStatus::Done, "Permission denied".to_string())),
         "PostToolUseFailure" | "StopFailure" => {
-            (ClaudeSessionStatus::Error, "Hook failure".to_string())
+            Some((ClaudeSessionStatus::Error, "Hook failure".to_string()))
         }
-        "Stop" => (ClaudeSessionStatus::Done, "Ready".to_string()),
-        "SessionEnd" => (ClaudeSessionStatus::Ended, "Session ended".to_string()),
-        "Notification" => (ClaudeSessionStatus::Done, "Notification".to_string()),
-        "Elicitation" => (
+        "Stop" => Some((ClaudeSessionStatus::Done, "Ready".to_string())),
+        "SessionEnd" => Some((ClaudeSessionStatus::Ended, "Session ended".to_string())),
+        "Notification" => Some((ClaudeSessionStatus::Done, "Notification".to_string())),
+        "Elicitation" => Some((
             ClaudeSessionStatus::WaitingChoice,
             "Waiting for input".to_string(),
-        ),
-        _ => (ClaudeSessionStatus::Streaming, event.to_string()),
+        )),
+        // Subagent/task lifecycle events (SubagentStart, SubagentStop,
+        // TaskCreated, TaskCompleted) and unknown events may arrive after
+        // Stop; they must not flip a finished session back to Streaming.
+        _ => None,
     }
 }
 

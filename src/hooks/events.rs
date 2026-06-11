@@ -239,6 +239,16 @@ fn handle_permission_request(
         state
             .pending_permissions
             .retain(|pending| pending.id != permission.id);
+        // A denied or externally dismissed permission interrupts the turn: the
+        // tool never runs and no PostToolUse/Stop hook follows, so the
+        // activity opened by this tool's PreToolUse must be released here or
+        // the pet stays stuck in its working mood.
+        if !matches!(
+            decision,
+            Some(PermissionDecision::AllowOnce) | Some(PermissionDecision::AllowAlways)
+        ) {
+            state.finish_session_work(&permission.session_id);
+        }
         if state.pending_permissions.is_empty() && state.pending_choices.is_empty() {
             let mood = match decision {
                 Some(PermissionDecision::Deny) => PetMood::Error,
@@ -316,17 +326,34 @@ fn permission_request_response(
                 }
             })
         }
-        PermissionDecision::Deny => json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PermissionRequest",
-                "decision": {
-                    "behavior": "deny",
-                    "interrupt": false
+        // "interrupt": true is what makes the deny behave like the terminal
+        // "No": Claude Code aborts the whole turn instead of feeding the
+        // denial back to the model as retryable tool feedback.
+        PermissionDecision::Deny => with_turn_stop(
+            json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {
+                        "behavior": "deny",
+                        "message": "User denied the request in claudie",
+                        "interrupt": true
+                    }
                 }
-            }
-        }),
+            }),
+            "User denied the request in claudie",
+        ),
         PermissionDecision::Ignore => json!({}),
     }
+}
+
+// Denials must stop the turn like the terminal "No" option; otherwise Claude
+// retries immediately and the popup reappears before the user can react.
+fn with_turn_stop(mut response: Value, stop_reason: &str) -> Value {
+    if let Some(obj) = response.as_object_mut() {
+        obj.insert("continue".to_string(), Value::Bool(false));
+        obj.insert("stopReason".to_string(), json!(stop_reason));
+    }
+    response
 }
 
 fn pre_tool_permission_response(decision: PermissionDecision, tool_input: Value) -> Value {
@@ -334,7 +361,10 @@ fn pre_tool_permission_response(decision: PermissionDecision, tool_input: Value)
         PermissionDecision::AllowOnce | PermissionDecision::AllowAlways => {
             pre_tool_allow(tool_input, "Approved in claudie")
         }
-        PermissionDecision::Deny => pre_tool_deny("Denied in claudie"),
+        PermissionDecision::Deny => with_turn_stop(
+            pre_tool_deny("Denied in claudie"),
+            "User denied the request in claudie",
+        ),
         PermissionDecision::Ignore => json!({}),
     }
 }
@@ -543,7 +573,10 @@ fn choice_response(choice: &PendingChoice, decision: ChoiceDecision) -> Value {
                 pre_tool_deny("User chose to keep planning in claudie")
             }
         }
-        (_, ChoiceDecision::Deny) => pre_tool_deny("User declined in claudie"),
+        (_, ChoiceDecision::Deny) => with_turn_stop(
+            pre_tool_deny("User declined in claudie"),
+            "User declined the request in claudie",
+        ),
         (_, ChoiceDecision::Ignore) => json!({}),
     }
 }
@@ -688,23 +721,25 @@ fn transcript_has_terminal_denial(path: &str, start: u64) -> bool {
     if file.read_to_string(&mut text).is_err() {
         return false;
     }
-    let text = text.to_ascii_lowercase();
     let compact_json = text
         .chars()
         .filter(|ch| !ch.is_ascii_whitespace())
+        .map(|ch| ch.to_ascii_lowercase())
         .collect::<String>();
-    (text.contains("permission") && text.contains("denied"))
-        || text.contains("user denied")
-        || text.contains("denied by user")
-        || text.contains("user rejected")
-        || text.contains("rejected by user")
-        || text.contains("tool use denied")
-        || text.contains("operation was denied")
-        || text.contains("request was denied")
-        || compact_json.contains(r#""permissiondecision":"deny""#)
-        || compact_json.contains(r#""permission_decision":"deny""#)
-        || compact_json.contains(r#""behavior":"deny""#)
-        || compact_json.contains(r#""decision":"deny""#)
+    // Only the structural records Claude Code itself writes on a terminal
+    // "No" / Esc count. Loose phrase matching used to dismiss popups whenever
+    // code or chat text in the transcript merely mentioned a denial. The
+    // quote-anchored prefixes cannot occur inside nested tool-result text
+    // because there the quotes are JSON-escaped (\").
+    const DENIAL_MARKERS: [&str; 4] = [
+        "\"content\":\"theuserdoesn'twanttoproceedwiththistooluse",
+        "\"text\":\"theuserdoesn'twanttoproceedwiththistooluse",
+        "\"tooluseresult\":\"userrejected",
+        "\"content\":\"[requestinterruptedbyuser",
+    ];
+    DENIAL_MARKERS
+        .iter()
+        .any(|marker| compact_json.contains(marker))
 }
 
 pub(crate) fn decide_current_permission(decision: PermissionDecision) {
@@ -903,16 +938,12 @@ fn clear_stale_interactions(state: &mut AppState, session_id: &str) {
 }
 
 fn clears_pending_interaction(event: &str) -> bool {
+    // Tool events (PreToolUse/PostToolUse/...) must not clear pending
+    // interactions: tools run in parallel, and another tool finishing while a
+    // permission popup waits would dismiss it before the user can respond.
     matches!(
         event,
-        "PreToolUse"
-            | "PostToolUse"
-            | "PostToolBatch"
-            | "PermissionDenied"
-            | "PostToolUseFailure"
-            | "Stop"
-            | "SessionEnd"
-            | "StopFailure"
+        "UserPromptSubmit" | "PermissionDenied" | "Stop" | "SessionEnd" | "StopFailure"
     )
 }
 
@@ -1505,6 +1536,150 @@ mod tests {
     }
 
     #[test]
+    fn parallel_tool_events_keep_pending_permission() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        {
+            let mut state = state.lock().expect("state poisoned");
+            let mut permission = build_permission("Bash");
+            permission.session_id = "s1".to_string();
+            state.pending_permissions.push_back(permission);
+        }
+
+        process_hook(
+            json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "tool_name": "Read",
+                "tool_use_id": "read-1"
+            }),
+            state.clone(),
+        );
+        process_hook(
+            json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "s1",
+                "tool_name": "Read",
+                "tool_use_id": "read-1"
+            }),
+            state.clone(),
+        );
+
+        let state = state.lock().expect("state poisoned");
+        assert_eq!(state.pending_permissions.len(), 1);
+    }
+
+    #[test]
+    fn transcript_denial_ignores_incidental_permission_text() {
+        let path = std::env::temp_dir().join(format!(
+            "claudie_test_transcript_{}.jsonl",
+            std::process::id()
+        ));
+        let path_str = path.to_str().expect("temp path");
+
+        fs::write(&path, "a diff mentioning the PermissionDenied hook event\n").unwrap();
+        assert!(!transcript_has_terminal_denial(path_str, 0));
+
+        // Loose prose about denials must not dismiss the popup anymore.
+        fs::write(&path, "the request was denied by user\n").unwrap();
+        assert!(!transcript_has_terminal_denial(path_str, 0));
+
+        // Denial markers nested inside tool-result text arrive JSON-escaped
+        // (e.g. while a Claude session reads claudie's own source) and must
+        // not match either.
+        fs::write(
+            &path,
+            "{\"content\":\"code: \\\"toolUseResult\\\": \\\"User rejected tool use\\\"\"}\n",
+        )
+        .unwrap();
+        assert!(!transcript_has_terminal_denial(path_str, 0));
+
+        // The actual record Claude Code writes when the user picks "No" in
+        // the terminal permission dialog.
+        let rejection = concat!(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","#,
+            r#""content":"The user doesn't want to proceed with this tool use. "#,
+            r#"The tool use was rejected.","is_error":true,"tool_use_id":"toolu_1"}]},"#,
+            r#""toolUseResult":"User rejected tool use"}"#,
+            "\n"
+        );
+        fs::write(&path, rejection).unwrap();
+        assert!(transcript_has_terminal_denial(path_str, 0));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn terminal_denial_releases_started_tool_activity() {
+        let path = std::env::temp_dir().join(format!(
+            "claudie_test_denial_release_{}.jsonl",
+            std::process::id()
+        ));
+        fs::write(&path, "{}\n").unwrap();
+        let transcript = path.to_str().expect("temp path").to_string();
+
+        let state = Arc::new(Mutex::new(AppState::new()));
+        process_hook(
+            json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "tool_name": "Bash",
+                "tool_use_id": "bash-1",
+                "tool_input": { "command": "cargo test" }
+            }),
+            state.clone(),
+        );
+        assert_eq!(state.lock().expect("state poisoned").active_tools, 1);
+
+        let worker = {
+            let state = state.clone();
+            let transcript = transcript.clone();
+            std::thread::spawn(move || {
+                process_hook(
+                    json!({
+                        "hook_event_name": "PermissionRequest",
+                        "session_id": "s1",
+                        "tool_name": "Bash",
+                        "tool_input": { "command": "cargo test" },
+                        "transcript_path": transcript
+                    }),
+                    state,
+                )
+            })
+        };
+
+        // Let the popup register, then simulate the user answering "No" in
+        // the Claude Code terminal dialog. The waiter captures the transcript
+        // length before pushing the pending permission, so once the popup is
+        // visible the rejection below is guaranteed to land past that offset.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state
+            .lock()
+            .expect("state poisoned")
+            .pending_permissions
+            .is_empty()
+        {
+            assert!(Instant::now() < deadline, "permission never registered");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let rejection = concat!(
+            "{}\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","#,
+            r#""content":"The user doesn't want to proceed with this tool use. "#,
+            r#"The tool use was rejected.","is_error":true,"tool_use_id":"bash-1"}]},"#,
+            r#""toolUseResult":"User rejected tool use"}"#,
+            "\n"
+        );
+        fs::write(&path, rejection).unwrap();
+        worker.join().expect("permission hook thread");
+
+        let state = state.lock().expect("state poisoned");
+        assert!(state.pending_permissions.is_empty());
+        assert_eq!(state.active_tools, 0);
+        assert_eq!(state.resting_mood, PetMood::Idle);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
     fn stop_without_session_id_finishes_focused_session() {
         let state = Arc::new(Mutex::new(AppState::new()));
         process_hook(
@@ -1588,6 +1763,33 @@ mod tests {
 
         let state = state.lock().expect("state poisoned");
         assert_eq!(state.resting_mood, PetMood::Happy);
+        assert_eq!(state.mood, PetMood::Happy);
+    }
+
+    #[test]
+    fn late_subagent_stop_does_not_revive_finished_session() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        process_hook(
+            json!({ "hook_event_name": "UserPromptSubmit", "session_id": "s1" }),
+            state.clone(),
+        );
+        process_hook(
+            json!({ "hook_event_name": "Stop", "session_id": "s1" }),
+            state.clone(),
+        );
+
+        process_hook(
+            json!({ "hook_event_name": "SubagentStop", "session_id": "s1" }),
+            state.clone(),
+        );
+        process_hook(
+            json!({ "hook_event_name": "TaskCompleted", "session_id": "s1" }),
+            state.clone(),
+        );
+
+        let state = state.lock().expect("state poisoned");
+        let session = state.sessions.get("s1").expect("session");
+        assert_eq!(session.status, ClaudeSessionStatus::Done);
         assert_eq!(state.mood, PetMood::Happy);
     }
 
@@ -2062,6 +2264,59 @@ mod tests {
             Some("deny")
         );
         assert!(reason.contains("please address concern X"));
+    }
+
+    #[test]
+    fn permission_deny_stops_turn() {
+        let permission = build_permission("Bash");
+        let response = permission_request_response(PermissionDecision::Deny, &permission);
+        assert_eq!(
+            response.get("continue").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(response.get("stopReason").and_then(Value::as_str).is_some());
+        assert_eq!(
+            response["hookSpecificOutput"]["decision"]["behavior"].as_str(),
+            Some("deny")
+        );
+        assert_eq!(
+            response["hookSpecificOutput"]["decision"]["interrupt"].as_bool(),
+            Some(true)
+        );
+        assert!(
+            response["hookSpecificOutput"]["decision"]["message"]
+                .as_str()
+                .is_some()
+        );
+
+        let allow = permission_request_response(PermissionDecision::AllowOnce, &permission);
+        assert!(allow.get("continue").is_none());
+    }
+
+    #[test]
+    fn choice_cancel_stops_turn_but_keep_planning_does_not() {
+        let choice = build_choice(exit_plan_questions(&json!({})), ChoiceKind::ExitPlanMode);
+        let cancel = choice_response(&choice, ChoiceDecision::Deny);
+        assert_eq!(cancel.get("continue").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            cancel["hookSpecificOutput"]["permissionDecision"].as_str(),
+            Some("deny")
+        );
+
+        let mut keep = build_choice(exit_plan_questions(&json!({})), ChoiceKind::ExitPlanMode);
+        keep.selected[0] = vec![1];
+        let keep_response = choice_response(
+            &keep,
+            ChoiceDecision::Submit {
+                selected: keep.selected.clone(),
+                other_text: keep.other_text.clone(),
+            },
+        );
+        assert!(keep_response.get("continue").is_none());
+        assert_eq!(
+            keep_response["hookSpecificOutput"]["permissionDecision"].as_str(),
+            Some("deny")
+        );
     }
 
     #[test]
