@@ -4,7 +4,8 @@ use crate::settings::LlmProfile;
 
 use super::provider::{
     OPENAI_PROXY_COMPAT_PROMPT, Provider, TOOL_RESULT_IMAGE_PLACEHOLDER, VISION_PLACEHOLDER_TEXT,
-    images_enabled_for, model_is_reasoning, model_supports_tools,
+    images_enabled_for, model_is_reasoning, model_requires_max_completion_tokens,
+    model_supports_tools,
 };
 
 pub(super) fn anthropic_to_openai_request(
@@ -47,7 +48,19 @@ pub(super) fn anthropic_to_openai_request(
     out.insert("messages".to_string(), Value::Array(messages));
     out.insert("stream".to_string(), Value::Bool(false));
 
-    copy_number(request, &mut out, "max_tokens");
+    let provider = Provider::detect(profile);
+    // OpenAI o-series / gpt-5 models reject `max_tokens` and require
+    // `max_completion_tokens`. Only OpenAI/Azure enforce this; OpenRouter
+    // normalizes `max_tokens` itself and other providers never serve these models.
+    if matches!(provider, Provider::OpenAI | Provider::Azure)
+        && model_requires_max_completion_tokens(&model)
+    {
+        if let Some(value) = request.get("max_tokens").filter(|value| value.is_number()) {
+            out.insert("max_completion_tokens".to_string(), value.clone());
+        }
+    } else {
+        copy_number(request, &mut out, "max_tokens");
+    }
     copy_number(request, &mut out, "temperature");
     copy_number(request, &mut out, "top_p");
     if let Some(stop) = request.get("stop_sequences") {
@@ -63,7 +76,11 @@ pub(super) fn anthropic_to_openai_request(
                 .collect::<Vec<_>>();
             if !converted.is_empty() {
                 out.insert("tools".to_string(), Value::Array(converted));
-                out.insert("parallel_tool_calls".to_string(), Value::Bool(true));
+                let parallel = !request
+                    .pointer("/tool_choice/disable_parallel_tool_use")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                out.insert("parallel_tool_calls".to_string(), Value::Bool(parallel));
             }
         }
 
@@ -79,7 +96,7 @@ pub(super) fn anthropic_to_openai_request(
     // a tier; otherwise default to "medium". Inserted BEFORE extra_body merge so the
     // user's explicit `openai_extra_body` value still wins. Gated on the provider
     // accepting this field — DeepSeek/Qwen/Kimi/GLM reject unknown params.
-    if model_is_reasoning(&model) && Provider::detect(profile).accepts_reasoning_effort() {
+    if model_is_reasoning(&model) && provider.accepts_reasoning_effort() {
         let effort = anthropic_thinking_to_reasoning_effort(request);
         out.insert("reasoning_effort".to_string(), Value::String(effort));
     }
@@ -312,6 +329,21 @@ fn append_tool_result_user_content(
                     .unwrap_or("tool_call");
                 let (text_for_tool, image_followup) =
                     tool_result_content_to_openai(block, vision_enabled);
+                // OpenAI tool messages have no is_error flag; mark failed tool
+                // results with a deterministic textual prefix instead.
+                let is_error = block
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let text_for_tool = if is_error {
+                    if text_for_tool.trim().is_empty() {
+                        "[tool_error] tool execution failed".to_string()
+                    } else {
+                        format!("[tool_error] {text_for_tool}")
+                    }
+                } else {
+                    text_for_tool
+                };
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
@@ -387,6 +419,10 @@ fn assistant_content_to_openai(content: &Value) -> (String, Vec<Value>) {
                     text_parts.push(text.to_string());
                 }
             }
+            // Claude Code echoes back the thinking blocks this proxy emitted for
+            // reasoning upstreams; OpenAI-format APIs must not receive prior
+            // reasoning content, so drop them instead of serializing raw JSON.
+            Some("thinking") | Some("redacted_thinking") => {}
             _ => {
                 let text = content_to_text(block);
                 if !text.trim().is_empty() {
@@ -399,6 +435,15 @@ fn assistant_content_to_openai(content: &Value) -> (String, Vec<Value>) {
 }
 
 fn openai_tool_from_anthropic_tool(tool: &Value) -> Option<Value> {
+    // Anthropic server tools (web_search_*, code_execution_*, ...) carry a
+    // versioned `type` and no input_schema. They cannot run on an OpenAI
+    // upstream, so drop them instead of fabricating a callable function the
+    // client cannot execute.
+    if let Some(tool_type) = tool.get("type").and_then(Value::as_str)
+        && tool_type != "custom"
+    {
+        return None;
+    }
     let name = tool.get("name").and_then(Value::as_str)?;
     Some(json!({
         "type": "function",
@@ -415,6 +460,7 @@ fn openai_tool_choice(tool_choice: &Value) -> Option<Value> {
     match choice_type {
         "auto" => Some(Value::String("auto".to_string())),
         "any" => Some(Value::String("required".to_string())),
+        "none" => Some(Value::String("none".to_string())),
         "tool" => tool_choice.get("name").and_then(Value::as_str).map(|name| {
             json!({
                 "type": "function",
@@ -1130,5 +1176,159 @@ mod tests {
         let request = json!({ "messages": [{ "role": "user", "content": "hi" }] });
         let converted = anthropic_to_openai_request(&request, &profile).unwrap();
         assert!(converted.get("parallel_tool_calls").is_none());
+    }
+
+    #[test]
+    fn assistant_thinking_blocks_are_dropped() {
+        let profile = LlmProfile {
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            model: "deepseek-chat".to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    { "type": "thinking", "thinking": "secret chain of thought" },
+                    { "type": "redacted_thinking", "data": "opaque" },
+                    { "type": "text", "text": "the answer is 4" },
+                    { "type": "tool_use", "id": "call_1", "name": "Read", "input": { "file": "a.rs" } }
+                ]
+            }]
+        });
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        let assistant = &converted["messages"][0];
+        assert_eq!(assistant["content"], "the answer is 4");
+        let serialized = assistant.to_string();
+        assert!(!serialized.contains("thinking"));
+        assert!(!serialized.contains("secret chain of thought"));
+        assert_eq!(assistant["tool_calls"][0]["function"]["name"], "Read");
+    }
+
+    #[test]
+    fn server_tool_definitions_are_filtered_out() {
+        let profile = LlmProfile {
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            model: "deepseek-chat".to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "messages": [{ "role": "user", "content": "hi" }],
+            "tools": [
+                { "type": "web_search_20260209", "name": "web_search" },
+                { "name": "Read", "input_schema": { "type": "object" } },
+                { "type": "custom", "name": "Write", "input_schema": { "type": "object" } }
+            ]
+        });
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        let tools = converted["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["function"]["name"], "Read");
+        assert_eq!(tools[1]["function"]["name"], "Write");
+    }
+
+    #[test]
+    fn tool_choice_none_is_forwarded() {
+        let profile = LlmProfile {
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            model: "deepseek-chat".to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "messages": [{ "role": "user", "content": "hi" }],
+            "tools": [{ "name": "Read", "input_schema": { "type": "object" } }],
+            "tool_choice": { "type": "none" }
+        });
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        assert_eq!(converted["tool_choice"], "none");
+    }
+
+    #[test]
+    fn disable_parallel_tool_use_disables_parallel_tool_calls() {
+        let profile = LlmProfile {
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            model: "deepseek-chat".to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "messages": [{ "role": "user", "content": "hi" }],
+            "tools": [{ "name": "Read", "input_schema": { "type": "object" } }],
+            "tool_choice": { "type": "auto", "disable_parallel_tool_use": true }
+        });
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        assert_eq!(converted["parallel_tool_calls"], false);
+        assert_eq!(converted["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn o_series_on_openai_uses_max_completion_tokens() {
+        let profile = LlmProfile {
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "o3-mini".to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "messages": [{ "role": "user", "content": "hi" }],
+            "max_tokens": 4096
+        });
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        assert_eq!(converted["max_completion_tokens"], 4096);
+        assert!(converted.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn non_reasoning_openai_model_keeps_max_tokens() {
+        let profile = LlmProfile {
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-4o".to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "messages": [{ "role": "user", "content": "hi" }],
+            "max_tokens": 4096
+        });
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        assert_eq!(converted["max_tokens"], 4096);
+        assert!(converted.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn deepseek_keeps_max_tokens_even_for_reasoning_model() {
+        let profile = LlmProfile {
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            model: "deepseek-reasoner".to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "messages": [{ "role": "user", "content": "hi" }],
+            "max_tokens": 4096
+        });
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        assert_eq!(converted["max_tokens"], 4096);
+        assert!(converted.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn tool_result_is_error_adds_error_prefix() {
+        let profile = LlmProfile {
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            model: "deepseek-chat".to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "tool_result", "tool_use_id": "call_1", "content": "file not found", "is_error": true },
+                    { "type": "tool_result", "tool_use_id": "call_2", "content": "ok" },
+                    { "type": "tool_result", "tool_use_id": "call_3", "is_error": true }
+                ]
+            }]
+        });
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        let messages = converted["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"], "[tool_error] file not found");
+        assert_eq!(messages[1]["content"], "ok");
+        assert_eq!(messages[2]["content"], "[tool_error] tool execution failed");
     }
 }

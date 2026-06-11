@@ -65,6 +65,7 @@ pub(super) fn model_is_reasoning(model: &str) -> bool {
         || has_o_prefix("o3")
         || has_o_prefix("o4-")
         || has_o_prefix("o4")
+        || m.contains("gpt-5")
         || m.contains("-thinking")
         || m.contains("reasoning")
         // DeepSeek / Qwen / GLM reasoning models
@@ -74,6 +75,18 @@ pub(super) fn model_is_reasoning(model: &str) -> bool {
         || m.contains("qwen3-thinking")
         || m.contains("glm-zero")
         || m.contains("glm-z1")
+}
+
+/// OpenAI o-series / gpt-5 models reject `max_tokens` with HTTP 400 and require
+/// `max_completion_tokens` instead. Only meaningful for OpenAI/Azure endpoints.
+pub(super) fn model_requires_max_completion_tokens(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    let has_o_prefix = |needle: &str| {
+        m.starts_with(needle)
+            || m.contains(&format!("/{needle}"))
+            || m.contains(&format!("-{needle}"))
+    };
+    has_o_prefix("o1") || has_o_prefix("o3") || has_o_prefix("o4") || m.contains("gpt-5")
 }
 
 /// Blocklist of models that reject `tools`/`tool_choice` in OpenAI-format requests.
@@ -193,12 +206,26 @@ mod tests {
             "glm-z1-air",
             "o3-mini",
             "o1-preview",
+            "gpt-5",
             "deepseek/deepseek-r1", // OpenRouter style
         ] {
             assert!(model_is_reasoning(model), "{model} should be reasoning");
         }
         assert!(!model_is_reasoning("gpt-4o"));
         assert!(!model_is_reasoning("deepseek-chat"));
+    }
+
+    #[test]
+    fn max_completion_tokens_required_for_o_series_and_gpt5() {
+        for model in ["o1-preview", "o3-mini", "o4-mini", "gpt-5", "openai/o3"] {
+            assert!(
+                model_requires_max_completion_tokens(model),
+                "{model} should require max_completion_tokens"
+            );
+        }
+        assert!(!model_requires_max_completion_tokens("gpt-4o"));
+        assert!(!model_requires_max_completion_tokens("deepseek-chat"));
+        assert!(!model_requires_max_completion_tokens("qwq-32b-preview"));
     }
 
     #[test]

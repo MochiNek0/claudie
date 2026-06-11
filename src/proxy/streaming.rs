@@ -14,7 +14,7 @@ use super::request_conv::estimate_request_input_tokens;
 use super::response_conv::{cached_input_tokens, map_finish_reason};
 use super::tool_history::{should_retry_with_tool_transcript, tool_history_as_text_transcript};
 use super::upstream::call_openai_streaming;
-use super::{record_proxy_error, write_upstream_error};
+use super::{anthropic_error_type_for_upstream, record_proxy_error, write_upstream_error};
 
 /// Upper bound for a single SSE line from the upstream. Normal chunks are a
 /// few KB; the generous limit only guards against a broken upstream streaming
@@ -622,11 +622,13 @@ impl<'a, W: Write> StreamTranslator<'a, W> {
             .or_else(|| error.as_str())
             .unwrap_or("upstream streaming error");
         let message = shorten_for_error(message);
-        let err_type = error
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("api_error")
-            .to_string();
+        // Claude Code only understands Anthropic's native error types.
+        let err_type = anthropic_error_type_for_upstream(
+            error
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("api_error"),
+        );
         self.error_message = Some(message.clone());
         self.write_event(
             "error",
@@ -1106,7 +1108,7 @@ mod tests {
             .iter()
             .find(|(name, _)| name == "error")
             .expect("error event emitted");
-        assert_eq!(error.1["error"]["type"], "server_error");
+        assert_eq!(error.1["error"]["type"], "api_error");
         assert_eq!(error.1["error"]["message"], "boom");
         assert_eq!(events.last().unwrap().0, "error");
         assert!(events.iter().any(|(name, _)| name == "content_block_stop"));

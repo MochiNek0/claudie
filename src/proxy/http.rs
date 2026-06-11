@@ -104,30 +104,53 @@ pub(super) fn write_json_response(
     status: u16,
     body: Value,
 ) -> std::io::Result<()> {
-    write_response(stream, status, "application/json", body.to_string())
+    write_json_response_with_headers(stream, status, &[], body)
 }
 
-fn write_response(
+pub(super) fn write_json_response_with_headers(
     stream: &mut TcpStream,
     status: u16,
-    content_type: &str,
-    body: String,
+    extra_headers: &[(&str, &str)],
+    body: Value,
 ) -> std::io::Result<()> {
+    let response = http_response_text(status, "application/json", extra_headers, &body.to_string());
+    stream.write_all(response.as_bytes())
+}
+
+fn http_response_text(
+    status: u16,
+    content_type: &str,
+    extra_headers: &[(&str, &str)],
+    body: &str,
+) -> String {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
+        529 => "Overloaded",
         _ => "OK",
     };
-    let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
+    let mut response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n",
+        body.len()
     );
-    stream.write_all(response.as_bytes())
+    for (name, value) in extra_headers {
+        response.push_str(name);
+        response.push_str(": ");
+        response.push_str(value);
+        response.push_str("\r\n");
+    }
+    response.push_str("Connection: close\r\n\r\n");
+    response.push_str(body);
+    response
 }
 
 pub(super) fn shorten_for_error(text: &str) -> String {
@@ -137,4 +160,25 @@ pub(super) fn shorten_for_error(text: &str) -> String {
         shortened.push_str("...");
     }
     shortened
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_text_includes_extra_headers_and_reason() {
+        let response = http_response_text(429, "application/json", &[("Retry-After", "17")], "{}");
+        assert!(response.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
+        assert!(response.contains("Retry-After: 17\r\n"));
+        assert!(response.ends_with("\r\n\r\n{}"));
+    }
+
+    #[test]
+    fn response_text_without_extra_headers_matches_legacy_shape() {
+        let response = http_response_text(200, "application/json", &[], "{}");
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("Connection: close\r\n\r\n{}"));
+        assert!(!response.contains("Retry-After"));
+    }
 }

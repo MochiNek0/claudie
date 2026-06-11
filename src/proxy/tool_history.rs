@@ -140,6 +140,7 @@ mod tests {
             &UpstreamError {
                 status: Some(400),
                 message: "OpenAI proxy upstream returned HTTP 400: invalid role tool".to_string(),
+                retry_after: None,
             },
             &request
         ));
@@ -179,6 +180,7 @@ mod tests {
             &UpstreamError {
                 status: None,
                 message: "connection reset while sending http 400 tool history".to_string(),
+                retry_after: None,
             },
             &request
         ));
@@ -187,6 +189,7 @@ mod tests {
                 status: Some(500),
                 message: "OpenAI proxy upstream returned HTTP 500: tool messages rejected"
                     .to_string(),
+                retry_after: None,
             },
             &request
         ));
@@ -194,6 +197,7 @@ mod tests {
             &UpstreamError {
                 status: Some(422),
                 message: "OpenAI proxy upstream returned HTTP 422: unknown role".to_string(),
+                retry_after: None,
             },
             &request
         ));
@@ -219,6 +223,7 @@ mod tests {
                 status: Some(400),
                 message: "OpenAI proxy upstream returned HTTP 400: An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'."
                     .to_string(),
+                retry_after: None,
             },
             &request
         ));

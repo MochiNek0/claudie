@@ -90,6 +90,11 @@ pub(super) fn openai_to_anthropic_response(
 /// Map an OpenAI `finish_reason` to the equivalent Anthropic `stop_reason`.
 /// Shared by the non-streaming and streaming paths so the mapping stays in
 /// one place. Unknown values fall back to `end_turn`.
+///
+/// Anthropic's `stop_sequence` reason cannot be mapped: OpenAI reports
+/// `finish_reason: "stop"` identically for natural completion and stop-sequence
+/// hits and never says which sequence matched, so guessing would mislabel
+/// natural endings.
 pub(super) fn map_finish_reason(reason: &str) -> &'static str {
     match reason {
         "tool_calls" | "function_call" => "tool_use",

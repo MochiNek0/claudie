@@ -10,6 +10,9 @@ use super::http::shorten_for_error;
 pub(super) struct UpstreamError {
     pub(super) status: Option<u16>,
     pub(super) message: String,
+    /// Verbatim `retry-after` header from the upstream, forwarded to Claude
+    /// Code on 429/529 so its backoff matches the upstream's schedule.
+    pub(super) retry_after: Option<String>,
 }
 
 impl std::fmt::Display for UpstreamError {
@@ -34,8 +37,10 @@ pub(super) fn call_openai(
         Ok(response) => response.into_string().map_err(|err| UpstreamError {
             status: None,
             message: format!("OpenAI proxy upstream response failed: {err}"),
+            retry_after: None,
         })?,
         Err(ureq::Error::Status(status, response)) => {
+            let retry_after = response.header("retry-after").map(str::to_string);
             let text = response.into_string().unwrap_or_default();
             return Err(UpstreamError {
                 status: Some(status),
@@ -43,12 +48,14 @@ pub(super) fn call_openai(
                     "OpenAI proxy upstream returned HTTP {status}: {}",
                     shorten_for_error(&text)
                 ),
+                retry_after,
             });
         }
         Err(err) => {
             return Err(UpstreamError {
                 status: None,
                 message: format!("OpenAI proxy upstream request failed: {err}"),
+                retry_after: None,
             });
         }
     };
@@ -56,6 +63,7 @@ pub(super) fn call_openai(
     serde_json::from_str(&text).map_err(|err| UpstreamError {
         status: None,
         message: format!("OpenAI proxy upstream returned invalid JSON: {err}"),
+        retry_after: None,
     })
 }
 
@@ -87,6 +95,7 @@ pub(super) fn call_openai_streaming(
     match response {
         Ok(resp) => Ok(BufReader::new(resp.into_reader())),
         Err(ureq::Error::Status(status, resp)) => {
+            let retry_after = resp.header("retry-after").map(str::to_string);
             let text = resp.into_string().unwrap_or_default();
             Err(UpstreamError {
                 status: Some(status),
@@ -94,18 +103,22 @@ pub(super) fn call_openai_streaming(
                     "OpenAI proxy upstream returned HTTP {status}: {}",
                     shorten_for_error(&text)
                 ),
+                retry_after,
             })
         }
         Err(err) => Err(UpstreamError {
             status: None,
             message: format!("OpenAI proxy upstream request failed: {err}"),
+            retry_after: None,
         }),
     }
 }
 
 pub(super) fn proxy_status_for_upstream_error(err: &UpstreamError) -> u16 {
     if upstream_error_is_temporarily_unavailable(err) {
-        return 503;
+        // 529 is Anthropic's native "overloaded" status; Claude Code's SDK
+        // retries it with backoff just like 429/5xx.
+        return 529;
     }
     match err.status {
         Some(400..=499) => err.status.unwrap_or(502),
@@ -134,24 +147,27 @@ mod tests {
         let err = UpstreamError {
             status: Some(400),
             message: "bad request".to_string(),
+            retry_after: None,
         };
         assert_eq!(proxy_status_for_upstream_error(&err), 400);
 
         let err = UpstreamError {
             status: Some(503),
             message: "unavailable".to_string(),
+            retry_after: None,
         };
         assert_eq!(proxy_status_for_upstream_error(&err), 502);
     }
 
     #[test]
-    fn temporary_engine_4xx_maps_to_retryable_503() {
+    fn temporary_engine_4xx_maps_to_retryable_529() {
         let err = UpstreamError {
             status: Some(400),
             message: r#"OpenAI proxy upstream returned HTTP 400: {"error":{"message":"engine is not available temporarily","type":"failed_precondition_error","code":"9"}}"#
                 .to_string(),
+            retry_after: None,
         };
 
-        assert_eq!(proxy_status_for_upstream_error(&err), 503);
+        assert_eq!(proxy_status_for_upstream_error(&err), 529);
     }
 }

@@ -22,7 +22,7 @@ use crate::settings::LlmProfile;
 use crate::util::ConnectionLimiter;
 
 use capability_cache::{cached_tool_history_needs_transcript, save_tool_history_capability};
-use http::{HttpRequest, read_http_request, write_json_response};
+use http::{HttpRequest, read_http_request, write_json_response, write_json_response_with_headers};
 use provider::model_supports_tools;
 use request_conv::anthropic_to_openai_request;
 use response_conv::openai_to_anthropic_response;
@@ -46,11 +46,7 @@ pub(crate) fn start_openai_proxy_server(state: Arc<Mutex<AppState>>) -> Result<(
             match stream {
                 Ok(mut stream) => {
                     let Some(permit) = limiter.try_acquire() else {
-                        let _ = write_json_response(
-                            &mut stream,
-                            503,
-                            json!({ "error": "claudie proxy is busy" }),
-                        );
+                        write_error_response(&mut stream, 503, "claudie proxy is busy");
                         continue;
                     };
                     let state = state.clone();
@@ -74,7 +70,7 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
     let request = match read_http_request(&mut stream) {
         Ok(request) => request,
         Err(err) => {
-            let _ = write_json_response(&mut stream, 400, json!({ "error": err }));
+            write_error_response(&mut stream, 400, &err);
             return;
         }
     };
@@ -85,7 +81,7 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
         if let Some(profile) = profile.as_ref()
             && !proxy_auth_authorized(&request, profile)
         {
-            let _ = write_json_response(&mut stream, 401, proxy_auth_error());
+            write_error_response(&mut stream, 401, PROXY_AUTH_ERROR_MESSAGE);
             return;
         }
         let model = profile
@@ -105,11 +101,7 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
     }
 
     if request.method != "POST" {
-        let _ = write_json_response(
-            &mut stream,
-            405,
-            json!({ "error": "claudie proxy accepts POST /v1/messages" }),
-        );
+        write_error_response(&mut stream, 405, "claudie proxy accepts POST /v1/messages");
         return;
     }
 
@@ -117,7 +109,7 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
         if let Some(profile) = active_openai_profile(&state)
             && !proxy_auth_authorized(&request, &profile)
         {
-            let _ = write_json_response(&mut stream, 401, proxy_auth_error());
+            write_error_response(&mut stream, 401, PROXY_AUTH_ERROR_MESSAGE);
             return;
         }
         handle_count_tokens(&mut stream, &state, &request.body);
@@ -125,33 +117,33 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
     }
 
     if !path.ends_with("/messages") {
-        let _ = write_json_response(
+        write_error_response(
             &mut stream,
             404,
-            json!({ "error": "claudie proxy only implements /v1/messages" }),
+            "claudie proxy only implements /v1/messages",
         );
         return;
     }
 
     let Some(profile) = active_openai_profile(&state) else {
-        let _ = write_json_response(
+        write_error_response(
             &mut stream,
             503,
-            json!({ "error": "No active OpenAI chat/completions profile is configured in claudie." }),
+            "No active OpenAI chat/completions profile is configured in claudie.",
         );
         return;
     };
 
     if !proxy_auth_authorized(&request, &profile) {
-        let _ = write_json_response(&mut stream, 401, proxy_auth_error());
+        write_error_response(&mut stream, 401, PROXY_AUTH_ERROR_MESSAGE);
         return;
     }
 
     if profile.openai_upstream_api_key().is_empty() {
-        let _ = write_json_response(
+        write_error_response(
             &mut stream,
             400,
-            json!({ "error": "The active OpenAI proxy profile is missing an API key or auth token." }),
+            "The active OpenAI proxy profile is missing an API key or auth token.",
         );
         return;
     }
@@ -159,7 +151,7 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
     let anthropic_request: Value = match serde_json::from_slice(&request.body) {
         Ok(value) => value,
         Err(err) => {
-            let _ = write_json_response(&mut stream, 400, json!({ "error": err.to_string() }));
+            write_error_response(&mut stream, 400, &err.to_string());
             return;
         }
     };
@@ -171,7 +163,7 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
     let openai_request = match anthropic_to_openai_request(&anthropic_request, &profile) {
         Ok(value) => value,
         Err(err) => {
-            let _ = write_json_response(&mut stream, 400, json!({ "error": err }));
+            write_error_response(&mut stream, 400, &err);
             return;
         }
     };
@@ -313,8 +305,56 @@ fn constant_time_eq(candidate: &str, expected: &str) -> bool {
         == 0
 }
 
-fn proxy_auth_error() -> Value {
-    json!({ "error": "Unauthorized claudie proxy request." })
+const PROXY_AUTH_ERROR_MESSAGE: &str = "Unauthorized claudie proxy request.";
+
+/// Anthropic error envelope. Claude Code's SDK parses this exact shape for
+/// error display and retry decisions; plain `{"error": "..."}` bodies render
+/// as opaque failures.
+pub(super) fn anthropic_error_body(error_type: &str, message: &str) -> Value {
+    json!({
+        "type": "error",
+        "error": { "type": error_type, "message": message }
+    })
+}
+
+fn anthropic_error_type_for_status(status: u16) -> &'static str {
+    match status {
+        400 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 | 405 => "not_found_error",
+        413 => "request_too_large",
+        429 => "rate_limit_error",
+        503 | 529 => "overloaded_error",
+        _ => "api_error",
+    }
+}
+
+/// Fold arbitrary OpenAI-style `error.type` strings onto the closest of
+/// Anthropic's native error types, which are the only ones Claude Code knows.
+pub(super) fn anthropic_error_type_for_upstream(raw: &str) -> &'static str {
+    let lowered = raw.to_ascii_lowercase();
+    if lowered.contains("rate_limit") || lowered.contains("insufficient_quota") {
+        "rate_limit_error"
+    } else if lowered.contains("overloaded") {
+        "overloaded_error"
+    } else if lowered.contains("authentication") {
+        "authentication_error"
+    } else if lowered.contains("permission") {
+        "permission_error"
+    } else if lowered.contains("invalid_request") {
+        "invalid_request_error"
+    } else {
+        "api_error"
+    }
+}
+
+fn write_error_response(stream: &mut TcpStream, status: u16, message: &str) {
+    let _ = write_json_response(
+        stream,
+        status,
+        anthropic_error_body(anthropic_error_type_for_status(status), message),
+    );
 }
 
 fn handle_count_tokens(stream: &mut TcpStream, state: &Arc<Mutex<AppState>>, body: &[u8]) {
@@ -369,6 +409,48 @@ mod tests {
         let request = request_with_header("Authorization", "Bearer wrong");
         assert!(!proxy_auth_authorized(&request, &profile));
     }
+
+    #[test]
+    fn error_body_uses_anthropic_envelope() {
+        let body = anthropic_error_body(anthropic_error_type_for_status(401), "denied");
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "authentication_error");
+        assert_eq!(body["error"]["message"], "denied");
+    }
+
+    #[test]
+    fn error_types_map_from_status_codes() {
+        assert_eq!(
+            anthropic_error_type_for_status(400),
+            "invalid_request_error"
+        );
+        assert_eq!(anthropic_error_type_for_status(404), "not_found_error");
+        assert_eq!(anthropic_error_type_for_status(405), "not_found_error");
+        assert_eq!(anthropic_error_type_for_status(429), "rate_limit_error");
+        assert_eq!(anthropic_error_type_for_status(502), "api_error");
+        assert_eq!(anthropic_error_type_for_status(503), "overloaded_error");
+        assert_eq!(anthropic_error_type_for_status(529), "overloaded_error");
+    }
+
+    #[test]
+    fn upstream_error_types_fold_onto_native_set() {
+        assert_eq!(
+            anthropic_error_type_for_upstream("insufficient_quota"),
+            "rate_limit_error"
+        );
+        assert_eq!(
+            anthropic_error_type_for_upstream("rate_limit_exceeded"),
+            "rate_limit_error"
+        );
+        assert_eq!(
+            anthropic_error_type_for_upstream("invalid_request_error"),
+            "invalid_request_error"
+        );
+        assert_eq!(
+            anthropic_error_type_for_upstream("server_error"),
+            "api_error"
+        );
+    }
 }
 
 pub(super) fn record_proxy_error(state: &Arc<Mutex<AppState>>, err: String) {
@@ -386,9 +468,13 @@ fn write_upstream_error(
     message: String,
 ) {
     record_proxy_error(state, message.clone());
-    let _ = write_json_response(
-        stream,
-        proxy_status_for_upstream_error(err),
-        json!({ "error": message }),
-    );
+    let status = proxy_status_for_upstream_error(err);
+    let body = anthropic_error_body(anthropic_error_type_for_status(status), &message);
+    let mut headers: Vec<(&str, &str)> = Vec::new();
+    if let Some(retry_after) = err.retry_after.as_deref()
+        && matches!(status, 429 | 529)
+    {
+        headers.push(("Retry-After", retry_after));
+    }
+    let _ = write_json_response_with_headers(stream, status, &headers, body);
 }
