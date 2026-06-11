@@ -56,6 +56,9 @@ struct GifClip {
     width: u32,
     height: u32,
     visible_bounds: GifVisibleBounds,
+    // Frame currently selected on the GDI+ image; selecting a frame decodes
+    // it, so repeated draws of the same frame skip the call.
+    active_frame: Option<usize>,
 }
 
 unsafe impl Send for GifClip {}
@@ -119,6 +122,7 @@ impl GifClip {
             width,
             height,
             visible_bounds,
+            active_frame: None,
         })
     }
 
@@ -339,6 +343,27 @@ impl GifAnimation {
         true
     }
 
+    fn elapsed_ms(&self) -> u32 {
+        Instant::now()
+            .duration_since(self.clip_started_at)
+            .as_millis()
+            .min(u32::MAX as u128) as u32
+    }
+
+    /// Current (mood, frame index) without drawing; switches the active clip
+    /// like `draw` so the answer matches what the next paint will show.
+    pub(crate) fn frame_signature(&mut self, mood: PetMood) -> (PetMood, usize) {
+        if mood != self.current {
+            self.request_mood(mood);
+        }
+        let frame = self
+            .clips
+            .get(&self.current)
+            .map(|clip| clip.frame_at(self.elapsed_ms()))
+            .unwrap_or(0);
+        (self.current, frame)
+    }
+
     pub(crate) unsafe fn draw(
         &mut self,
         hdc: HDC,
@@ -352,19 +377,19 @@ impl GifAnimation {
             self.request_mood(mood);
         }
         let mood = self.current;
-        let Some(clip) = self.clips.get(&mood) else {
+        let elapsed_ms = self.elapsed_ms();
+        let Some(clip) = self.clips.get_mut(&mood) else {
             return false;
         };
 
-        let elapsed_ms = Instant::now()
-            .duration_since(self.clip_started_at)
-            .as_millis()
-            .min(u32::MAX as u128) as u32;
         let frame_idx = clip.frame_at(elapsed_ms);
-        let select_status =
-            GdipImageSelectActiveFrame(clip.image, &FrameDimensionTime, frame_idx as u32);
-        if select_status != 0 {
-            return false;
+        if clip.active_frame != Some(frame_idx) {
+            let select_status =
+                GdipImageSelectActiveFrame(clip.image, &FrameDimensionTime, frame_idx as u32);
+            if select_status != 0 {
+                return false;
+            }
+            clip.active_frame = Some(frame_idx);
         }
 
         let (draw_w, draw_h) = fit_into(clip.width, clip.height, max_w, max_h);
@@ -428,6 +453,9 @@ pub(crate) struct AnimationStore {
     token: usize,
     animation: GifAnimation,
     source_summary: String,
+    // Bumped on reload so frame signatures from the old clip set never
+    // compare equal to signatures from the new one.
+    generation: u64,
 }
 
 unsafe impl Send for AnimationStore {}
@@ -461,6 +489,7 @@ impl AnimationStore {
             token,
             animation,
             source_summary,
+            generation: 0,
         })
     }
 
@@ -469,11 +498,17 @@ impl AnimationStore {
         let (animation, source_summary) = GifAnimation::load(&settings)?;
         self.animation = animation;
         self.source_summary = source_summary.clone();
+        self.generation += 1;
         Ok(source_summary)
     }
 
     pub(crate) fn request_mood(&mut self, mood: PetMood) -> bool {
         self.animation.request_mood(mood)
+    }
+
+    pub(crate) fn frame_signature(&mut self, mood: PetMood) -> (PetMood, usize, u64) {
+        let (mood, frame) = self.animation.frame_signature(mood);
+        (mood, frame, self.generation)
     }
 
     pub(crate) unsafe fn draw(

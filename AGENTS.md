@@ -41,10 +41,10 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 ## Directory Map
 
 - `src/main.rs`: CLI flags, shared `AppState`, hook/proxy startup, official usage polling, automatic hook ensure/cleanup, and Windows UI entrypoint.
-- `src/config.rs`: ports, window dimensions, menu IDs, overlay geometry, scale limits, permission timeout, and UI constants.
+- `src/config.rs`: ports, window dimensions, menu IDs, scale limits, and UI constants.
 - `src/globals.rs`: process-wide `OnceLock` handles for shared app state and pet renderer.
 - `src/notifier.rs`: Win32 message-box notification wrapper.
-- `src/util.rs`: argument parsing, path helpers, text shortening, and UTF-16 conversion.
+- `src/util.rs`: argument parsing, text shortening, markdown block parsing, and UTF-16 conversion.
 - `src/time_util.rs`: RFC3339/epoch timestamp parsing, duration formatting, and percentage value extraction.
 - `src/official_usage.rs`: Claude Code OAuth usage API polling thread and credential management.
 - `src/usage_display.rs`: official usage percentage bars, reset countdown, subscription plan formatting, and UI display adapter.
@@ -83,11 +83,11 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `src/ui/`: raw Win32 windowing, Slint dialog views, GIF rendering, window icons, and theme tokens.
 - `src/ui/mod.rs`: UI module structure and type re-exports.
 - `src/ui/gif_animation.rs`: GDI+ GIF loading, frame delay sampling, mood transitions, and drawing.
-- `src/ui/theme.rs`: shared colors, radii, and typography tokens for settings and overlays.
+- `src/ui/theme.rs`: shared color and radius tokens for the GDI-drawn HUD windows.
 - `src/ui/slint_views.rs`: Slint declarations for Settings and Prompt windows.
 - `src/ui/window_icon.rs`: Slint/Winit/Win32 icon bridge for auxiliary windows.
 - `src/ui/window/mod.rs`: main transparent pet window, hotkeys, context menu, dragging/clicking, profile menu, official usage display, position persistence, system tray icon (`Shell_NotifyIconW`), multi-session switcher auxiliary window, and fishing minigame click trigger.
-- `src/ui/window/render.rs`: render snapshot, HUD, pet drawing, permission overlay, choice card drawing, session switcher row rendering, and fishing HUD overlay.
+- `src/ui/window/render.rs`: render snapshot, HUD, pet drawing, session switcher row rendering, and fishing HUD overlay.
 - `src/ui/window_position.rs`: monitor-aware window centering and bounds helpers used by auxiliary Slint windows (permission/choice popup, settings).
 - `src/ui/prompt_popup.rs`: Slint permission/choice popup snapshots and callbacks.
 - `src/ui/settings_panel/`: Settings window Slint bridge, tab controllers, and live timers.

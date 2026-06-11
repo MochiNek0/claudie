@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
@@ -28,6 +28,11 @@ thread_local! {
     static PROMPT: RefCell<Option<PromptWindow>> = const { RefCell::new(None) };
     static PROMPT_OPTIONS: RefCell<Vec<OptionTarget>> = const { RefCell::new(Vec::new()) };
     static PROMPT_SNAPSHOT: RefCell<Option<PromptSnapshot>> = const { RefCell::new(None) };
+    // (is_choice, id) of the interaction last handled by the popup. The
+    // per-tick sync skips the (markdown-parsing) snapshot rebuild while this
+    // key is unchanged; UI callbacks that mutate the current interaction go
+    // through the forced path instead.
+    static PROMPT_KEY: Cell<Option<(bool, u64)>> = const { Cell::new(None) };
 }
 
 #[derive(Clone, Copy)]
@@ -39,10 +44,21 @@ struct OptionTarget {
 }
 
 pub(crate) fn sync_prompt_popup() {
-    sync_prompt_popup_for_parent(std::ptr::null_mut());
+    sync_prompt_popup_impl(std::ptr::null_mut(), true);
 }
 
 pub(crate) fn sync_prompt_popup_for_parent(parent: HWND) {
+    sync_prompt_popup_impl(parent, false);
+}
+
+fn sync_prompt_popup_impl(parent: HWND, force: bool) {
+    let key = pending_prompt_key();
+    if !force {
+        let window_present = PROMPT.with(|slot| slot.borrow().is_some());
+        if PROMPT_KEY.with(|last| last.get()) == key && window_present == key.is_some() {
+            return;
+        }
+    }
     let snapshot = prompt_snapshot();
     PROMPT.with(|slot| {
         if snapshot.is_none() {
@@ -87,6 +103,18 @@ pub(crate) fn sync_prompt_popup_for_parent(parent: HWND) {
             }
         }
     });
+    PROMPT_KEY.with(|last| last.set(key));
+}
+
+fn pending_prompt_key() -> Option<(bool, u64)> {
+    let state = APP_STATE.get()?;
+    let state = state.lock().expect("state poisoned");
+    if let Some(choice) = state.current_pending_choice() {
+        return Some((true, choice.id));
+    }
+    state
+        .current_pending_permission()
+        .map(|permission| (false, permission.id))
 }
 
 pub(crate) fn close_prompt_popup() {
@@ -97,6 +125,7 @@ pub(crate) fn close_prompt_popup() {
     });
     PROMPT_OPTIONS.with(|options| options.borrow_mut().clear());
     PROMPT_SNAPSHOT.with(|last| last.borrow_mut().take());
+    PROMPT_KEY.with(|last| last.set(None));
 }
 
 fn wire_prompt_callbacks(window: &PromptWindow) {

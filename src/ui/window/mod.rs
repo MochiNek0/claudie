@@ -1,5 +1,6 @@
 mod render;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
@@ -7,10 +8,9 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use render::{
-    RenderState, choice_option_at_point, fill_rect, render_fishing_hud_window,
-    render_permission_overlay, render_pet_window, render_pomodoro_hud_window,
-    render_session_switcher_window, scroll_choice_lines, scroll_permission_detail_lines,
-    session_switcher_session_at_point, snapshot_state,
+    RenderState, fill_rect, render_fishing_hud_window, render_pet_window,
+    render_pomodoro_hud_window, render_session_switcher_window, session_switcher_session_at_point,
+    snapshot_state,
 };
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -36,26 +36,24 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GWLP_USERDATA, GetClientRect,
     GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, IDC_ARROW,
-    IDC_HAND, LWA_COLORKEY, LoadCursorW, MF_CHECKED, MF_OWNERDRAW, MF_POPUP, MF_SEPARATOR,
-    MF_STRING, PostMessageW, RegisterClassW, RegisterWindowMessageW, SM_CXSCREEN, SM_CXSMICON,
-    SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYSMICON, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN, TrackPopupMenu, WM_APP,
-    WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    IDC_HAND, IsWindowVisible, LWA_COLORKEY, LoadCursorW, MF_CHECKED, MF_OWNERDRAW, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW, RegisterWindowMessageW, SM_CXSCREEN,
+    SM_CXSMICON, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYSMICON, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN,
+    TrackPopupMenu, WM_APP, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND,
+    WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL,
+    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
-use crate::app::pomodoro::PomodoroStatus;
-use crate::app::{AppState, PermissionDecision, PetMood};
+use crate::app::fishing::FishingPhase;
+use crate::app::pomodoro::{PomodoroMode, PomodoroStatus};
+use crate::app::{AppState, PermissionDecision, PetMood, SessionSwitcherItem};
 use crate::config::*;
 use crate::globals::{APP_STATE, PET_RENDERER};
-use crate::hooks::{
-    decide_current_permission, deny_current_choice, submit_current_choice,
-    toggle_current_choice_option,
-};
+use crate::hooks::decide_current_permission;
 use crate::settings::{
     LlmProfile, UserSettings, WindowPosition, apply_llm_profile_to_claude,
     ensure_claude_onboarding_complete, load_user_settings, save_llm_profile_db, save_user_settings,
@@ -104,10 +102,23 @@ struct MenuProfileDrawSegment {
 }
 
 struct AuxWindows {
-    permission_overlay: HWND,
     pomodoro_hud: HWND,
     fishing_hud: HWND,
     session_switcher: HWND,
+}
+
+/// Cheap per-window content keys; a window is only invalidated on a timer
+/// tick when its key differs from the previous tick.
+#[derive(Default, PartialEq)]
+struct RepaintKeys {
+    pet: Option<(PetMood, usize, u64, u32)>,
+    pomodoro: Option<(PomodoroMode, PomodoroStatus, u64)>,
+    fishing: Option<(FishingPhase, u32, u32, u32, u32)>,
+    session: Option<Vec<SessionSwitcherItem>>,
+}
+
+thread_local! {
+    static LAST_REPAINT_KEYS: RefCell<RepaintKeys> = RefCell::new(RepaintKeys::default());
 }
 
 struct WindowLayout {
@@ -133,7 +144,6 @@ struct PetVisibleRect {
 
 pub(crate) unsafe fn run_window(port: u16) {
     let class_name = wide("ClaudieWindow");
-    let overlay_class_name = wide("ClaudiePermissionOverlay");
     let pomodoro_class_name = wide("ClaudiePomodoroHud");
     let fishing_class_name = wide("ClaudieFishingHud");
     let session_class_name = wide("ClaudieSessionSwitcher");
@@ -152,12 +162,6 @@ pub(crate) unsafe fn run_window(port: u16) {
         lpszClassName: class_name.as_ptr(),
     };
     RegisterClassW(&wc);
-    let overlay_wc = WNDCLASSW {
-        lpfnWndProc: Some(permission_overlay_proc),
-        lpszClassName: overlay_class_name.as_ptr(),
-        ..wc
-    };
-    RegisterClassW(&overlay_wc);
     let pomodoro_wc = WNDCLASSW {
         lpfnWndProc: Some(pomodoro_hud_proc),
         lpszClassName: pomodoro_class_name.as_ptr(),
@@ -202,24 +206,6 @@ pub(crate) unsafe fn run_window(port: u16) {
     }
     remember_pet_nominal_origin_from_window(hwnd, initial_visible_rect);
 
-    let overlay_hwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
-        overlay_class_name.as_ptr(),
-        title.as_ptr(),
-        WS_POPUP,
-        0,
-        0,
-        PERMISSION_OVERLAY_WIDTH,
-        PERMISSION_OVERLAY_HEIGHT,
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        hinstance,
-        std::ptr::null_mut(),
-    );
-    if !overlay_hwnd.is_null() {
-        SetLayeredWindowAttributes(overlay_hwnd, TRANSPARENT_KEY, 255, LWA_COLORKEY);
-    }
-
     let pomodoro_hwnd = create_aux_window(
         pomodoro_class_name.as_ptr(),
         title.as_ptr(),
@@ -249,7 +235,6 @@ pub(crate) unsafe fn run_window(port: u16) {
     store_aux_windows(
         hwnd,
         AuxWindows {
-            permission_overlay: overlay_hwnd,
             pomodoro_hud: pomodoro_hwnd,
             fishing_hud: fishing_hwnd,
             session_switcher: session_hwnd,
@@ -397,6 +382,9 @@ unsafe extern "system" fn window_proc(
         WM_TIMER => {
             let mut timer_ms = IDLE_TIMER_MS;
             let mut target_layout = None;
+            let mut repaint = RepaintKeys::default();
+            let mut pet_mood = PetMood::Idle;
+            let mut pet_scale = 100_u32;
             if let Some(state) = APP_STATE.get() {
                 let mut state = state.lock().expect("state poisoned");
                 let user_idle = user_idle_snapshot();
@@ -408,16 +396,33 @@ unsafe extern "system" fn window_proc(
                 );
                 timer_ms = desired_timer_interval(&state);
                 target_layout = Some(window_layout_for_state(&state));
+                pet_mood = state.mood;
+                pet_scale = state.settings.pet_scale_percent();
+                repaint.pomodoro = (state.pomodoro.status != PomodoroStatus::Stopped).then(|| {
+                    (
+                        state.pomodoro.mode,
+                        state.pomodoro.status,
+                        state.pomodoro.remaining(&state.settings.pomodoro).as_secs(),
+                    )
+                });
+                repaint.fishing = state.fishing.is_active().then(|| {
+                    (
+                        state.fishing.phase,
+                        state.fishing.tension.to_bits(),
+                        state.fishing.progress.to_bits(),
+                        state.fishing.target_center.to_bits(),
+                        state.fishing.target_half_width.to_bits(),
+                    )
+                });
+                repaint.session =
+                    session_switcher_visible(&state).then(|| state.session_switcher_items());
             }
+            repaint.pet = Some(pet_frame_key(pet_mood, pet_scale));
             update_window_timer(hwnd, timer_ms);
             let menu_open = context_menu_open();
             if !menu_open {
                 if let Some(layout) = target_layout {
                     sync_window_layout(hwnd, &layout);
-                }
-                let overlay = overlay_hwnd(hwnd);
-                if !overlay.is_null() {
-                    ShowWindow(overlay, SW_HIDE);
                 }
                 sync_prompt_popup_for_parent(hwnd);
                 if should_refresh_topmost() {
@@ -425,8 +430,7 @@ unsafe extern "system" fn window_proc(
                     ensure_aux_topmost(hwnd);
                 }
             }
-            InvalidateRect(hwnd, std::ptr::null(), 0);
-            invalidate_aux_windows(hwnd);
+            invalidate_changed_windows(hwnd, repaint);
             0
         }
         WM_HOTKEY => {
@@ -759,13 +763,6 @@ fn flush_app_stats_now() {
     }
 }
 
-fn has_pending_overlay() -> bool {
-    APP_STATE.get().is_some_and(|state| {
-        let state = state.lock().expect("state poisoned");
-        !state.pending_permissions.is_empty() || !state.pending_choices.is_empty()
-    })
-}
-
 fn desired_timer_interval(state: &AppState) -> u32 {
     let pending = !state.pending_permissions.is_empty() || !state.pending_choices.is_empty();
     if pending
@@ -808,9 +805,6 @@ unsafe fn sync_window_layout(hwnd: HWND, layout: &WindowLayout) {
     let Some(aux) = aux_windows(hwnd) else {
         return;
     };
-    if !aux.permission_overlay.is_null() {
-        ShowWindow(aux.permission_overlay, SW_HIDE);
-    }
     let mut pet_rect = RECT::default();
     if GetWindowRect(hwnd, &mut pet_rect) == 0 {
         return;
@@ -897,19 +891,11 @@ unsafe fn sync_pomodoro_window(pet_rect: &RECT, hwnd: HWND, layout: &WindowLayou
         return;
     }
     if !layout.pomodoro_visible {
-        ShowWindow(hwnd, SW_HIDE);
+        hide_aux_window(hwnd);
         return;
     }
     let (x, y) = pomodoro_window_position(pet_rect, layout.pomodoro_width, layout.pomodoro_height);
-    SetWindowPos(
-        hwnd,
-        HWND_TOPMOST,
-        x,
-        y,
-        layout.pomodoro_width,
-        layout.pomodoro_height,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW,
-    );
+    show_aux_window_at(hwnd, x, y, layout.pomodoro_width, layout.pomodoro_height);
 }
 
 unsafe fn sync_fishing_window(pet_rect: &RECT, hwnd: HWND, layout: &WindowLayout) {
@@ -917,19 +903,11 @@ unsafe fn sync_fishing_window(pet_rect: &RECT, hwnd: HWND, layout: &WindowLayout
         return;
     }
     if !layout.fishing_visible {
-        ShowWindow(hwnd, SW_HIDE);
+        hide_aux_window(hwnd);
         return;
     }
     let (x, y) = fishing_window_position(pet_rect, layout.fishing_width, layout.fishing_height);
-    SetWindowPos(
-        hwnd,
-        HWND_TOPMOST,
-        x,
-        y,
-        layout.fishing_width,
-        layout.fishing_height,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW,
-    );
+    show_aux_window_at(hwnd, x, y, layout.fishing_width, layout.fishing_height);
 }
 
 unsafe fn sync_session_window(pet_rect: &RECT, hwnd: HWND, layout: &WindowLayout) {
@@ -937,17 +915,39 @@ unsafe fn sync_session_window(pet_rect: &RECT, hwnd: HWND, layout: &WindowLayout
         return;
     }
     if !layout.session_visible {
-        ShowWindow(hwnd, SW_HIDE);
+        hide_aux_window(hwnd);
         return;
     }
     let (x, y) = session_window_position(pet_rect, layout.session_width, layout.session_height);
+    show_aux_window_at(hwnd, x, y, layout.session_width, layout.session_height);
+}
+
+unsafe fn hide_aux_window(hwnd: HWND) {
+    if IsWindowVisible(hwnd) != 0 {
+        ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
+/// Move/show an aux window, skipping the SetWindowPos syscall when it is
+/// already visible at the requested rect (the per-tick steady state).
+unsafe fn show_aux_window_at(hwnd: HWND, x: i32, y: i32, width: i32, height: i32) {
+    let mut rect = RECT::default();
+    if IsWindowVisible(hwnd) != 0
+        && GetWindowRect(hwnd, &mut rect) != 0
+        && rect.left == x
+        && rect.top == y
+        && rect.right - rect.left == width
+        && rect.bottom - rect.top == height
+    {
+        return;
+    }
     SetWindowPos(
         hwnd,
         HWND_TOPMOST,
         x,
         y,
-        layout.session_width,
-        layout.session_height,
+        width,
+        height,
         SWP_NOACTIVATE | SWP_SHOWWINDOW,
     );
 }
@@ -1144,149 +1144,6 @@ unsafe extern "system" fn session_switcher_proc(
     }
 }
 
-unsafe extern "system" fn permission_overlay_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    match msg {
-        WM_PAINT => {
-            paint_permission_overlay(hwnd);
-            0
-        }
-        WM_ERASEBKGND => 1,
-        WM_LBUTTONDOWN => {
-            let x = loword(lparam as u32) as i32;
-            let y = hiword(lparam as u32) as i32;
-            if let Some((question_index, option_index)) = choice_option_at(x, y) {
-                toggle_current_choice_option(question_index, option_index);
-                InvalidateRect(hwnd, std::ptr::null(), 0);
-                return 0;
-            }
-            if has_pending_choice() {
-                if point_in_tuple(x, y, CHOICE_SUBMIT_BUTTON) {
-                    submit_current_choice();
-                    return 0;
-                }
-                if point_in_tuple(x, y, CHOICE_DENY_BUTTON) {
-                    deny_current_choice();
-                    return 0;
-                }
-                return 0;
-            }
-            if point_in_tuple(x, y, ALLOW_BUTTON) {
-                decide_current_permission(PermissionDecision::AllowOnce);
-                return 0;
-            }
-            if point_in_tuple(x, y, ALWAYS_BUTTON) {
-                decide_current_permission(PermissionDecision::AllowAlways);
-                return 0;
-            }
-            if point_in_tuple(x, y, DENY_BUTTON) {
-                decide_current_permission(PermissionDecision::Deny);
-                return 0;
-            }
-            0
-        }
-        WM_MOUSEWHEEL => {
-            let wheel_delta = hiword(wparam as u32) as i32;
-            let line_delta = if wheel_delta > 0 { -3 } else { 3 };
-            if choice_content_can_scroll_at(hwnd, lparam) {
-                scroll_choice_lines(line_delta);
-                InvalidateRect(hwnd, std::ptr::null(), 0);
-                return 0;
-            }
-            if permission_detail_can_scroll_at(hwnd, lparam) {
-                scroll_permission_detail_lines(line_delta);
-                InvalidateRect(hwnd, std::ptr::null(), 0);
-                return 0;
-            }
-            DefWindowProcW(hwnd, msg, wparam, lparam)
-        }
-        WM_SETCURSOR => {
-            if cursor_over_permission_button(hwnd) {
-                SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND));
-                return 1;
-            }
-            DefWindowProcW(hwnd, msg, wparam, lparam)
-        }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
-}
-
-unsafe fn permission_detail_can_scroll_at(hwnd: HWND, lparam: LPARAM) -> bool {
-    if !has_pending_permission() || has_pending_choice() {
-        return false;
-    }
-
-    let mut point = POINT {
-        x: loword(lparam as u32) as i32,
-        y: hiword(lparam as u32) as i32,
-    };
-    if ScreenToClient(hwnd, &mut point) == 0 {
-        return false;
-    }
-
-    point_in_tuple(point.x, point.y, permission_detail_panel_rect())
-}
-
-unsafe fn choice_content_can_scroll_at(hwnd: HWND, lparam: LPARAM) -> bool {
-    if !has_pending_choice() {
-        return false;
-    }
-
-    let mut point = POINT {
-        x: loword(lparam as u32) as i32,
-        y: hiword(lparam as u32) as i32,
-    };
-    if ScreenToClient(hwnd, &mut point) == 0 {
-        return false;
-    }
-
-    point_in_tuple(point.x, point.y, choice_content_rect())
-}
-
-fn permission_detail_panel_rect() -> (i32, i32, i32, i32) {
-    let x = PERMISSION_BUBBLE_X + 24;
-    let y = PERMISSION_BUBBLE_Y + 76;
-    let w = PERMISSION_BUBBLE_W - 48;
-    (x, y, w, PERMISSION_DETAIL_PANEL_H)
-}
-
-fn choice_content_rect() -> (i32, i32, i32, i32) {
-    let y = CHOICE_CARD_Y + 50;
-    (
-        CHOICE_CARD_X + 24,
-        y,
-        CHOICE_CARD_W - 48,
-        CHOICE_SUBMIT_BUTTON.1 - 12 - y,
-    )
-}
-
-unsafe fn cursor_over_permission_button(hwnd: HWND) -> bool {
-    if !has_pending_overlay() {
-        return false;
-    }
-
-    let mut point = POINT { x: 0, y: 0 };
-    if GetCursorPos(&mut point) == 0 || ScreenToClient(hwnd, &mut point) == 0 {
-        return false;
-    }
-    choice_option_at(point.x, point.y).is_some()
-        || point_in_tuple(point.x, point.y, CHOICE_SUBMIT_BUTTON)
-        || point_in_tuple(point.x, point.y, CHOICE_DENY_BUTTON)
-        || point_in_tuple(point.x, point.y, ALLOW_BUTTON)
-        || point_in_tuple(point.x, point.y, ALWAYS_BUTTON)
-        || point_in_tuple(point.x, point.y, DENY_BUTTON)
-}
-
-unsafe fn overlay_hwnd(hwnd: HWND) -> HWND {
-    aux_windows(hwnd)
-        .map(|windows| windows.permission_overlay)
-        .unwrap_or(std::ptr::null_mut())
-}
-
 unsafe fn parent_pet_hwnd(hwnd: HWND) -> HWND {
     GetWindowLongPtrW(hwnd, GWLP_USERDATA) as HWND
 }
@@ -1315,7 +1172,6 @@ unsafe fn destroy_aux_windows(hwnd: HWND) {
         return;
     };
     for aux_hwnd in [
-        windows.permission_overlay,
         windows.pomodoro_hud,
         windows.fishing_hud,
         windows.session_switcher,
@@ -1373,6 +1229,48 @@ unsafe fn invalidate_pet_and_aux(hwnd: HWND) {
     }
     InvalidateRect(hwnd, std::ptr::null(), 0);
     invalidate_aux_windows(hwnd);
+}
+
+fn pet_frame_key(mood: PetMood, scale_percent: u32) -> (PetMood, usize, u64, u32) {
+    let (mood, frame, generation) = PET_RENDERER
+        .get()
+        .map(|store| {
+            store
+                .lock()
+                .expect("pet renderer poisoned")
+                .frame_signature(mood)
+        })
+        .unwrap_or((mood, 0, 0));
+    (mood, frame, generation, scale_percent)
+}
+
+unsafe fn invalidate_changed_windows(hwnd: HWND, keys: RepaintKeys) {
+    let (pet, pomodoro, fishing, session) = LAST_REPAINT_KEYS.with(|last| {
+        let mut last = last.borrow_mut();
+        let changed = (
+            last.pet != keys.pet,
+            last.pomodoro != keys.pomodoro,
+            last.fishing != keys.fishing,
+            last.session != keys.session,
+        );
+        *last = keys;
+        changed
+    });
+    if pet {
+        InvalidateRect(hwnd, std::ptr::null(), 0);
+    }
+    let Some(aux) = aux_windows(hwnd) else {
+        return;
+    };
+    for (changed, aux_hwnd) in [
+        (pomodoro, aux.pomodoro_hud),
+        (fishing, aux.fishing_hud),
+        (session, aux.session_switcher),
+    ] {
+        if changed && !aux_hwnd.is_null() {
+            InvalidateRect(aux_hwnd, std::ptr::null(), 0);
+        }
+    }
 }
 
 unsafe fn show_context_menu(hwnd: HWND) {
@@ -1775,34 +1673,6 @@ fn with_app_state(action: impl FnOnce(&mut AppState)) {
     }
 }
 
-fn has_pending_choice() -> bool {
-    APP_STATE.get().is_some_and(|state| {
-        state
-            .lock()
-            .expect("state poisoned")
-            .current_pending_choice()
-            .is_some()
-    })
-}
-
-fn has_pending_permission() -> bool {
-    APP_STATE.get().is_some_and(|state| {
-        state
-            .lock()
-            .expect("state poisoned")
-            .current_pending_permission()
-            .is_some()
-    })
-}
-
-fn choice_option_at(px: i32, py: i32) -> Option<(usize, usize)> {
-    APP_STATE.get().and_then(|state| {
-        let state = state.lock().expect("state poisoned");
-        let choice = state.current_pending_choice()?;
-        choice_option_at_point(choice, px, py)
-    })
-}
-
 fn session_switcher_session_at(px: i32, py: i32, width: i32, height: i32) -> Option<String> {
     APP_STATE.get().and_then(|state| {
         let state = state.lock().expect("state poisoned");
@@ -1929,50 +1799,6 @@ unsafe fn paint_state_window(
     EndPaint(hwnd, &ps);
 }
 
-unsafe fn paint_permission_overlay(hwnd: HWND) {
-    let mut ps = PAINTSTRUCT::default();
-    let hdc = BeginPaint(hwnd, &mut ps);
-    let mut rect = RECT::default();
-    GetClientRect(hwnd, &mut rect);
-    let width = rect.right - rect.left;
-    let height = rect.bottom - rect.top;
-
-    let state = APP_STATE
-        .get()
-        .map(|state| snapshot_state(&state.lock().expect("state poisoned")))
-        .unwrap_or_else(RenderState::default);
-
-    let frame_dc = CreateCompatibleDC(hdc);
-    let frame_bitmap = CreateCompatibleBitmap(hdc, width, height);
-    if !frame_dc.is_null() && !frame_bitmap.is_null() {
-        let old_frame_bitmap = SelectObject(frame_dc, frame_bitmap);
-        fill_rect(frame_dc, &rect, TRANSPARENT_KEY);
-
-        let base_rect = RECT {
-            left: 0,
-            top: 0,
-            right: PERMISSION_OVERLAY_WIDTH,
-            bottom: PERMISSION_OVERLAY_HEIGHT,
-        };
-        render_permission_overlay(frame_dc, &base_rect, &state);
-        BitBlt(hdc, 0, 0, width, height, frame_dc, 0, 0, SRCCOPY);
-
-        SelectObject(frame_dc, old_frame_bitmap);
-        DeleteObject(frame_bitmap);
-        DeleteDC(frame_dc);
-    } else {
-        render_permission_overlay(hdc, &rect, &state);
-        if !frame_bitmap.is_null() {
-            DeleteObject(frame_bitmap);
-        }
-        if !frame_dc.is_null() {
-            DeleteDC(frame_dc);
-        }
-    }
-
-    EndPaint(hwnd, &ps);
-}
-
 fn loword(value: u32) -> i16 {
     (value & 0xffff) as i16
 }
@@ -1983,13 +1809,4 @@ fn hiword(value: u32) -> i16 {
 
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
-}
-
-fn point_in(px: i32, py: i32, x: i32, y: i32, w: i32, h: i32) -> bool {
-    px >= x && px <= x + w && py >= y && py <= y + h
-}
-
-fn point_in_tuple(px: i32, py: i32, rect: (i32, i32, i32, i32)) -> bool {
-    let (x, y, w, h) = rect;
-    point_in(px, py, x, y, w, h)
 }

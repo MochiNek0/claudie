@@ -317,7 +317,7 @@ pub(crate) struct ClaudeSession {
     waiting_interaction_sequence: Option<u64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionSwitcherItem {
     pub(crate) id: String,
     pub(crate) display_name: String,
