@@ -11,6 +11,19 @@ pub(crate) struct UsageLine {
     pub(crate) reset: String,
 }
 
+impl UsageLine {
+    pub(crate) fn reset_caption(&self) -> String {
+        let reset = self.reset.trim();
+        if reset.is_empty() {
+            String::new()
+        } else if reset == "due" {
+            "reset due".to_string()
+        } else {
+            format!("resets {reset}")
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ProviderUsageDisplay {
     pub(crate) title: String,
@@ -36,15 +49,19 @@ pub(crate) fn provider_usage_display(
     let has_usage = five_hour.percent.is_some() || seven_day.percent.is_some();
 
     let summary = if has_usage {
-        let mut summary = reset_pair_text(&five_hour, &seven_day);
+        let mut parts: Vec<String> = Vec::new();
         let plan = quota.official_plan.trim();
         if !plan.is_empty() {
-            summary.push_str(&format!(" · {plan}"));
+            parts.push(format!("{plan} plan"));
         }
         if let Some(updated) = quota.official_usage_updated_at_unix_ms.map(elapsed_text) {
-            summary.push_str(&format!(" · updated {updated}"));
+            parts.push(format!("updated {updated}"));
         }
-        summary
+        if parts.is_empty() {
+            "5h/7d usage limits".to_string()
+        } else {
+            parts.join(" · ")
+        }
     } else if !quota.official_usage_error.trim().is_empty() && profile_id == OFFICIAL_LLM_PROFILE_ID
     {
         shorten(quota.official_usage_error.trim(), 93)
@@ -61,20 +78,6 @@ pub(crate) fn provider_usage_display(
         seven_day,
         has_usage,
     }
-}
-
-fn reset_pair_text(five_hour: &UsageLine, seven_day: &UsageLine) -> String {
-    let five = if five_hour.reset.is_empty() {
-        "5h unknown".to_string()
-    } else {
-        format!("5h {}", five_hour.reset)
-    };
-    let seven = if seven_day.reset.is_empty() {
-        "7d unknown".to_string()
-    } else {
-        format!("7d {}", seven_day.reset)
-    };
-    format!("Resets: {five}, {seven}")
 }
 
 fn usage_line(window: &OfficialUsageWindow) -> UsageLine {
@@ -178,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_includes_resets_plan_and_freshness() {
+    fn summary_includes_plan_and_freshness() {
         let quota = QuotaStats {
             official_plan: "Max".to_string(),
             official_five_hour: OfficialUsageWindow {
@@ -193,9 +196,22 @@ mod tests {
         let display = provider_usage_display("Official", "official", "official", &quota);
 
         assert!(display.has_usage);
-        assert!(display.summary.starts_with("Resets: "));
-        assert!(display.summary.contains("Max"));
+        assert!(display.summary.contains("Max plan"));
         assert!(display.summary.contains("updated"));
+    }
+
+    #[test]
+    fn reset_caption_formats_relative_due_and_empty() {
+        let line = |reset: &str| UsageLine {
+            value: "42%".to_string(),
+            bar: 42.0,
+            percent: Some(42),
+            reset: reset.to_string(),
+        };
+
+        assert_eq!(line("in 2h 10m").reset_caption(), "resets in 2h 10m");
+        assert_eq!(line("due").reset_caption(), "reset due");
+        assert_eq!(line("").reset_caption(), "");
     }
 
     #[test]

@@ -224,6 +224,8 @@ pub(super) fn set_profile_usage_fields(
     ui.set_profile_usage_summary(shared(&usage.summary));
     ui.set_profile_usage_five_hour_value(shared(&usage.five_hour.value));
     ui.set_profile_usage_seven_day_value(shared(&usage.seven_day.value));
+    ui.set_profile_usage_five_hour_reset(shared(&usage.five_hour.reset_caption()));
+    ui.set_profile_usage_seven_day_reset(shared(&usage.seven_day.reset_caption()));
     ui.set_profile_usage_five_hour_bar(usage.five_hour.bar);
     ui.set_profile_usage_seven_day_bar(usage.seven_day.bar);
 }
@@ -233,6 +235,8 @@ fn set_empty_profile_usage_fields(ui: &SettingsWindow) {
     ui.set_profile_usage_summary(shared("Save or select a provider profile."));
     ui.set_profile_usage_five_hour_value(shared("--"));
     ui.set_profile_usage_seven_day_value(shared("--"));
+    ui.set_profile_usage_five_hour_reset(shared(""));
+    ui.set_profile_usage_seven_day_reset(shared(""));
     ui.set_profile_usage_five_hour_bar(0.0);
     ui.set_profile_usage_seven_day_bar(0.0);
 }

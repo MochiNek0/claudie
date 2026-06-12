@@ -657,6 +657,8 @@ slint::slint! {
         in property <string> profile_usage_summary;
         in property <string> profile_usage_five_hour_value;
         in property <string> profile_usage_seven_day_value;
+        in property <string> profile_usage_five_hour_reset;
+        in property <string> profile_usage_seven_day_reset;
         in property <float> profile_usage_five_hour_bar;
         in property <float> profile_usage_seven_day_bar;
 
@@ -781,7 +783,7 @@ slint::slint! {
             width: root.width - 192px;
             height: root.height - 56px;
             viewport-width: root.content_width;
-            viewport-height: root.active_tab == 0 ? 608px : (root.active_tab == 1 ? 456px : (root.active_tab == 2 ? 568px : 536px));
+            viewport-height: root.active_tab == 0 ? 608px : (root.active_tab == 1 ? 456px : (root.active_tab == 2 ? 612px : 536px));
 
             if active_tab == 0: Rectangle {
                 width: root.content_width;
@@ -887,7 +889,7 @@ slint::slint! {
 
             if active_tab == 2: Rectangle {
                 width: root.content_width;
-                height: 568px;
+                height: 612px;
                 background: transparent;
 
                 Text { x: 0px; y: 0px; text: "Provider profiles"; font-size: 17px; font-weight: 700; color: Theme.ink; }
@@ -923,11 +925,13 @@ slint::slint! {
                 Text { x: 300px; y: 392px; text: "OpenAI body"; color: Theme.ink-faint; font-size: 12px; }
                 MonoTextEdit { x: 300px; y: 412px; width: 284px; height: 72px; text <=> root.openai_extra_body; }
 
-                Rectangle { x: 0px; y: 504px; width: 432px; height: 52px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
-                Text { x: 14px; y: 514px; width: 216px; text: root.profile_usage_title; overflow: elide; color: Theme.ink; font-size: 13px; font-weight: 600; }
-                Text { x: 14px; y: 534px; width: 216px; text: root.profile_usage_summary; overflow: elide; color: Theme.ink-secondary; font-size: 11px; }
-                StatBarRow { x: 232px; y: 508px; width: 184px; height: 18px; label: "5h"; value: root.profile_usage_five_hour_value; bar: root.profile_usage_five_hour_bar; accent: root.profile_usage_five_hour_bar >= 90 ? Theme.danger : (root.profile_usage_five_hour_bar >= 70 ? Theme.chart-amber : Theme.accent); }
-                StatBarRow { x: 232px; y: 530px; width: 184px; height: 18px; label: "7d"; value: root.profile_usage_seven_day_value; bar: root.profile_usage_seven_day_bar; accent: root.profile_usage_seven_day_bar >= 90 ? Theme.danger : (root.profile_usage_seven_day_bar >= 70 ? Theme.chart-amber : Theme.chart-purple); }
+                Rectangle { x: 0px; y: 504px; width: 432px; height: 96px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
+                Text { x: 14px; y: 512px; width: 404px; text: root.profile_usage_title; overflow: elide; color: Theme.ink; font-size: 13px; font-weight: 600; }
+                Text { x: 14px; y: 532px; width: 404px; text: root.profile_usage_summary; overflow: elide; color: Theme.ink-secondary; font-size: 11px; }
+                StatBarRow { x: 14px; y: 554px; width: 240px; height: 18px; label: "5h"; value: root.profile_usage_five_hour_value; bar: root.profile_usage_five_hour_bar; accent: root.profile_usage_five_hour_bar >= 90 ? Theme.danger : (root.profile_usage_five_hour_bar >= 70 ? Theme.chart-amber : Theme.accent); }
+                Text { x: 262px; y: 554px; width: 156px; height: 18px; text: root.profile_usage_five_hour_reset; overflow: elide; vertical-alignment: center; color: Theme.ink-secondary; font-size: 11px; }
+                StatBarRow { x: 14px; y: 576px; width: 240px; height: 18px; label: "7d"; value: root.profile_usage_seven_day_value; bar: root.profile_usage_seven_day_bar; accent: root.profile_usage_seven_day_bar >= 90 ? Theme.danger : (root.profile_usage_seven_day_bar >= 70 ? Theme.chart-amber : Theme.chart-purple); }
+                Text { x: 262px; y: 576px; width: 156px; height: 18px; text: root.profile_usage_seven_day_reset; overflow: elide; vertical-alignment: center; color: Theme.ink-secondary; font-size: 11px; }
 
                 ActionButton { x: 448px; y: 514px; width: 64px; height: 32px; text: "Save"; clicked => { root.save_profile(); } }
                 ActionButton { x: 520px; y: 514px; width: 64px; height: 32px; text: "Use"; kind: "primary"; clicked => { root.use_profile(); } }
