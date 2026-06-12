@@ -15,6 +15,9 @@ pub(crate) const fn rgb(r: u8, g: u8, b: u8) -> u32 {
 /// Primary card / sheet background.
 pub(crate) const SURFACE: u32 = rgb(255, 255, 255);
 
+/// Hover / selection tint for menu rows and list rows.
+pub(crate) const SURFACE_HOVER: u32 = rgb(240, 243, 249);
+
 // Lines & elevation -------------------------------------------------------
 
 /// Divider between header and content; very faint.
@@ -24,6 +27,15 @@ pub(crate) const HAIRLINE: u32 = rgb(228, 232, 240);
 
 /// Primary text.
 pub(crate) const INK: u32 = rgb(17, 24, 39);
+
+/// Secondary / divider text.
+pub(crate) const INK_MUTED: u32 = rgb(118, 128, 143);
+
+/// Clean accent for active/selected markers.
+pub(crate) const ACCENT: u32 = rgb(10, 132, 255);
+
+/// Destructive action text (e.g. Exit).
+pub(crate) const DANGER: u32 = rgb(214, 69, 69);
 
 // Radii -------------------------------------------------------------------
 

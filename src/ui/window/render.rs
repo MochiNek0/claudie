@@ -583,7 +583,7 @@ fn filled_rect(hdc: HDC, x: i32, y: i32, w: i32, h: i32, color: u32) {
     fill_rect(hdc, &rect, color);
 }
 
-fn filled_round_rect(
+pub(super) fn filled_round_rect(
     hdc: HDC,
     x: i32,
     y: i32,
@@ -606,7 +606,7 @@ fn filled_round_rect(
     }
 }
 
-fn filled_ellipse(hdc: HDC, x: i32, y: i32, w: i32, h: i32, color: u32) {
+pub(super) fn filled_ellipse(hdc: HDC, x: i32, y: i32, w: i32, h: i32, color: u32) {
     unsafe {
         let brush = CreateSolidBrush(color);
         let pen = CreatePen(PS_SOLID, 1, color);

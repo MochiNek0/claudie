@@ -175,12 +175,12 @@ slint::slint! {
     }
 
     component MonoLineEdit inherits LineEdit {
-        font-family: "Inter, Segoe UI";
+        font-family: "Segoe UI";
         font-size: 12px;
     }
 
     component MonoTextEdit inherits TextEdit {
-        font-family: "Inter, Segoe UI";
+        font-family: "Segoe UI";
         font-size: 12px;
     }
 
@@ -501,16 +501,18 @@ slint::slint! {
             font-size: 13px;
             color: Theme.ink;
         }
-        Text {
+        // Drawn chevron: a font glyph here can render as tofu when the
+        // fallback font lacks it.
+        Path {
             x: root.width - 30px;
-            y: 0px;
-            width: 18px;
-            height: 100%;
-            text: "⌄";
-            horizontal-alignment: center;
-            vertical-alignment: center;
-            color: touch.has-hover ? Theme.accent : Theme.ink-muted;
-            font-size: 18px;
+            y: (root.height - 14px) / 2;
+            width: 14px;
+            height: 14px;
+            viewbox-width: 14;
+            viewbox-height: 14;
+            commands: "M 3 5.5 L 7 9.5 L 11 5.5";
+            stroke: touch.has-hover ? Theme.accent : Theme.ink-muted;
+            stroke-width: 1.5px;
         }
 
         popup := PopupWindow {
@@ -614,7 +616,7 @@ slint::slint! {
         title: "claudie Settings";
         icon: @image-url("../../assets/icon.ico");
         background: Theme.window-bg;
-        default-font-family: "Inter, Segoe UI";
+        default-font-family: "Segoe UI";
         default-font-size: 13px;
 
         property <length> content_width: 584px;
@@ -1055,7 +1057,7 @@ slint::slint! {
                     text: line.text;
                     wrap: word-wrap;
                     vertical-alignment: top;
-                    font-family: "Cascadia Mono, Consolas";
+                    font-family: "Consolas";
                     font-size: 12px;
                     color: line.tone == 1 ? #1a7f37
                         : (line.tone == 2 ? #cf222e : #57606a);
@@ -1069,7 +1071,7 @@ slint::slint! {
             height: parent.height - 16px;
             text: data.text;
             wrap: word-wrap;
-            font-family: "Cascadia Mono, Consolas";
+            font-family: "Consolas";
             font-size: 12px;
             color: Theme.ink;
         }
@@ -1216,6 +1218,7 @@ slint::slint! {
         title: "claudie request";
         icon: @image-url("../../assets/icon.ico");
         background: Theme.window-bg;
+        default-font-family: "Segoe UI";
 
         in property <bool> is_choice: false;
         in property <string> title_text;

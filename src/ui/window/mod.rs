@@ -1,23 +1,27 @@
 mod render;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use render::{
-    RenderState, fill_rect, render_fishing_hud_window, render_pet_window,
-    render_pomodoro_hud_window, render_session_switcher_window, session_switcher_session_at_point,
-    snapshot_state,
+    RenderState, fill_rect, filled_ellipse, filled_round_rect, render_fishing_hud_window,
+    render_pet_window, render_pomodoro_hud_window, render_session_switcher_window,
+    session_switcher_session_at_point, snapshot_state,
 };
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows_sys::Win32::Graphics::Dwm::{
+    DWM_WINDOW_CORNER_PREFERENCE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DwmSetWindowAttribute,
+};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, COLOR_MENU, COLOR_MENUHILIGHT, CreateCompatibleBitmap, CreateCompatibleDC,
-    DFC_MENU, DFCS_MENUCHECK, DeleteDC, DeleteObject, DrawFrameControl, EndPaint, FillRect,
-    GetSysColorBrush, GetTextExtentPoint32W, InvalidateRect, PAINTSTRUCT, SRCCOPY, ScreenToClient,
-    SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
+    BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleBitmap,
+    CreateCompatibleDC, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DeleteDC, DeleteObject,
+    EndPaint, FF_DONTCARE, FW_NORMAL, GetDC, GetTextExtentPoint32W, InvalidateRect,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC, SRCCOPY, ScreenToClient, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT, TextOutW,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
@@ -35,17 +39,18 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GWLP_USERDATA, GetClientRect,
-    GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, IDC_ARROW,
-    IDC_HAND, IsWindowVisible, LWA_COLORKEY, LoadCursorW, MF_CHECKED, MF_OWNERDRAW, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW, RegisterWindowMessageW, SM_CXSCREEN,
-    SM_CXSMICON, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYSMICON, SM_CYVIRTUALSCREEN,
+    GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HMENU, HWND_TOPMOST,
+    IDC_ARROW, IDC_HAND, IsWindowVisible, LWA_COLORKEY, LoadCursorW, MF_CHECKED, MF_OWNERDRAW,
+    MF_POPUP, MF_SEPARATOR, MSGF_MENU, PostMessageW, RegisterClassW, RegisterWindowMessageW,
+    SM_CXSCREEN, SM_CXSMICON, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYSMICON, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN,
-    TrackPopupMenu, WM_APP, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND,
-    WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL,
-    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    TrackPopupMenu, WM_APP, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DRAWITEM, WM_ENTERIDLE,
+    WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_VISIBLE,
 };
 
 use crate::app::fishing::FishingPhase;
@@ -60,13 +65,13 @@ use crate::settings::{
 };
 use crate::ui::prompt_popup::{close_prompt_popup, sync_prompt_popup_for_parent};
 use crate::ui::settings_panel::{close_settings_panel, show_settings_panel};
+use crate::ui::theme;
 use crate::ui::window_icon::load_sized_app_icon;
 use crate::usage_display::provider_usage_display;
 use crate::util::{shorten, wide};
 
 static CONTEXT_MENU_OPEN: AtomicBool = AtomicBool::new(false);
-static MENU_PROFILE_DRAW_ITEMS: OnceLock<Mutex<HashMap<usize, MenuProfileDrawItem>>> =
-    OnceLock::new();
+static MENU_DRAW_ENTRIES: OnceLock<Mutex<Vec<MenuDrawEntry>>> = OnceLock::new();
 static LEFT_BUTTON_CAPTURED: AtomicBool = AtomicBool::new(false);
 static LEFT_BUTTON_DRAGGING: AtomicBool = AtomicBool::new(false);
 static LEFT_BUTTON_SCREEN_X: AtomicI32 = AtomicI32::new(0);
@@ -85,18 +90,29 @@ const SLEEP_TIMER_MS: u32 = 500;
 const TOPMOST_REFRESH_MS: u32 = 1_000;
 const TRAY_ICON_ID: u32 = 1;
 const TRAY_CALLBACK_MESSAGE: u32 = WM_APP + 1;
+const MENU_ITEM_HEIGHT: i32 = 30;
+const MENU_SEPARATOR_HEIGHT: i32 = 9;
+const MENU_TEXT_LEFT: i32 = 26;
+const MENU_RIGHT_PAD: i32 = 24;
+const MENU_MIN_WIDTH: i32 = 170;
+const MENU_MAX_WIDTH: i32 = 380;
+const MENU_FONT_HEIGHT: i32 = -15;
+const MENU_FONT_FACE: &str = "Segoe UI";
 
 fn context_menu_open() -> bool {
     CONTEXT_MENU_OPEN.load(Ordering::Relaxed)
 }
 
+/// Owner-drawn menu entry; the index into the store travels through the
+/// Win32 menu item's `itemData` so separators (command id 0) stay distinct.
 #[derive(Clone)]
-struct MenuProfileDrawItem {
-    segments: Vec<MenuProfileDrawSegment>,
+enum MenuDrawEntry {
+    Separator,
+    Item { segments: Vec<MenuTextSegment> },
 }
 
 #[derive(Clone)]
-struct MenuProfileDrawSegment {
+struct MenuTextSegment {
     text: String,
     color: u32,
 }
@@ -362,14 +378,23 @@ unsafe extern "system" fn window_proc(
             let _createstruct = lparam as *const CREATESTRUCTW;
             0
         }
+        WM_ENTERIDLE => {
+            // Owner-drawn items push Win11 menus back to the legacy square
+            // frame; re-apply the rounded corner preference on the menu
+            // window once it is up.
+            if wparam as u32 == MSGF_MENU {
+                round_menu_window_corners(lparam as HWND);
+            }
+            0
+        }
         WM_MEASUREITEM => {
-            if measure_profile_menu_item(lparam) {
+            if measure_menu_item(hwnd, lparam) {
                 return 1;
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_DRAWITEM => {
-            if draw_profile_menu_item(lparam) {
+            if draw_menu_item(lparam) {
                 return 1;
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -1278,52 +1303,46 @@ unsafe fn show_context_menu(hwnd: HWND) {
     if menu.is_null() {
         return;
     }
+    // Drop entries from previous menu opens so the store only describes the
+    // owner-drawn items appended below.
+    clear_menu_draw_entries();
 
-    let settings_label = wide("Settings...");
-    AppendMenuW(menu, MF_STRING, MENU_SETTINGS_ID, settings_label.as_ptr());
+    let (pomodoro_status, fishing_active) = APP_STATE
+        .get()
+        .map(|state| {
+            let state = state.lock().expect("state poisoned");
+            (state.pomodoro.status, state.fishing.is_active())
+        })
+        .unwrap_or((PomodoroStatus::Stopped, false));
+
+    append_menu_item(menu, MENU_SETTINGS_ID, "Settings...", theme::INK);
     append_llm_profile_menu(menu);
-    AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-    let pomodoro_label = wide("Start Pomodoro");
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        MENU_POMODORO_START_ID,
-        pomodoro_label.as_ptr(),
-    );
-    let stop_pomodoro_label = wide("Stop Pomodoro");
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        MENU_POMODORO_STOP_ID,
-        stop_pomodoro_label.as_ptr(),
-    );
-    let pause_resume_label = wide("Pause/Resume Pomodoro");
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        MENU_POMODORO_PAUSE_RESUME_ID,
-        pause_resume_label.as_ptr(),
-    );
-    let skip_label = wide("Skip Pomodoro");
-    AppendMenuW(menu, MF_STRING, MENU_POMODORO_SKIP_ID, skip_label.as_ptr());
-    AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-    let fishing_label = wide("Start Fishing");
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        MENU_FISHING_START_ID,
-        fishing_label.as_ptr(),
-    );
-    let stop_fishing_label = wide("Stop Fishing");
-    AppendMenuW(
-        menu,
-        MF_STRING,
-        MENU_FISHING_STOP_ID,
-        stop_fishing_label.as_ptr(),
-    );
-    AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-    let exit_label = wide("Exit");
-    AppendMenuW(menu, MF_STRING, MENU_EXIT_ID, exit_label.as_ptr());
+    append_menu_separator(menu);
+    if pomodoro_status == PomodoroStatus::Stopped {
+        append_menu_item(menu, MENU_POMODORO_START_ID, "Start Pomodoro", theme::INK);
+    } else {
+        let pause_resume_label = if pomodoro_status == PomodoroStatus::Paused {
+            "Resume Pomodoro"
+        } else {
+            "Pause Pomodoro"
+        };
+        append_menu_item(
+            menu,
+            MENU_POMODORO_PAUSE_RESUME_ID,
+            pause_resume_label,
+            theme::INK,
+        );
+        append_menu_item(menu, MENU_POMODORO_SKIP_ID, "Skip Pomodoro", theme::INK);
+        append_menu_item(menu, MENU_POMODORO_STOP_ID, "Stop Pomodoro", theme::INK);
+    }
+    append_menu_separator(menu);
+    if fishing_active {
+        append_menu_item(menu, MENU_FISHING_STOP_ID, "Stop Fishing", theme::INK);
+    } else {
+        append_menu_item(menu, MENU_FISHING_START_ID, "Start Fishing", theme::INK);
+    }
+    append_menu_separator(menu);
+    append_menu_item(menu, MENU_EXIT_ID, "Exit", theme::DANGER);
 
     let mut point = POINT { x: 0, y: 0 };
     if GetCursorPos(&mut point) != 0 {
@@ -1380,10 +1399,20 @@ unsafe fn show_context_menu(hwnd: HWND) {
     DestroyMenu(menu);
 }
 
-unsafe fn append_llm_profile_menu(menu: windows_sys::Win32::UI::WindowsAndMessaging::HMENU) {
-    // Drop entries from previous menu opens so the store only describes the
-    // owner-drawn items appended below.
-    clear_menu_profile_draw_items();
+unsafe fn round_menu_window_corners(menu_window: HWND) {
+    if menu_window.is_null() {
+        return;
+    }
+    let preference = DWMWCP_ROUND;
+    DwmSetWindowAttribute(
+        menu_window,
+        DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+        &preference as *const _ as *const core::ffi::c_void,
+        size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+    );
+}
+
+unsafe fn append_llm_profile_menu(menu: HMENU) {
     let entries = llm_profile_menu_entries();
     if entries.is_empty() {
         return;
@@ -1393,38 +1422,56 @@ unsafe fn append_llm_profile_menu(menu: windows_sys::Win32::UI::WindowsAndMessag
         return;
     }
 
-    for (index, label, checked, draw_item) in entries {
+    for (index, segments, checked) in entries {
         let command_id = MENU_LLM_PROFILE_BASE_ID + index;
         let checked_flag = if checked { MF_CHECKED } else { 0 };
-        if let Some(draw_item) = draw_item {
-            store_menu_profile_draw_item(command_id, draw_item);
-            AppendMenuW(
-                profile_menu,
-                MF_OWNERDRAW | checked_flag,
-                command_id,
-                command_id as *const u16,
-            );
-        } else {
-            let label = wide(&label);
-            AppendMenuW(
-                profile_menu,
-                MF_STRING | checked_flag,
-                command_id,
-                label.as_ptr(),
-            );
-        }
+        append_menu_segments(profile_menu, checked_flag, command_id, segments);
     }
 
-    let profile_label = wide("LLM Profile");
-    AppendMenuW(
+    append_menu_segments(
         menu,
         MF_POPUP,
         profile_menu as usize,
-        profile_label.as_ptr(),
+        vec![MenuTextSegment {
+            text: "LLM Profile".to_string(),
+            color: theme::INK,
+        }],
     );
 }
 
-fn llm_profile_menu_entries() -> Vec<(usize, String, bool, Option<MenuProfileDrawItem>)> {
+unsafe fn append_menu_item(menu: HMENU, command: usize, label: &str, color: u32) {
+    append_menu_segments(
+        menu,
+        0,
+        command,
+        vec![MenuTextSegment {
+            text: label.to_string(),
+            color,
+        }],
+    );
+}
+
+unsafe fn append_menu_segments(
+    menu: HMENU,
+    extra_flags: u32,
+    command: usize,
+    segments: Vec<MenuTextSegment>,
+) {
+    let index = store_menu_draw_entry(MenuDrawEntry::Item { segments });
+    AppendMenuW(
+        menu,
+        MF_OWNERDRAW | extra_flags,
+        command,
+        index as *const u16,
+    );
+}
+
+unsafe fn append_menu_separator(menu: HMENU) {
+    let index = store_menu_draw_entry(MenuDrawEntry::Separator);
+    AppendMenuW(menu, MF_SEPARATOR | MF_OWNERDRAW, 0, index as *const u16);
+}
+
+fn llm_profile_menu_entries() -> Vec<(usize, Vec<MenuTextSegment>, bool)> {
     let Some(state) = APP_STATE.get() else {
         return Vec::new();
     };
@@ -1438,59 +1485,60 @@ fn llm_profile_menu_entries() -> Vec<(usize, String, bool, Option<MenuProfileDra
         .take(MENU_LLM_PROFILE_MAX_ITEMS)
         .enumerate()
         .map(|(index, profile)| {
-            let (label, color) =
-                profile_menu_label_with_usage(profile, &db.active_profile_id, &quota);
-            (index, label, profile.id == db.active_profile_id, color)
+            let segments = profile_menu_segments(profile, &db.active_profile_id, &quota);
+            (index, segments, profile.id == db.active_profile_id)
         })
         .collect()
 }
 
-fn profile_menu_label_with_usage(
+fn profile_menu_segments(
     profile: &LlmProfile,
     active_profile_id: &str,
     quota: &crate::app::QuotaStats,
-) -> (String, Option<MenuProfileDrawItem>) {
+) -> Vec<MenuTextSegment> {
     let label = profile_menu_label(profile);
-    if !profile.is_official() {
-        return (label, None);
+    if profile.is_official() {
+        let usage = provider_usage_display(&label, &profile.id, active_profile_id, quota);
+        if usage.has_usage {
+            return vec![
+                MenuTextSegment {
+                    // Keep the usage suffix within the clamped item width even
+                    // for long profile labels.
+                    text: shorten(&label, 26),
+                    color: theme::INK,
+                },
+                MenuTextSegment {
+                    text: "  ".to_string(),
+                    color: theme::INK,
+                },
+                MenuTextSegment {
+                    text: format!("5h {}", usage.five_hour.value),
+                    color: profile_usage_window_menu_color(usage.five_hour.percent, theme::ACCENT),
+                },
+                MenuTextSegment {
+                    text: " / ".to_string(),
+                    color: theme::INK_MUTED,
+                },
+                MenuTextSegment {
+                    text: format!("7d {}", usage.seven_day.value),
+                    color: profile_usage_window_menu_color(
+                        usage.seven_day.percent,
+                        rgb(124, 92, 196),
+                    ),
+                },
+            ];
+        }
     }
-    let usage = provider_usage_display(&label, &profile.id, active_profile_id, quota);
-    if !usage.has_usage {
-        return (label, None);
-    }
-    let item = MenuProfileDrawItem {
-        segments: vec![
-            MenuProfileDrawSegment {
-                // Keep the fixed-width usage suffix within the measured item
-                // width even for long profile labels.
-                text: shorten(&label, 26),
-                color: rgb(17, 24, 39),
-            },
-            MenuProfileDrawSegment {
-                text: "  ".to_string(),
-                color: rgb(17, 24, 39),
-            },
-            MenuProfileDrawSegment {
-                text: format!("5h {}", usage.five_hour.value),
-                color: profile_usage_window_menu_color(usage.five_hour.percent, rgb(10, 132, 255)),
-            },
-            MenuProfileDrawSegment {
-                text: " / ".to_string(),
-                color: rgb(17, 24, 39),
-            },
-            MenuProfileDrawSegment {
-                text: format!("7d {}", usage.seven_day.value),
-                color: profile_usage_window_menu_color(usage.seven_day.percent, rgb(124, 92, 196)),
-            },
-        ],
-    };
-    (label, Some(item))
+    vec![MenuTextSegment {
+        text: shorten(&label, 40),
+        color: theme::INK,
+    }]
 }
 
 fn profile_usage_window_menu_color(percent: Option<u8>, default_color: u32) -> u32 {
     let percent = percent.unwrap_or(0);
     if percent >= 90 {
-        rgb(214, 69, 69)
+        theme::DANGER
     } else if percent >= 60 {
         rgb(216, 138, 36)
     } else {
@@ -1498,116 +1546,159 @@ fn profile_usage_window_menu_color(percent: Option<u8>, default_color: u32) -> u
     }
 }
 
-fn store_menu_profile_draw_item(id: usize, item: MenuProfileDrawItem) {
-    let items = MENU_PROFILE_DRAW_ITEMS.get_or_init(|| Mutex::new(HashMap::new()));
-    items
-        .lock()
-        .expect("profile menu item store poisoned")
-        .insert(id, item);
+fn store_menu_draw_entry(entry: MenuDrawEntry) -> usize {
+    let entries = MENU_DRAW_ENTRIES.get_or_init(|| Mutex::new(Vec::new()));
+    let mut entries = entries.lock().expect("menu draw entry store poisoned");
+    entries.push(entry);
+    entries.len() - 1
 }
 
-fn clear_menu_profile_draw_items() {
-    if let Some(items) = MENU_PROFILE_DRAW_ITEMS.get() {
-        items
+fn clear_menu_draw_entries() {
+    if let Some(entries) = MENU_DRAW_ENTRIES.get() {
+        entries
             .lock()
-            .expect("profile menu item store poisoned")
+            .expect("menu draw entry store poisoned")
             .clear();
     }
 }
 
-fn menu_profile_draw_item(id: usize) -> Option<MenuProfileDrawItem> {
-    MENU_PROFILE_DRAW_ITEMS
+fn menu_draw_entry(index: usize) -> Option<MenuDrawEntry> {
+    MENU_DRAW_ENTRIES
         .get()?
         .lock()
-        .expect("profile menu item store poisoned")
-        .get(&id)
+        .expect("menu draw entry store poisoned")
+        .get(index)
         .cloned()
 }
 
-unsafe fn measure_profile_menu_item(lparam: LPARAM) -> bool {
+unsafe fn create_menu_font() -> windows_sys::Win32::Graphics::Gdi::HFONT {
+    let face = wide(MENU_FONT_FACE);
+    CreateFontW(
+        MENU_FONT_HEIGHT,
+        0,
+        0,
+        0,
+        FW_NORMAL as i32,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET as u32,
+        OUT_DEFAULT_PRECIS as u32,
+        CLIP_DEFAULT_PRECIS as u32,
+        CLEARTYPE_QUALITY as u32,
+        (DEFAULT_PITCH | FF_DONTCARE) as u32,
+        face.as_ptr(),
+    )
+}
+
+unsafe fn measure_menu_item(hwnd: HWND, lparam: LPARAM) -> bool {
     let measure = lparam as *mut MEASUREITEMSTRUCT;
-    if measure.is_null()
-        || (*measure).CtlType != ODT_MENU
-        || !has_profile_draw_item((*measure).itemID as usize)
-    {
+    if measure.is_null() || (*measure).CtlType != ODT_MENU {
         return false;
     }
-    (*measure).itemWidth = 292;
-    (*measure).itemHeight = 24;
+    let Some(entry) = menu_draw_entry((*measure).itemData as usize) else {
+        return false;
+    };
+    match entry {
+        MenuDrawEntry::Separator => {
+            (*measure).itemWidth = 0;
+            (*measure).itemHeight = MENU_SEPARATOR_HEIGHT as u32;
+        }
+        MenuDrawEntry::Item { segments } => {
+            let width = MENU_TEXT_LEFT + menu_segments_width(hwnd, &segments) + MENU_RIGHT_PAD;
+            (*measure).itemWidth = width.clamp(MENU_MIN_WIDTH, MENU_MAX_WIDTH) as u32;
+            (*measure).itemHeight = MENU_ITEM_HEIGHT as u32;
+        }
+    }
     true
 }
 
-unsafe fn draw_profile_menu_item(lparam: LPARAM) -> bool {
+unsafe fn menu_segments_width(hwnd: HWND, segments: &[MenuTextSegment]) -> i32 {
+    let hdc = GetDC(hwnd);
+    if hdc.is_null() {
+        return segments
+            .iter()
+            .map(|segment| segment.text.chars().count() as i32 * 7)
+            .sum();
+    }
+    let font = create_menu_font();
+    let old_font = SelectObject(hdc, font);
+    let mut width = 0;
+    for segment in segments {
+        let text = wide(&segment.text);
+        let mut size = SIZE { cx: 0, cy: 0 };
+        if GetTextExtentPoint32W(hdc, text.as_ptr(), (text.len() - 1) as i32, &mut size) != 0 {
+            width += size.cx;
+        }
+    }
+    SelectObject(hdc, old_font);
+    DeleteObject(font);
+    ReleaseDC(hwnd, hdc);
+    width
+}
+
+unsafe fn draw_menu_item(lparam: LPARAM) -> bool {
     let draw = lparam as *const DRAWITEMSTRUCT;
     if draw.is_null() || (*draw).CtlType != ODT_MENU {
         return false;
     }
-    let Some(item) = menu_profile_draw_item((*draw).itemID as usize) else {
+    let Some(entry) = menu_draw_entry((*draw).itemData as usize) else {
         return false;
     };
 
+    let hdc = (*draw).hDC;
     let rect = (*draw).rcItem;
-    let selected = (*draw).itemState & ODS_SELECTED != 0;
-    let checked = (*draw).itemState & ODS_CHECKED != 0;
-    let background = if selected {
-        COLOR_MENUHILIGHT
-    } else {
-        COLOR_MENU
-    };
-    FillRect((*draw).hDC, &rect, GetSysColorBrush(background));
-
-    SetBkMode((*draw).hDC, TRANSPARENT as i32);
-    if checked {
-        let mut check_rect = RECT {
-            left: rect.left + 5,
-            top: rect.top + 5,
-            right: rect.left + 18,
-            bottom: rect.top + 18,
-        };
-        DrawFrameControl((*draw).hDC, &mut check_rect, DFC_MENU, DFCS_MENUCHECK);
-    }
-    let color_override = if selected {
-        Some(rgb(255, 255, 255))
-    } else {
-        None
-    };
-    draw_menu_profile_segments(
-        (*draw).hDC,
-        rect.left + 24,
-        rect.top + 5,
-        &item.segments,
-        color_override,
-    );
-    true
-}
-
-unsafe fn draw_menu_profile_segments(
-    hdc: windows_sys::Win32::Graphics::Gdi::HDC,
-    mut x: i32,
-    y: i32,
-    segments: &[MenuProfileDrawSegment],
-    color_override: Option<u32>,
-) {
-    for segment in segments {
-        let text = wide(&segment.text);
-        let len = (text.len() - 1) as i32;
-        SetTextColor(hdc, color_override.unwrap_or(segment.color));
-        TextOutW(hdc, x, y, text.as_ptr(), len);
-
-        let mut size = SIZE { cx: 0, cy: 0 };
-        if GetTextExtentPoint32W(hdc, text.as_ptr(), len, &mut size) != 0 {
-            x += size.cx;
+    fill_rect(hdc, &rect, theme::SURFACE);
+    match entry {
+        MenuDrawEntry::Separator => {
+            let y = rect.top + (rect.bottom - rect.top) / 2;
+            let line = RECT {
+                left: rect.left + 12,
+                top: y,
+                right: rect.right - 12,
+                bottom: y + 1,
+            };
+            fill_rect(hdc, &line, theme::HAIRLINE);
+        }
+        MenuDrawEntry::Item { segments } => {
+            if (*draw).itemState & ODS_SELECTED != 0 {
+                filled_round_rect(
+                    hdc,
+                    rect.left + 4,
+                    rect.top + 2,
+                    rect.right - rect.left - 8,
+                    rect.bottom - rect.top - 4,
+                    theme::RADIUS_CHIP,
+                    theme::SURFACE_HOVER,
+                    theme::SURFACE_HOVER,
+                );
+            }
+            if (*draw).itemState & ODS_CHECKED != 0 {
+                let center_y = rect.top + (rect.bottom - rect.top) / 2;
+                filled_ellipse(hdc, rect.left + 11, center_y - 4, 7, 7, theme::ACCENT);
+            }
+            let font = create_menu_font();
+            let old_font = SelectObject(hdc, font);
+            SetBkMode(hdc, TRANSPARENT as i32);
+            let mut x = rect.left + MENU_TEXT_LEFT;
+            for segment in &segments {
+                let text = wide(&segment.text);
+                let len = (text.len() - 1) as i32;
+                let mut size = SIZE { cx: 0, cy: 0 };
+                if GetTextExtentPoint32W(hdc, text.as_ptr(), len, &mut size) == 0 {
+                    size.cx = segment.text.chars().count() as i32 * 7;
+                    size.cy = 16;
+                }
+                let y = rect.top + (rect.bottom - rect.top - size.cy) / 2;
+                SetTextColor(hdc, segment.color);
+                TextOutW(hdc, x, y, text.as_ptr(), len);
+                x += size.cx;
+            }
+            SelectObject(hdc, old_font);
+            DeleteObject(font);
         }
     }
-}
-
-fn has_profile_draw_item(id: usize) -> bool {
-    MENU_PROFILE_DRAW_ITEMS.get().is_some_and(|items| {
-        items
-            .lock()
-            .expect("profile menu item store poisoned")
-            .contains_key(&id)
-    })
+    true
 }
 
 fn profile_menu_label(profile: &LlmProfile) -> String {
