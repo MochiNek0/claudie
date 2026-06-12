@@ -50,6 +50,7 @@ pub(crate) struct GifVisibleBounds {
 
 struct GifClip {
     image: *mut GpImage,
+    path: PathBuf,
     delays_ms: Vec<u32>,
     cumulative_ms: Vec<u32>,
     total_ms: u32,
@@ -116,6 +117,7 @@ impl GifClip {
 
         Ok(Self {
             image,
+            path: path.to_path_buf(),
             delays_ms,
             cumulative_ms,
             total_ms,
@@ -124,6 +126,21 @@ impl GifClip {
             visible_bounds,
             active_frame: None,
         })
+    }
+
+    /// Dispose and reopen the GDI+ image so its internal decoded-frame cache
+    /// is released; frames re-decode lazily when the clip is drawn again.
+    unsafe fn release_frame_cache(&mut self) {
+        if !self.image.is_null() {
+            GdipDisposeImage(self.image);
+            self.image = std::ptr::null_mut();
+        }
+        self.active_frame = None;
+        let mut image: *mut GpImage = std::ptr::null_mut();
+        let path_wide = wide(&self.path.to_string_lossy());
+        if GdipLoadImageFromFile(path_wide.as_ptr(), &mut image) == 0 && !image.is_null() {
+            self.image = image;
+        }
     }
 
     fn frame_at(&self, elapsed_ms: u32) -> usize {
@@ -337,6 +354,11 @@ impl GifAnimation {
     pub(crate) fn request_mood(&mut self, mood: PetMood) -> bool {
         if mood == self.current {
             return true;
+        }
+        // Release the outgoing clip's decoded frames; mood switches restart
+        // the incoming clip at frame 0 anyway, so nothing visible is lost.
+        if let Some(clip) = self.clips.get_mut(&self.current) {
+            unsafe { clip.release_frame_cache() };
         }
         self.current = mood;
         self.clip_started_at = Instant::now();

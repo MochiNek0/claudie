@@ -53,7 +53,6 @@ pub(crate) fn close_settings_panel() {
 }
 
 fn wire_callbacks(window: &SettingsWindow, controller: Rc<RefCell<SettingsController>>) {
-    let weak = window.as_weak();
     window.on_previous_profile({
         let controller = controller.clone();
         move || {
@@ -173,11 +172,10 @@ fn wire_callbacks(window: &SettingsWindow, controller: Rc<RefCell<SettingsContro
         }
     });
 
-    window.window().on_close_requested(move || {
-        if weak.upgrade().is_some() {
-            slint::CloseRequestResponse::HideWindow
-        } else {
-            slint::CloseRequestResponse::HideWindow
-        }
+    window.window().on_close_requested(|| {
+        // Drop the stored window so the renderer context is released; a
+        // hidden-but-alive window keeps its GPU buffers committed.
+        close_settings_panel();
+        slint::CloseRequestResponse::HideWindow
     });
 }

@@ -61,7 +61,9 @@ slint::slint! {
         property <bool> filled: root.active || root.kind == "primary";
         property <bool> danger: root.kind == "danger";
 
-        border-radius: 999px;
+        // height/2 instead of an oversized constant: FemtoVG turns radii
+        // larger than the rect into an ellipse instead of clamping.
+        border-radius: self.height / 2;
         border-width: 1px;
         border-color: !root.enabled ? Theme.disabled-border
             : (root.filled ? Theme.accent
@@ -117,7 +119,7 @@ slint::slint! {
         in property <bool> enabled: true;
         callback clicked();
 
-        border-radius: 999px;
+        border-radius: self.height / 2;
         background: touch.pressed && root.enabled ? Theme.accent-softer : (touch.has-hover && root.enabled ? Theme.accent-soft : transparent);
         animate background { duration: Theme.fast; easing: ease-out; }
 
