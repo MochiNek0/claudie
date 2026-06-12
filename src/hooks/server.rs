@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::app::{AppState, PetMood};
-use crate::hooks::process_hook;
+use crate::hooks::events::process_hook_on_connection;
 use crate::util::ConnectionLimiter;
 
 const MAX_HOOK_CONNECTIONS: usize = 16;
@@ -77,7 +77,9 @@ fn handle_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>) {
         }
     };
 
-    let response = process_hook(payload, state.clone());
+    // Passing the stream lets a blocking PermissionRequest notice when Claude
+    // Code aborts the request (user answered in the terminal).
+    let response = process_hook_on_connection(payload, state.clone(), Some(&stream));
     let _ = write_http_response(&mut stream, 200, response.to_string());
     flush_stats_if_due(&state);
 }

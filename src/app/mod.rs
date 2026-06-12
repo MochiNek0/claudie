@@ -109,6 +109,11 @@ pub(crate) enum PermissionDecision {
     Ignore,
 }
 
+// AskUserQuestion arrives as a blocking PermissionRequest hook; its parsed
+// questions become a PendingChoice so the popup offers the real options, and
+// submitting answers via a PermissionRequest `updatedInput` decision.
+// ExitPlanMode stays on the plain permission popup (approve/deny maps 1:1),
+// so the ExitPlanMode kind is currently only produced in tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChoiceKind {
     AskUserQuestion,
@@ -141,6 +146,7 @@ pub(crate) struct PendingPermission {
     pub(crate) interaction_sequence: u64,
     pub(crate) session_id: String,
     pub(crate) tool_name: String,
+    pub(crate) tool_use_id: String,
     pub(crate) summary: String,
     pub(crate) cwd: String,
     pub(crate) suggestions: Vec<Value>,
@@ -338,6 +344,7 @@ pub(crate) struct AppState {
     pub(crate) last_error: String,
     pub(crate) next_interaction_sequence: u64,
     pub(crate) next_permission_id: u64,
+    #[allow(dead_code)]
     pub(crate) next_choice_id: u64,
     pub(crate) active_tools: usize,
     pub(crate) active_tool_moods: HashMap<PetMood, usize>,
@@ -1577,6 +1584,7 @@ impl AppState {
         });
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_choice_stats(&mut self) {
         self.stats.record(|day| {
             day.choice_requests = day.choice_requests.saturating_add(1);
@@ -2006,6 +2014,7 @@ mod tests {
             interaction_sequence: 1,
             session_id: "s1".to_string(),
             tool_name: "Edit".to_string(),
+            tool_use_id: String::new(),
             summary: String::new(),
             cwd: String::new(),
             suggestions: Vec::new(),
@@ -2051,6 +2060,7 @@ mod tests {
             interaction_sequence: 1,
             session_id: "s1".to_string(),
             tool_name: "Edit".to_string(),
+            tool_use_id: String::new(),
             summary: String::new(),
             cwd: String::new(),
             suggestions: Vec::new(),

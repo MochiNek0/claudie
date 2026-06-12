@@ -7,7 +7,10 @@ use std::sync::{Arc, Mutex};
 use crate::app::AppState;
 use crate::settings::storage::write_text_atomic;
 
-const CLAUDIE_HOOK_TIMEOUT_SECS: u64 = 86_400;
+// Long enough for a human decision, short enough that Claude Code recovers on
+// its own if claudie hangs; the socket-close probe usually resolves the popup
+// well before this fires. Mirrors clawd-on-desk's PermissionRequest timeout.
+const CLAUDIE_HOOK_TIMEOUT_SECS: u64 = 600;
 
 pub(crate) fn settings_snippet(port: u16) -> String {
     serde_json::to_string_pretty(&hooks_value(port)).expect("valid settings")

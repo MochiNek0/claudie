@@ -1,6 +1,7 @@
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
+use std::net::TcpStream;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -36,12 +37,16 @@ enum HookActivity {
     EndSession,
 }
 
-enum PermissionResponseKind {
-    PermissionRequest,
-    PreToolUse { tool_input: Value },
+#[cfg(test)]
+fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value {
+    process_hook_on_connection(payload, state, None)
 }
 
-pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value {
+pub(crate) fn process_hook_on_connection(
+    payload: Value,
+    state: Arc<Mutex<AppState>>,
+    connection: Option<&TcpStream>,
+) -> Value {
     let event = string_field(&payload, "hook_event_name")
         .or_else(|| string_field(&payload, "hookEventName"))
         .unwrap_or_else(|| "unknown".to_string());
@@ -54,22 +59,13 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
         .or_else(|| string_field(&payload, "toolName"))
         .unwrap_or_default();
 
+    // Claude Code shows its own terminal prompt while this blocking hook is
+    // pending, so the popup and the terminal options stay usable side by side.
+    // Plan approval (ExitPlanMode) and questions (AskUserQuestion) also arrive
+    // through this event; intercepting them at PreToolUse would block Claude
+    // Code's own UI entirely and ignore auto/bypass permission modes.
     if event == "PermissionRequest" {
-        return handle_permission_request(
-            payload,
-            state,
-            session_id,
-            cwd,
-            tool_name,
-            PermissionResponseKind::PermissionRequest,
-        );
-    }
-    if event == "PreToolUse" {
-        if let Some(response) =
-            handle_interactive_pre_tool_use(&payload, state.clone(), &session_id, &cwd, &tool_name)
-        {
-            return response;
-        }
+        return handle_permission_request(payload, state, session_id, cwd, tool_name, connection);
     }
 
     let transcript_path = string_field(&payload, "transcript_path")
@@ -89,6 +85,13 @@ pub(crate) fn process_hook(payload: Value, state: Arc<Mutex<AppState>>) -> Value
         if clears_pending_interaction(event.as_str()) {
             clear_stale_interactions(&mut state, &event_session_id);
         }
+        sweep_terminal_answered_permissions(
+            &mut state,
+            event.as_str(),
+            &event_session_id,
+            &tool_name,
+            &payload,
+        );
         let capture_official = state.llm_profiles.official_profile_active();
         update_quota_from_value(&mut state.quota, &payload, capture_official);
         if let Some(path) = transcript_path.as_deref() {
@@ -155,8 +158,26 @@ fn handle_permission_request(
     session_id: String,
     cwd: String,
     tool_name: String,
-    response_kind: PermissionResponseKind,
+    connection: Option<&TcpStream>,
 ) -> Value {
+    // AskUserQuestion is a question, not a tool approval: render the parsed
+    // options as a selectable choice popup and answer through `updatedInput`
+    // instead of dumping the raw tool input behind Allow/Deny. Unparseable
+    // input falls through to the generic permission popup.
+    if tool_name == "AskUserQuestion" {
+        let tool_input = payload
+            .get("tool_input")
+            .or_else(|| payload.get("toolInput"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let questions = parse_ask_user_questions(&tool_input);
+        if !questions.is_empty() {
+            return handle_question_request(
+                &payload, state, session_id, tool_input, questions, connection,
+            );
+        }
+    }
+
     let transcript_path = string_field(&payload, "transcript_path")
         .or_else(|| string_field(&payload, "transcriptPath"));
     let transcript_start = transcript_path
@@ -191,6 +212,7 @@ fn handle_permission_request(
             } else {
                 tool_name
             },
+            tool_use_id: payload_tool_use_id(&payload).unwrap_or_default(),
             summary: summarize_payload(&payload),
             cwd,
             suggestions,
@@ -218,6 +240,12 @@ fn handle_permission_request(
         loop {
             if guard.is_some() {
                 break *guard;
+            }
+            // Claude Code aborts this hook request once the user answers in
+            // the terminal dialog; a closed connection means the decision was
+            // already made elsewhere, so drop the popup without a decision.
+            if connection.is_some_and(connection_closed) {
+                break Some(PermissionDecision::Ignore);
             }
             if transcript_path
                 .as_deref()
@@ -249,16 +277,18 @@ fn handle_permission_request(
         ) {
             state.finish_session_work(&permission.session_id);
         }
+        let deny_interrupts = matches!(decision, Some(PermissionDecision::Deny))
+            && !deny_falls_back_to_terminal(&permission.tool_name);
         if state.pending_permissions.is_empty() && state.pending_choices.is_empty() {
             let mood = match decision {
-                Some(PermissionDecision::Deny) => PetMood::Error,
+                Some(PermissionDecision::Deny) if deny_interrupts => PetMood::Error,
                 Some(PermissionDecision::Ignore) => state.activity_mood().unwrap_or(PetMood::Idle),
                 _ => state.activity_mood().unwrap_or(PetMood::Happy),
             };
             state.set_resting_mood(mood, matches!(mood, PetMood::Error));
         }
         let (status, detail) = match decision {
-            Some(PermissionDecision::Deny) => {
+            Some(PermissionDecision::Deny) if deny_interrupts => {
                 (ClaudeSessionStatus::Error, "Permission denied".to_string())
             }
             Some(PermissionDecision::Ignore) | None => {
@@ -274,26 +304,15 @@ fn handle_permission_request(
         );
     }
 
-    permission_response(
-        decision.unwrap_or(PermissionDecision::Ignore),
-        &permission,
-        response_kind,
-    )
+    permission_request_response(decision.unwrap_or(PermissionDecision::Ignore), &permission)
 }
 
-fn permission_response(
-    decision: PermissionDecision,
-    permission: &PendingPermission,
-    response_kind: PermissionResponseKind,
-) -> Value {
-    match response_kind {
-        PermissionResponseKind::PermissionRequest => {
-            permission_request_response(decision, permission)
-        }
-        PermissionResponseKind::PreToolUse { tool_input } => {
-            pre_tool_permission_response(decision, tool_input)
-        }
-    }
+// ExitPlanMode and AskUserQuestion arrive through PermissionRequest but are
+// interactive flows, not plain tool approvals: a deny must let Claude Code
+// fall back to its own terminal UI (keep planning / ask in terminal) instead
+// of aborting the whole turn.
+fn deny_falls_back_to_terminal(tool_name: &str) -> bool {
+    matches!(tool_name, "ExitPlanMode" | "AskUserQuestion")
 }
 
 fn permission_request_response(
@@ -326,6 +345,15 @@ fn permission_request_response(
                 }
             })
         }
+        PermissionDecision::Deny if deny_falls_back_to_terminal(&permission.tool_name) => json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": "deny",
+                    "message": "Declined in claudie; continue in the terminal"
+                }
+            }
+        }),
         // "interrupt": true is what makes the deny behave like the terminal
         // "No": Claude Code aborts the whole turn instead of feeding the
         // denial back to the model as retryable tool feedback.
@@ -346,85 +374,25 @@ fn permission_request_response(
     }
 }
 
-// Denials must stop the turn like the terminal "No" option; otherwise Claude
-// retries immediately and the popup reappears before the user can react.
-fn with_turn_stop(mut response: Value, stop_reason: &str) -> Value {
-    if let Some(obj) = response.as_object_mut() {
-        obj.insert("continue".to_string(), Value::Bool(false));
-        obj.insert("stopReason".to_string(), json!(stop_reason));
-    }
-    response
-}
-
-fn pre_tool_permission_response(decision: PermissionDecision, tool_input: Value) -> Value {
-    match decision {
-        PermissionDecision::AllowOnce | PermissionDecision::AllowAlways => {
-            pre_tool_allow(tool_input, "Approved in claudie")
-        }
-        PermissionDecision::Deny => with_turn_stop(
-            pre_tool_deny("Denied in claudie"),
-            "User denied the request in claudie",
-        ),
-        PermissionDecision::Ignore => json!({}),
-    }
-}
-
-fn handle_interactive_pre_tool_use(
+// AskUserQuestion arrives as a blocking PermissionRequest like any other
+// tool, but waits on a PendingChoice so the popup can offer the actual
+// options. Submitting answers via `updatedInput` mirrors what Claude Code's
+// own dialog sends; cancelling falls back to the terminal flow exactly like
+// a permission deny on this tool.
+fn handle_question_request(
     payload: &Value,
     state: Arc<Mutex<AppState>>,
-    session_id: &str,
-    cwd: &str,
-    tool_name: &str,
-) -> Option<Value> {
-    let tool_input = payload
-        .get("tool_input")
-        .or_else(|| payload.get("toolInput"))
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-
-    match tool_name {
-        "AskUserQuestion" => Some(handle_choice_request(
-            state,
-            session_id.to_string(),
-            ChoiceKind::AskUserQuestion,
-            "Question from Claude".to_string(),
-            String::new(),
-            parse_ask_user_questions(&tool_input),
-            tool_input,
-        )),
-        "ExitPlanMode" => Some(handle_choice_request(
-            state,
-            session_id.to_string(),
-            ChoiceKind::ExitPlanMode,
-            "Approve plan".to_string(),
-            summarize_exit_plan(&tool_input),
-            exit_plan_questions(&tool_input),
-            tool_input,
-        )),
-        _ if is_web_search_tool(tool_name) => Some(handle_permission_request(
-            payload.clone(),
-            state,
-            session_id.to_string(),
-            cwd.to_string(),
-            tool_name.to_string(),
-            PermissionResponseKind::PreToolUse { tool_input },
-        )),
-        _ => None,
-    }
-}
-
-fn handle_choice_request(
-    state: Arc<Mutex<AppState>>,
     session_id: String,
-    kind: ChoiceKind,
-    title: String,
-    detail: String,
-    questions: Vec<ChoiceQuestion>,
     tool_input: Value,
+    questions: Vec<ChoiceQuestion>,
+    connection: Option<&TcpStream>,
 ) -> Value {
-    if questions.is_empty() {
-        return json!({});
-    }
+    let transcript_path = string_field(payload, "transcript_path")
+        .or_else(|| string_field(payload, "transcriptPath"));
+    let transcript_start = transcript_path
+        .as_deref()
+        .and_then(transcript_len)
+        .unwrap_or(0);
 
     let waiter = Arc::new(ChoiceWaiter {
         decision: Mutex::new(None),
@@ -437,42 +405,60 @@ fn handle_choice_request(
         state.next_choice_id += 1;
         let interaction_sequence = state.next_interaction_sequence;
         state.next_interaction_sequence += 1;
-        let selected = vec![Vec::new(); questions.len()];
-        let other_text = vec![String::new(); questions.len()];
+        let question_count = questions.len();
         let choice = PendingChoice {
             id,
             interaction_sequence,
             session_id,
-            kind,
-            title,
-            detail,
+            kind: ChoiceKind::AskUserQuestion,
+            title: "Question from Claude".to_string(),
+            detail: String::new(),
             questions,
-            selected,
-            other_text,
+            selected: vec![Vec::new(); question_count],
+            other_text: vec![String::new(); question_count],
             tool_input,
             waiter: waiter.clone(),
         };
         state.pending_choices.push_back(choice.clone());
-        let resting = state.activity_mood().unwrap_or(PetMood::Thinking);
-        state.mark_session_waiting_choice(
-            &choice.session_id,
-            &choice.title,
-            choice.interaction_sequence,
-        );
-        state.start_choice_activity(choice.id, &choice.session_id, resting);
-        state.set_resting_mood(resting, false);
+        let detail = choice
+            .questions
+            .first()
+            .map(|question| question.question.clone())
+            .unwrap_or_default();
+        state.mark_session_waiting_choice(&choice.session_id, &detail, choice.interaction_sequence);
+        state.start_choice_activity(choice.id, &choice.session_id, PetMood::Thinking);
+        state.set_resting_mood(PetMood::Thinking, true);
         state.record_choice_stats();
-        update_quota_from_value(&mut state.quota, &json!({}), false);
+        let capture_official = state.llm_profiles.official_profile_active();
+        update_quota_from_value(&mut state.quota, payload, capture_official);
         state.record_token_snapshot();
         choice
     };
 
     let decision = {
         let mut guard = waiter.decision.lock().expect("choice waiter poisoned");
-        while guard.is_none() {
-            guard = waiter.ready.wait(guard).expect("choice waiter poisoned");
+        loop {
+            if guard.is_some() {
+                break guard.clone();
+            }
+            // Claude Code aborts this hook request once the user answers in
+            // the terminal dialog; a closed connection means the decision was
+            // already made elsewhere, so drop the popup without a decision.
+            if connection.is_some_and(connection_closed) {
+                break Some(ChoiceDecision::Ignore);
+            }
+            if transcript_path
+                .as_deref()
+                .is_some_and(|path| transcript_has_terminal_denial(path, transcript_start))
+            {
+                break Some(ChoiceDecision::Ignore);
+            }
+            let (next_guard, _) = waiter
+                .ready
+                .wait_timeout(guard, TRANSCRIPT_DENIAL_POLL)
+                .expect("choice waiter poisoned");
+            guard = next_guard;
         }
-        guard.clone()
     };
 
     {
@@ -481,15 +467,18 @@ fn handle_choice_request(
         state
             .pending_choices
             .retain(|pending| pending.id != choice.id);
+        let submitted = matches!(decision, Some(ChoiceDecision::Submit { .. }));
+        // Only a submitted answer lets the tool run; everything else leaves
+        // the question to the terminal, so release this session's activity
+        // like a denied permission would.
+        if !submitted {
+            state.finish_session_work(&choice.session_id);
+        }
         if state.pending_permissions.is_empty() && state.pending_choices.is_empty() {
-            let mood = match decision {
-                Some(ChoiceDecision::Submit { .. }) => {
-                    state.activity_mood().unwrap_or(PetMood::Happy)
-                }
-                Some(ChoiceDecision::Deny) => state.activity_mood().unwrap_or(PetMood::Thinking),
-                Some(ChoiceDecision::Ignore) | None => {
-                    state.activity_mood().unwrap_or(PetMood::Idle)
-                }
+            let mood = if submitted {
+                state.activity_mood().unwrap_or(PetMood::Happy)
+            } else {
+                state.activity_mood().unwrap_or(PetMood::Idle)
             };
             state.set_resting_mood(mood, false);
         }
@@ -498,7 +487,7 @@ fn handle_choice_request(
                 (ClaudeSessionStatus::Streaming, "Streaming".to_string())
             }
             Some(ChoiceDecision::Ignore) | None => {
-                (ClaudeSessionStatus::Done, "Choice closed".to_string())
+                (ClaudeSessionStatus::Done, "Question closed".to_string())
             }
         };
         state.mark_session_interaction_finished(
@@ -509,97 +498,70 @@ fn handle_choice_request(
         );
     }
 
-    choice_response(&choice, decision.unwrap_or(ChoiceDecision::Ignore))
+    question_request_response(&choice, decision.unwrap_or(ChoiceDecision::Ignore))
 }
 
-fn choice_response(choice: &PendingChoice, decision: ChoiceDecision) -> Value {
-    match (choice.kind, decision) {
-        (
-            ChoiceKind::AskUserQuestion,
-            ChoiceDecision::Submit {
-                selected,
-                other_text,
-            },
-        ) => {
-            let mut updated_input = choice.tool_input.clone();
-            if let Some(obj) = updated_input.as_object_mut() {
-                let mut answers = serde_json::Map::new();
-                for (question_index, question) in choice.questions.iter().enumerate() {
-                    let parts: Vec<String> = selected
-                        .get(question_index)
-                        .into_iter()
-                        .flat_map(|items| items.iter())
-                        .filter_map(|option_index| {
-                            let option = question.options.get(*option_index)?;
-                            if option.is_other {
-                                let text = other_text
-                                    .get(question_index)
-                                    .map(|s| s.trim())
-                                    .unwrap_or("");
-                                if text.is_empty() {
-                                    None
-                                } else {
-                                    Some(text.to_string())
-                                }
-                            } else {
-                                Some(option.label.clone())
-                            }
-                        })
-                        .collect();
-                    answers.insert(question.question.clone(), Value::String(parts.join(", ")));
+fn question_request_response(choice: &PendingChoice, decision: ChoiceDecision) -> Value {
+    match decision {
+        ChoiceDecision::Submit {
+            selected,
+            other_text,
+        } => json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": "allow",
+                    "updatedInput": answered_tool_input(choice, &selected, &other_text)
                 }
-                obj.insert("answers".to_string(), Value::Object(answers));
             }
-            pre_tool_allow(updated_input, "Answered in claudie")
-        }
-        (
-            ChoiceKind::ExitPlanMode,
-            ChoiceDecision::Submit {
-                selected,
-                other_text,
-            },
-        ) => {
-            let first = selected.first();
-            if first.is_some_and(|items| items.contains(&0)) {
-                pre_tool_allow(choice.tool_input.clone(), "Plan approved in claudie")
-            } else if first.is_some_and(|items| items.contains(&2)) {
-                let feedback = other_text.first().map(|s| s.trim()).unwrap_or("");
-                if feedback.is_empty() {
-                    pre_tool_deny("User chose to keep planning in claudie")
-                } else {
-                    pre_tool_deny(&format!("Plan rejected: {feedback}"))
+        }),
+        ChoiceDecision::Deny => json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": "deny",
+                    "message": "Declined in claudie; continue in the terminal"
                 }
-            } else {
-                pre_tool_deny("User chose to keep planning in claudie")
             }
-        }
-        (_, ChoiceDecision::Deny) => with_turn_stop(
-            pre_tool_deny("User declined in claudie"),
-            "User declined the request in claudie",
-        ),
-        (_, ChoiceDecision::Ignore) => json!({}),
+        }),
+        ChoiceDecision::Ignore => json!({}),
     }
 }
 
-fn pre_tool_allow(updated_input: Value, reason: &str) -> Value {
-    json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-            "permissionDecisionReason": reason,
-            "updatedInput": updated_input
+// Claude Code's own question dialog answers AskUserQuestion by adding an
+// `answers` map (question text -> chosen label) to the tool input; replicate
+// that shape so the model sees the selection exactly as if answered natively.
+fn answered_tool_input(
+    choice: &PendingChoice,
+    selected: &[Vec<usize>],
+    other_text: &[String],
+) -> Value {
+    let mut updated_input = choice.tool_input.clone();
+    if let Some(obj) = updated_input.as_object_mut() {
+        let mut answers = serde_json::Map::new();
+        for (question_index, question) in choice.questions.iter().enumerate() {
+            let parts: Vec<String> = selected
+                .get(question_index)
+                .into_iter()
+                .flat_map(|items| items.iter())
+                .filter_map(|option_index| {
+                    let option = question.options.get(*option_index)?;
+                    if option.is_other {
+                        let text = other_text
+                            .get(question_index)
+                            .map(|text| text.trim())
+                            .unwrap_or("");
+                        (!text.is_empty()).then(|| text.to_string())
+                    } else {
+                        Some(option.label.clone())
+                    }
+                })
+                .collect();
+            answers.insert(question.question.clone(), Value::String(parts.join(", ")));
         }
-    })
-}
-
-fn pre_tool_deny(reason: &str) -> Value {
-    json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason
-        }
-    })
+        obj.insert("answers".to_string(), Value::Object(answers));
+    }
+    updated_input
 }
 
 fn parse_ask_user_questions(tool_input: &Value) -> Vec<ChoiceQuestion> {
@@ -647,53 +609,14 @@ fn parse_ask_user_questions(tool_input: &Value) -> Vec<ChoiceQuestion> {
         .collect()
 }
 
-fn exit_plan_questions(_tool_input: &Value) -> Vec<ChoiceQuestion> {
-    vec![ChoiceQuestion {
-        header: "Plan mode".to_string(),
-        question: "Choose how claudie should answer Claude Code.".to_string(),
-        multi_select: false,
-        options: vec![
-            ChoiceOption {
-                label: "Approve plan".to_string(),
-                description: "Leave plan mode and start implementation.".to_string(),
-                is_other: false,
-            },
-            ChoiceOption {
-                label: "Keep planning".to_string(),
-                description: "Reject for now and continue refining the plan.".to_string(),
-                is_other: false,
-            },
-            ChoiceOption {
-                label: "Other...".to_string(),
-                description: "Give Claude specific feedback before deciding.".to_string(),
-                is_other: true,
-            },
-        ],
-    }]
-}
-
-fn summarize_exit_plan(tool_input: &Value) -> String {
-    let plan = string_field(tool_input, "plan").unwrap_or_default();
-    let path = string_field(tool_input, "planFilePath")
-        .or_else(|| string_field(tool_input, "plan_file_path"))
-        .unwrap_or_default();
-    if plan.is_empty() {
-        return path;
+// Denials must stop the turn like the terminal "No" option; otherwise Claude
+// retries immediately and the popup reappears before the user can react.
+fn with_turn_stop(mut response: Value, stop_reason: &str) -> Value {
+    if let Some(obj) = response.as_object_mut() {
+        obj.insert("continue".to_string(), Value::Bool(false));
+        obj.insert("stopReason".to_string(), json!(stop_reason));
     }
-    let plan_text = shorten_block(&plan, 16_000);
-    let mut detail = if path.is_empty() {
-        plan_text
-    } else {
-        format!("{plan_text}\n{path}")
-    };
-    if let Some(prompts) = tool_input.get("allowedPrompts").and_then(Value::as_array) {
-        for prompt in prompts.iter().take(8) {
-            let tool = string_field(prompt, "tool").unwrap_or_else(|| "Tool".to_string());
-            let text = string_field(prompt, "prompt").unwrap_or_default();
-            detail.push_str(&format!("\nAllow {tool}: {}", shorten(&text, 120)));
-        }
-    }
-    detail
+    response
 }
 
 fn transcript_len(path: &str) -> Option<u64> {
@@ -740,6 +663,23 @@ fn transcript_has_terminal_denial(path: &str, start: u64) -> bool {
     DENIAL_MARKERS
         .iter()
         .any(|marker| compact_json.contains(marker))
+}
+
+// Non-destructive probe for "Claude Code gave up on this hook request". The
+// stream is switched to non-blocking only for the peek so the final response
+// write (on the same socket) keeps its blocking semantics.
+fn connection_closed(stream: &TcpStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut probe = [0_u8; 1];
+    let closed = match stream.peek(&mut probe) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(err) => err.kind() != std::io::ErrorKind::WouldBlock,
+    };
+    let _ = stream.set_nonblocking(false);
+    closed
 }
 
 pub(crate) fn decide_current_permission(decision: PermissionDecision) {
@@ -889,18 +829,24 @@ pub(crate) fn set_current_choice_other_text(question_index: usize, text: String)
     }
 }
 
-fn clear_stale_interactions(state: &mut AppState, session_id: &str) {
-    let mut stale = Vec::new();
+// Resolve (with Ignore) every pending permission the predicate matches: the
+// popup closes and Claude Code receives an empty hook response, leaving its
+// own native flow in charge.
+fn resolve_pending_permissions(
+    state: &mut AppState,
+    mut should_resolve: impl FnMut(&PendingPermission) -> bool,
+) {
+    let mut resolved = Vec::new();
     state.pending_permissions.retain(|pending| {
-        if pending.session_id == session_id {
-            stale.push(pending.clone());
+        if should_resolve(pending) {
+            resolved.push(pending.clone());
             false
         } else {
             true
         }
     });
 
-    for pending in stale {
+    for pending in resolved {
         state.finish_permission_activity(pending.id);
         let mut slot = pending
             .waiter
@@ -912,18 +858,25 @@ fn clear_stale_interactions(state: &mut AppState, session_id: &str) {
             pending.waiter.ready.notify_all();
         }
     }
+}
 
-    let mut stale_choices = Vec::new();
+// Choice-popup counterpart of resolve_pending_permissions: close the popup
+// and answer the blocked hook with an empty response.
+fn resolve_pending_choices(
+    state: &mut AppState,
+    mut should_resolve: impl FnMut(&PendingChoice) -> bool,
+) {
+    let mut resolved = Vec::new();
     state.pending_choices.retain(|pending| {
-        if pending.session_id == session_id {
-            stale_choices.push(pending.clone());
+        if should_resolve(pending) {
+            resolved.push(pending.clone());
             false
         } else {
             true
         }
     });
 
-    for pending in stale_choices {
+    for pending in resolved {
         state.finish_choice_activity(pending.id);
         let mut slot = pending
             .waiter
@@ -935,6 +888,54 @@ fn clear_stale_interactions(state: &mut AppState, session_id: &str) {
             pending.waiter.ready.notify_all();
         }
     }
+}
+
+// Both the claudie popup and the Claude Code terminal prompt are live at the
+// same time, so forward progress in a session can reveal that a pending
+// permission was already answered in the terminal. Only precise tool_use_id
+// matches and the always-turn-blocking plan/question tools are swept here;
+// unrelated parallel tools finishing must never dismiss someone else's popup.
+fn sweep_terminal_answered_permissions(
+    state: &mut AppState,
+    event: &str,
+    session_id: &str,
+    tool_name: &str,
+    payload: &Value,
+) {
+    match event {
+        "PostToolUse" | "PostToolUseFailure" => {
+            let tool_use_id = payload_tool_use_id(payload);
+            resolve_pending_permissions(state, |pending| {
+                if pending.session_id != session_id {
+                    return false;
+                }
+                if let Some(id) = tool_use_id.as_deref() {
+                    if !pending.tool_use_id.is_empty() && pending.tool_use_id == id {
+                        return true;
+                    }
+                }
+                deny_falls_back_to_terminal(&pending.tool_name)
+            });
+            // Question popups are always turn-blocking, so like the
+            // plan/question permissions above, forward progress in the same
+            // session means they were answered in the terminal.
+            resolve_pending_choices(state, |pending| pending.session_id == session_id);
+        }
+        // Plan approval in the terminal is followed by execution, not by a
+        // PostToolUse for ExitPlanMode — any other tool starting means the
+        // plan dialog was already resolved there.
+        "PreToolUse" if tool_name != "ExitPlanMode" => {
+            resolve_pending_permissions(state, |pending| {
+                pending.session_id == session_id && pending.tool_name == "ExitPlanMode"
+            });
+        }
+        _ => {}
+    }
+}
+
+fn clear_stale_interactions(state: &mut AppState, session_id: &str) {
+    resolve_pending_permissions(state, |pending| pending.session_id == session_id);
+    resolve_pending_choices(state, |pending| pending.session_id == session_id);
 }
 
 fn clears_pending_interaction(event: &str) -> bool {
@@ -1084,19 +1085,6 @@ fn mood_for_tool(tool_name: &str) -> PetMood {
     }
 }
 
-fn is_web_search_tool(tool_name: &str) -> bool {
-    let normalized = compact_tool_name(tool_name);
-    normalized == "websearch" || normalized.ends_with("websearch")
-}
-
-fn compact_tool_name(tool_name: &str) -> String {
-    tool_name
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .map(|ch| ch.to_ascii_lowercase())
-        .collect()
-}
-
 fn mood_for_tool_use(tool_name: &str, payload: &Value) -> PetMood {
     let trimmed = tool_name.trim();
     if !trimmed.eq_ignore_ascii_case("Task") && !trimmed.eq_ignore_ascii_case("Agent") {
@@ -1149,15 +1137,18 @@ fn task_tool_text(payload: &Value) -> String {
 
 fn tool_key_for_session(payload: &Value, session_id: &str) -> String {
     let tool_name = tool_name_from_payload(payload);
-    if let Some(id) = string_field(payload, "tool_use_id")
-        .or_else(|| string_field(payload, "toolUseId"))
-        .or_else(|| string_field(payload, "toolUseID"))
-        .filter(|key| !key.trim().is_empty())
-    {
+    if let Some(id) = payload_tool_use_id(payload) {
         return format!("{session_id}:id:{id}");
     }
     let fingerprint = tool_input_fingerprint(payload).unwrap_or_default();
     format!("{session_id}:tool:{tool_name}:{fingerprint}")
+}
+
+fn payload_tool_use_id(payload: &Value) -> Option<String> {
+    string_field(payload, "tool_use_id")
+        .or_else(|| string_field(payload, "toolUseId"))
+        .or_else(|| string_field(payload, "toolUseID"))
+        .filter(|key| !key.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -1319,6 +1310,7 @@ fn looks_like_search_task(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::{ChoiceKind, ChoiceOption, ChoiceQuestion, ChoiceWaiter, PendingChoice};
     use std::sync::{Arc, Condvar, Mutex};
 
     #[test]
@@ -1452,6 +1444,7 @@ mod tests {
             interaction_sequence: 1,
             session_id: "s1".to_string(),
             tool_name: "Edit".to_string(),
+            tool_use_id: String::new(),
             summary: "edit file".to_string(),
             cwd: String::new(),
             suggestions: Vec::new(),
@@ -2027,58 +2020,132 @@ mod tests {
     }
 
     #[test]
-    fn web_search_tool_names_use_pre_tool_permission_popup() {
-        assert!(is_web_search_tool("WebSearch"));
-        assert!(is_web_search_tool("Web Search"));
-        assert!(is_web_search_tool("web_search"));
-        assert!(is_web_search_tool("mcp__browser__web_search"));
-        assert!(!is_web_search_tool("WebFetch"));
+    fn post_tool_use_resolves_pending_permission_with_matching_tool_use_id() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        {
+            let mut state = state.lock().expect("state poisoned");
+            let mut permission = build_permission("Bash");
+            permission.tool_use_id = "bash-1".to_string();
+            state.pending_permissions.push_back(permission);
+        }
+
+        process_hook(
+            json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "s1",
+                "tool_name": "Bash",
+                "tool_use_id": "bash-1"
+            }),
+            state.clone(),
+        );
+
+        let state = state.lock().expect("state poisoned");
+        assert!(state.pending_permissions.is_empty());
     }
 
     #[test]
-    fn pre_tool_permission_response_allows_or_denies_web_search() {
-        let permission = build_permission("WebSearch");
-        let tool_input = json!({ "query": "claude code hooks" });
+    fn post_tool_use_sweeps_pending_plan_and_question_popups() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        {
+            let mut state = state.lock().expect("state poisoned");
+            let mut plan = build_permission("ExitPlanMode");
+            plan.id = 1;
+            let mut question = build_permission("AskUserQuestion");
+            question.id = 2;
+            state.pending_permissions.push_back(plan);
+            state.pending_permissions.push_back(question);
+        }
 
-        let allow = permission_response(
-            PermissionDecision::AllowOnce,
-            &permission,
-            PermissionResponseKind::PreToolUse {
-                tool_input: tool_input.clone(),
-            },
-        );
-        assert_eq!(
-            allow
-                .get("hookSpecificOutput")
-                .and_then(|h| h.get("hookEventName"))
-                .and_then(Value::as_str),
-            Some("PreToolUse")
-        );
-        assert_eq!(
-            allow
-                .get("hookSpecificOutput")
-                .and_then(|h| h.get("permissionDecision"))
-                .and_then(Value::as_str),
-            Some("allow")
-        );
-        assert_eq!(
-            allow
-                .get("hookSpecificOutput")
-                .and_then(|h| h.get("updatedInput")),
-            Some(&tool_input)
+        // Forward progress in the same session means both blocking dialogs
+        // were answered in the terminal.
+        process_hook(
+            json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "s1",
+                "tool_name": "Read",
+                "tool_use_id": "read-1"
+            }),
+            state.clone(),
         );
 
-        let deny = permission_response(
-            PermissionDecision::Deny,
-            &permission,
-            PermissionResponseKind::PreToolUse { tool_input },
+        let state = state.lock().expect("state poisoned");
+        assert!(state.pending_permissions.is_empty());
+    }
+
+    #[test]
+    fn pre_tool_use_sweeps_pending_exit_plan_only() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        {
+            let mut state = state.lock().expect("state poisoned");
+            let mut plan = build_permission("ExitPlanMode");
+            plan.id = 1;
+            let mut bash = build_permission("Bash");
+            bash.id = 2;
+            state.pending_permissions.push_back(plan);
+            state.pending_permissions.push_back(bash);
+        }
+
+        process_hook(
+            json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "tool_name": "Edit",
+                "tool_use_id": "edit-1"
+            }),
+            state.clone(),
         );
-        assert_eq!(
-            deny.get("hookSpecificOutput")
-                .and_then(|h| h.get("permissionDecision"))
-                .and_then(Value::as_str),
-            Some("deny")
-        );
+
+        let state = state.lock().expect("state poisoned");
+        assert_eq!(state.pending_permissions.len(), 1);
+        assert_eq!(state.pending_permissions[0].tool_name, "Bash");
+    }
+
+    #[test]
+    fn closed_connection_dismisses_waiting_permission() {
+        use std::net::{TcpListener, TcpStream as StdTcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let client = StdTcpStream::connect(addr).expect("connect");
+        let (server_side, _) = listener.accept().expect("accept");
+
+        assert!(!connection_closed(&server_side));
+
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let worker = {
+            let state = state.clone();
+            std::thread::spawn(move || {
+                process_hook_on_connection(
+                    json!({
+                        "hook_event_name": "PermissionRequest",
+                        "session_id": "s1",
+                        "tool_name": "Bash",
+                        "tool_input": { "command": "cargo test" }
+                    }),
+                    state,
+                    Some(&server_side),
+                )
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state
+            .lock()
+            .expect("state poisoned")
+            .pending_permissions
+            .is_empty()
+        {
+            assert!(Instant::now() < deadline, "permission never registered");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Claude Code answering in the terminal aborts the hook request.
+        drop(client);
+
+        let response = worker.join().expect("permission hook thread");
+        assert_eq!(response, json!({}));
+        let state = state.lock().expect("state poisoned");
+        assert!(state.pending_permissions.is_empty());
     }
 
     fn build_permission(tool_name: &str) -> PendingPermission {
@@ -2087,6 +2154,7 @@ mod tests {
             interaction_sequence: 1,
             session_id: "s1".to_string(),
             tool_name: tool_name.to_string(),
+            tool_use_id: String::new(),
             summary: String::new(),
             cwd: String::new(),
             suggestions: Vec::new(),
@@ -2118,52 +2186,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_ask_user_questions_appends_other_option() {
-        let input = json!({
-            "questions": [{
-                "header": "h",
-                "question": "Q?",
-                "multiSelect": false,
-                "options": [
-                    {"label": "A", "description": "a"},
-                    {"label": "B", "description": "b"}
-                ]
-            }]
-        });
-        let questions = parse_ask_user_questions(&input);
-        assert_eq!(questions.len(), 1);
-        assert_eq!(questions[0].options.len(), 3);
-        assert!(questions[0].options[2].is_other);
-        assert_eq!(questions[0].options[2].label, "Other...");
-    }
-
-    #[test]
-    fn parse_ask_user_questions_skips_when_options_empty() {
-        let input = json!({
-            "questions": [{
-                "question": "Q?",
-                "options": []
-            }]
-        });
-        let questions = parse_ask_user_questions(&input);
-        assert!(questions.is_empty());
-    }
-
-    #[test]
-    fn exit_plan_questions_includes_other_feedback_option() {
-        let questions = exit_plan_questions(&json!({}));
-        assert_eq!(questions.len(), 1);
-        assert_eq!(questions[0].options.len(), 3);
-        assert_eq!(questions[0].options[0].label, "Approve plan");
-        assert_eq!(questions[0].options[1].label, "Keep planning");
-        assert!(questions[0].options[2].is_other);
-    }
-
-    #[test]
     fn is_submittable_requires_other_text_when_other_selected() {
-        let mut choice = build_choice(exit_plan_questions(&json!({})), ChoiceKind::ExitPlanMode);
-        // Select Other (index 2)
-        choice.selected[0] = vec![2];
+        let questions = vec![ChoiceQuestion {
+            header: String::new(),
+            question: "Q".to_string(),
+            multi_select: false,
+            options: vec![
+                ChoiceOption {
+                    label: "A".to_string(),
+                    description: String::new(),
+                    is_other: false,
+                },
+                ChoiceOption {
+                    label: "Other...".to_string(),
+                    description: String::new(),
+                    is_other: true,
+                },
+            ],
+        }];
+        let mut choice = build_choice(questions, ChoiceKind::ExitPlanMode);
+        // Select Other (index 1)
+        choice.selected[0] = vec![1];
         choice.other_text[0] = String::new();
         assert!(!choice.is_submittable());
 
@@ -2206,67 +2249,6 @@ mod tests {
     }
 
     #[test]
-    fn ask_user_question_uses_other_text_in_answer() {
-        let input = json!({
-            "questions": [{
-                "question": "Pick one",
-                "options": [
-                    {"label": "A", "description": ""}
-                ]
-            }]
-        });
-        let parsed = parse_ask_user_questions(&input);
-        let mut choice = build_choice(parsed, ChoiceKind::AskUserQuestion);
-        choice.tool_input = input;
-        // Select Other (index 1)
-        choice.selected[0] = vec![1];
-        choice.other_text[0] = "custom answer".to_string();
-
-        let response = choice_response(
-            &choice,
-            ChoiceDecision::Submit {
-                selected: choice.selected.clone(),
-                other_text: choice.other_text.clone(),
-            },
-        );
-        let answer = response
-            .get("hookSpecificOutput")
-            .and_then(|h| h.get("updatedInput"))
-            .and_then(|i| i.get("answers"))
-            .and_then(|a| a.get("Pick one"))
-            .and_then(Value::as_str)
-            .unwrap();
-        assert_eq!(answer, "custom answer");
-    }
-
-    #[test]
-    fn exit_plan_other_path_denies_with_feedback() {
-        let mut choice = build_choice(exit_plan_questions(&json!({})), ChoiceKind::ExitPlanMode);
-        choice.selected[0] = vec![2];
-        choice.other_text[0] = "please address concern X".to_string();
-        let response = choice_response(
-            &choice,
-            ChoiceDecision::Submit {
-                selected: choice.selected.clone(),
-                other_text: choice.other_text.clone(),
-            },
-        );
-        let reason = response
-            .get("hookSpecificOutput")
-            .and_then(|h| h.get("permissionDecisionReason"))
-            .and_then(Value::as_str)
-            .unwrap();
-        assert_eq!(
-            response
-                .get("hookSpecificOutput")
-                .and_then(|h| h.get("permissionDecision"))
-                .and_then(Value::as_str),
-            Some("deny")
-        );
-        assert!(reason.contains("please address concern X"));
-    }
-
-    #[test]
     fn permission_deny_stops_turn() {
         let permission = build_permission("Bash");
         let response = permission_request_response(PermissionDecision::Deny, &permission);
@@ -2294,45 +2276,215 @@ mod tests {
     }
 
     #[test]
-    fn choice_cancel_stops_turn_but_keep_planning_does_not() {
-        let choice = build_choice(exit_plan_questions(&json!({})), ChoiceKind::ExitPlanMode);
-        let cancel = choice_response(&choice, ChoiceDecision::Deny);
-        assert_eq!(cancel.get("continue").and_then(Value::as_bool), Some(false));
-        assert_eq!(
-            cancel["hookSpecificOutput"]["permissionDecision"].as_str(),
-            Some("deny")
-        );
+    fn plan_and_question_deny_falls_back_to_terminal_without_stopping_turn() {
+        for tool in ["ExitPlanMode", "AskUserQuestion"] {
+            let permission = build_permission(tool);
+            let response = permission_request_response(PermissionDecision::Deny, &permission);
+            assert!(response.get("continue").is_none(), "{tool} stopped turn");
+            assert_eq!(
+                response["hookSpecificOutput"]["decision"]["behavior"].as_str(),
+                Some("deny")
+            );
+            assert!(
+                response["hookSpecificOutput"]["decision"]
+                    .get("interrupt")
+                    .is_none(),
+                "{tool} carried interrupt"
+            );
+        }
+    }
 
-        let mut keep = build_choice(exit_plan_questions(&json!({})), ChoiceKind::ExitPlanMode);
-        keep.selected[0] = vec![1];
-        let keep_response = choice_response(
-            &keep,
+    #[test]
+    fn parse_ask_user_questions_extracts_options_and_appends_other() {
+        let tool_input = json!({
+            "questions": [{
+                "header": "学习方向",
+                "multiSelect": false,
+                "question": "你最想从哪个方向开始学习 Agent?",
+                "options": [
+                    { "label": "从零构建 Agent", "description": "手写 Agent 循环" },
+                    { "label": "使用 Agent 框架", "description": "LangChain/CrewAI" }
+                ]
+            }]
+        });
+        let questions = parse_ask_user_questions(&tool_input);
+        assert_eq!(questions.len(), 1);
+        let question = &questions[0];
+        assert_eq!(question.header, "学习方向");
+        assert!(!question.multi_select);
+        assert_eq!(question.options.len(), 3);
+        assert_eq!(question.options[0].label, "从零构建 Agent");
+        assert!(!question.options[0].is_other);
+        assert!(question.options[2].is_other);
+    }
+
+    #[test]
+    fn parse_ask_user_questions_rejects_question_without_options() {
+        let tool_input = json!({ "questions": [{ "question": "Q", "options": [] }] });
+        assert!(parse_ask_user_questions(&tool_input).is_empty());
+        assert!(parse_ask_user_questions(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn question_submit_answers_through_updated_input() {
+        let tool_input = json!({ "questions": [{ "question": "Pick", "options": [] }] });
+        let questions = vec![ChoiceQuestion {
+            header: String::new(),
+            question: "Pick".to_string(),
+            multi_select: true,
+            options: vec![
+                ChoiceOption {
+                    label: "A".to_string(),
+                    description: String::new(),
+                    is_other: false,
+                },
+                ChoiceOption {
+                    label: "B".to_string(),
+                    description: String::new(),
+                    is_other: false,
+                },
+                ChoiceOption {
+                    label: "Other...".to_string(),
+                    description: String::new(),
+                    is_other: true,
+                },
+            ],
+        }];
+        let mut choice = build_choice(questions, ChoiceKind::AskUserQuestion);
+        choice.tool_input = tool_input.clone();
+
+        let response = question_request_response(
+            &choice,
             ChoiceDecision::Submit {
-                selected: keep.selected.clone(),
-                other_text: keep.other_text.clone(),
+                selected: vec![vec![0, 2]],
+                other_text: vec![" custom answer ".to_string()],
             },
         );
-        assert!(keep_response.get("continue").is_none());
+
+        let decision = &response["hookSpecificOutput"]["decision"];
         assert_eq!(
-            keep_response["hookSpecificOutput"]["permissionDecision"].as_str(),
+            response["hookSpecificOutput"]["hookEventName"].as_str(),
+            Some("PermissionRequest")
+        );
+        assert_eq!(decision["behavior"].as_str(), Some("allow"));
+        assert_eq!(
+            decision["updatedInput"]["answers"]["Pick"].as_str(),
+            Some("A, custom answer")
+        );
+        // The original questions survive in the updated input.
+        assert_eq!(
+            decision["updatedInput"]["questions"],
+            tool_input["questions"]
+        );
+        assert!(response.get("continue").is_none());
+    }
+
+    #[test]
+    fn question_deny_falls_back_to_terminal_without_stopping_turn() {
+        let choice = build_choice(Vec::new(), ChoiceKind::AskUserQuestion);
+        let response = question_request_response(&choice, ChoiceDecision::Deny);
+        assert!(response.get("continue").is_none());
+        assert_eq!(
+            response["hookSpecificOutput"]["decision"]["behavior"].as_str(),
             Some("deny")
         );
+        assert!(
+            response["hookSpecificOutput"]["decision"]
+                .get("interrupt")
+                .is_none()
+        );
+
+        let ignored = question_request_response(&choice, ChoiceDecision::Ignore);
+        assert_eq!(ignored, json!({}));
     }
 
     #[test]
-    fn summarize_exit_plan_keeps_long_plan_text() {
-        let plan = "x".repeat(800);
-        let input = json!({"plan": plan.clone()});
-        let detail = summarize_exit_plan(&input);
-        assert!(detail.len() >= 800);
-        assert!(detail.starts_with("xxxx"));
+    fn post_tool_use_sweeps_pending_choice_in_same_session() {
+        let state = Arc::new(Mutex::new(AppState::new()));
+        {
+            let mut state = state.lock().expect("state poisoned");
+            let mut choice = build_choice(Vec::new(), ChoiceKind::AskUserQuestion);
+            choice.session_id = "s1".to_string();
+            state.pending_choices.push_back(choice);
+            let mut other = build_choice(Vec::new(), ChoiceKind::AskUserQuestion);
+            other.id = 2;
+            other.session_id = "s2".to_string();
+            state.pending_choices.push_back(other);
+        }
+
+        process_hook(
+            json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "s1",
+                "tool_name": "Read",
+                "tool_use_id": "read-1"
+            }),
+            state.clone(),
+        );
+
+        let state = state.lock().expect("state poisoned");
+        assert_eq!(state.pending_choices.len(), 1);
+        assert_eq!(state.pending_choices[0].session_id, "s2");
     }
 
     #[test]
-    fn summarize_exit_plan_preserves_markdown_newlines() {
-        let input = json!({"plan": "# Title\r\n\r\n## Step\n- item"});
-        let detail = summarize_exit_plan(&input);
-        assert_eq!(detail, "# Title\n\n## Step\n- item");
+    fn question_permission_request_registers_choice_and_closed_connection_dismisses() {
+        use std::net::{TcpListener, TcpStream as StdTcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let client = StdTcpStream::connect(addr).expect("connect");
+        let (server_side, _) = listener.accept().expect("accept");
+
+        let state = Arc::new(Mutex::new(AppState::new()));
+        let worker = {
+            let state = state.clone();
+            std::thread::spawn(move || {
+                process_hook_on_connection(
+                    json!({
+                        "hook_event_name": "PermissionRequest",
+                        "session_id": "s1",
+                        "tool_name": "AskUserQuestion",
+                        "tool_input": {
+                            "questions": [{
+                                "question": "Q",
+                                "options": [{ "label": "A" }]
+                            }]
+                        }
+                    }),
+                    state,
+                    Some(&server_side),
+                )
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            {
+                let state = state.lock().expect("state poisoned");
+                if !state.pending_choices.is_empty() {
+                    assert!(state.pending_permissions.is_empty());
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "choice never registered");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Claude Code answering in the terminal aborts the hook request.
+        drop(client);
+
+        let response = worker.join().expect("question hook thread");
+        assert_eq!(response, json!({}));
+        let state = state.lock().expect("state poisoned");
+        assert!(state.pending_choices.is_empty());
+    }
+
+    #[test]
+    fn summarize_tool_input_renders_plan_as_markdown() {
+        let input = json!({ "plan": "# Title\n\n- step one" });
+        let summary = summarize_tool_input(&input).unwrap();
+        assert_eq!(summary, "# Title\n\n- step one");
     }
 
     #[test]
@@ -2463,6 +2615,11 @@ fn summarize_tool_input(tool_input: &Value) -> Option<String> {
         }
         body.push_str(&added_lines(&content));
         return Some(fenced("diff", body.trim_end_matches('\n')));
+    }
+
+    // Plan approval (ExitPlanMode): the plan field is already markdown.
+    if let Some(plan) = string_field(tool_input, "plan") {
+        return Some(shorten_block(&plan, PAYLOAD_SUMMARY_MAX_CHARS));
     }
 
     // Read/search style tools: surface the target verbatim in a code chip.
