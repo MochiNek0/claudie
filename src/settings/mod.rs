@@ -240,7 +240,6 @@ impl LlmProfileDb {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn active_profile(&self) -> Option<&LlmProfile> {
         self.profiles
             .iter()

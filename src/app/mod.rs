@@ -344,7 +344,6 @@ pub(crate) struct AppState {
     pub(crate) last_error: String,
     pub(crate) next_interaction_sequence: u64,
     pub(crate) next_permission_id: u64,
-    #[allow(dead_code)]
     pub(crate) next_choice_id: u64,
     pub(crate) active_tools: usize,
     pub(crate) active_tool_moods: HashMap<PetMood, usize>,
@@ -480,17 +479,6 @@ impl AppState {
             self.refresh_visual_mood();
         }
         removed
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn clear_activity_spans_by_kind(&mut self, kind: ActivityKind) {
-        let before = self.activity_spans.len();
-        self.activity_spans
-            .retain(|_, span| span.kind == ActivityKind::Resting || span.kind != kind);
-        if self.activity_spans.len() != before {
-            self.last_activity = Instant::now();
-            self.refresh_visual_mood();
-        }
     }
 
     pub(crate) fn clear_session_activities(&mut self, session_id: &str) {
@@ -973,16 +961,6 @@ impl AppState {
         tool.mood
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn finish_all_tools(&mut self) {
-        self.active_tools = 0;
-        self.active_tool_moods.clear();
-        self.active_tool_keys.clear();
-        self.active_tool_names.clear();
-        self.clear_activity_spans_by_kind(ActivityKind::Tool);
-        self.refresh_visual_mood();
-    }
-
     pub(crate) fn finish_session_tools(&mut self, session_id: &str) {
         let keys = self
             .active_tool_keys
@@ -1010,15 +988,6 @@ impl AppState {
         self.finish_session_tools(session_id);
         self.finish_session_subagents(session_id);
         self.clear_session_activities(session_id);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn clear_activity(&mut self) {
-        self.finish_all_tools();
-        self.active_subagents = 0;
-        self.active_subagent_sessions.clear();
-        self.clear_activity_spans_by_kind(ActivityKind::Subagent);
-        self.refresh_visual_mood();
     }
 
     pub(crate) fn activity_mood(&self) -> Option<PetMood> {
@@ -1584,7 +1553,6 @@ impl AppState {
         });
     }
 
-    #[allow(dead_code)]
     pub(crate) fn record_choice_stats(&mut self) {
         self.stats.record(|day| {
             day.choice_requests = day.choice_requests.saturating_add(1);
@@ -1672,7 +1640,6 @@ impl AppState {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum ActivityKind {
     Resting,
