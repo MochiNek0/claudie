@@ -28,6 +28,7 @@ fn show_settings_panel_tab_for_parent(parent: HWND, tab: i32) {
             let _ = old_window.hide();
         }
 
+        crate::ui::ensure_embedded_fonts();
         let Ok(window) = SettingsWindow::new() else {
             return;
         };

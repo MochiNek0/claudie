@@ -29,7 +29,11 @@ pub(super) fn set_stats_status(ui: &SettingsWindow) {
 fn summary_line(stats: &DailyStats) -> String {
     format!(
         "{} prompts, {} tools, {} tokens, {} focus sessions, {} errors",
-        stats.prompts, stats.tool_uses, stats.token_delta, stats.completed_focus, stats.errors
+        stats.prompts,
+        stats.tool_uses,
+        compact_number(stats.token_delta),
+        stats.completed_focus,
+        stats.errors
     )
 }
 

@@ -74,6 +74,7 @@ fn sync_prompt_popup_impl(parent: HWND, force: bool) {
         let mut slot = slot.borrow_mut();
         let mut created = false;
         if slot.is_none() {
+            crate::ui::ensure_embedded_fonts();
             let Ok(window) = PromptWindow::new() else {
                 return;
             };
@@ -238,8 +239,8 @@ fn block_view(block: &MarkdownBlock) -> BlockView {
         MarkdownBlockKind::Quote => (6, 13.0),
         MarkdownBlockKind::Diff => unreachable!("handled above"),
     };
-    let mono = block.kind == MarkdownBlockKind::Code;
-    let avail = if mono {
+    let is_code = block.kind == MarkdownBlockKind::Code;
+    let avail = if is_code {
         DETAIL_CODE_TEXT_PX
     } else {
         DETAIL_TEXT_PX - f32::from(block.indent) * 14.0
@@ -248,7 +249,9 @@ fn block_view(block: &MarkdownBlock) -> BlockView {
         kind,
         text: block.text.clone(),
         indent: block.indent,
-        lines: estimate_wrapped_lines(&block.text, font_px, avail, mono),
+        // Every block renders in the monospace Maple Mono CN, so the line
+        // estimate always uses mono metrics, not just code blocks.
+        lines: estimate_wrapped_lines(&block.text, font_px, avail, true),
         diff_lines: Vec::new(),
     }
 }
@@ -327,7 +330,7 @@ fn choice_snapshot(choice: &PendingChoice) -> PromptSnapshot {
             question_index,
             option_index: 0,
             label: String::new(),
-            desc_lines: estimate_wrapped_lines(&header_text, 12.0, HEADER_TEXT_PX, false),
+            desc_lines: estimate_wrapped_lines(&header_text, 12.0, HEADER_TEXT_PX, true),
             description: header_text,
             selected: false,
             is_other: false,
@@ -353,13 +356,8 @@ fn choice_snapshot(choice: &PendingChoice) -> PromptSnapshot {
             options.push(OptionView {
                 question_index,
                 option_index,
-                label_lines: estimate_wrapped_lines(&option.label, 13.0, OPTION_TEXT_PX, false),
-                desc_lines: estimate_wrapped_lines(
-                    &option.description,
-                    12.0,
-                    OPTION_TEXT_PX,
-                    false,
-                ),
+                label_lines: estimate_wrapped_lines(&option.label, 13.0, OPTION_TEXT_PX, true),
+                desc_lines: estimate_wrapped_lines(&option.description, 12.0, OPTION_TEXT_PX, true),
                 label: option.label.clone(),
                 description: option.description.clone(),
                 selected,

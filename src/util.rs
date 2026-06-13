@@ -247,14 +247,45 @@ fn line_indent(raw_line: &str) -> u8 {
 /// `avail_px` at `font_px`. Slint's `Text` does not grow with wrapping,
 /// so the UI sizes rows from this estimate; it leans slightly generous.
 pub(crate) fn estimate_wrapped_lines(text: &str, font_px: f32, avail_px: f32, mono: bool) -> u32 {
-    let avail_px = avail_px.max(font_px);
+    let px_per_unit = font_px * 1.06;
+    let avail = (avail_px.max(font_px) / px_per_unit).max(1.0);
+    let space_w = char_width_units(' ', mono);
     text.split('\n')
-        .map(|line| {
-            let units: f32 = line.chars().map(|c| char_width_units(c, mono)).sum();
-            let px = units * font_px * 1.06;
-            (px / avail_px).ceil().max(1.0) as u32
-        })
+        .map(|line| wrap_line_count(line, avail, space_w, mono))
         .sum()
+}
+
+// Greedy word-wrap simulation matching Slint's `wrap: word-wrap`: break at
+// whitespace, and break a word that is wider than the line at the character
+// level. Widths are in `char_width_units`; `avail` is the line width in those
+// units. A plain chars/avail estimate ignores word boundaries and undercounts
+// when a wrap leaves a short first line (e.g. a command that breaks after a
+// space then carries one long no-space token), which clips the fixed-height
+// code rows in the prompt popup.
+fn wrap_line_count(line: &str, avail: f32, space_w: f32, mono: bool) -> u32 {
+    let mut count = 1u32;
+    let mut cur = 0.0f32; // width used on the current line, in units
+    for word in line.split_whitespace() {
+        let w: f32 = word.chars().map(|c| char_width_units(c, mono)).sum();
+        // Move to a fresh line when the word plus its leading space does not
+        // fit and the current line already has content.
+        if cur > 0.0 && cur + space_w + w > avail {
+            count += 1;
+            cur = 0.0;
+        }
+        let start = if cur > 0.0 { cur + space_w } else { 0.0 };
+        if start + w <= avail {
+            cur = start + w;
+        } else {
+            // Overlong word: fill the rest of this line, then spill across
+            // full lines at the character level.
+            let overflow = start + w - avail;
+            let extra = (overflow / avail).ceil() as u32;
+            count += extra;
+            cur = overflow - (extra as f32 - 1.0) * avail;
+        }
+    }
+    count
 }
 
 fn char_width_units(c: char, mono: bool) -> f32 {
@@ -267,8 +298,11 @@ fn char_width_units(c: char, mono: bool) -> f32 {
             | '\u{FF00}'..='\u{FF60}'
             | '\u{FFE0}'..='\u{FFE6}'
             | '\u{20000}'..='\u{2FFFD}');
+    // The popup renders in Maple Mono CN, a 2:1 grid: half-width Latin ~0.6em
+    // (mono branch below uses 0.62), full-width CJK ~1.2em. Counting CJK as
+    // 1.0 here would undercount Chinese-heavy lines and clip the rows.
     if wide {
-        return 1.0;
+        return 1.2;
     }
     if mono {
         return 0.62;
@@ -479,5 +513,21 @@ mod tests {
         assert!(estimate_wrapped_lines(&cjk, 13.0, 500.0, false) >= 2);
         // Explicit newlines always count.
         assert_eq!(estimate_wrapped_lines("a\nb\nc", 13.0, 500.0, true), 3);
+    }
+
+    #[test]
+    fn estimate_wrapped_lines_counts_word_boundary_wrap() {
+        // A command that breaks after a space, leaving a short first line, then
+        // carries one long no-space token. Char-packing would undercount this
+        // and clip the code row; greedy wrapping must reserve the extra line.
+        let cmd = "Get-PSDrive C | Select-Object Used,Free,\
+            @{N=\"UsedGB\";E={[math]::Round($_.Used/1GB,2)}},\
+            @{N=\"FreeGB\";E={[math]::Round($_.Free/1GB,2)}},\
+            @{N=\"TotalGB\";E={[math]::Round(($_.Used+$_.Free)/1GB,2)}}";
+        let packed = {
+            let units: f32 = cmd.chars().map(|c| char_width_units(c, true)).sum();
+            (units * 12.0 * 1.06 / 510.0).ceil() as u32
+        };
+        assert!(estimate_wrapped_lines(cmd, 12.0, 510.0, true) > packed);
     }
 }

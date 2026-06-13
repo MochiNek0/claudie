@@ -177,12 +177,12 @@ slint::slint! {
     }
 
     component MonoLineEdit inherits LineEdit {
-        font-family: "Segoe UI";
+        font-family: "Maple Mono CN";
         font-size: 12px;
     }
 
     component MonoTextEdit inherits TextEdit {
-        font-family: "Segoe UI";
+        font-family: "Maple Mono CN";
         font-size: 12px;
     }
 
@@ -288,14 +288,14 @@ slint::slint! {
         }
 
         Text {
-            x: 34px;
+            x: 30px;
             y: 4px;
-            width: root.width - 42px;
+            width: root.width - 36px;
             height: root.height - 8px;
             text: root.text;
             overflow: elide;
             vertical-alignment: center;
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 600;
             color: root.active ? #ffffff : Theme.ink-secondary;
         }
@@ -618,7 +618,10 @@ slint::slint! {
         title: "claudie Settings";
         icon: @image-url("../../assets/icon.ico");
         background: Theme.window-bg;
-        default-font-family: "Segoe UI";
+        // Bundled Maple Mono CN (registered in ensure_embedded_fonts) covers
+        // Latin + CJK incl. fullwidth punctuation (【】。) from one monospace
+        // family, so nothing depends on system fonts or renderer fallback.
+        default-font-family: "Maple Mono CN";
         default-font-size: 13px;
 
         property <length> content_width: 584px;
@@ -823,7 +826,7 @@ slint::slint! {
                 }
 
                 Text { x: 0px; y: 472px; text: "Session switcher"; color: Theme.ink-faint; font-size: 12px; }
-                Text { x: 0px; y: 494px; width: 480px; text: "Show the compact focus panel when more than one Claude Code session is active."; color: Theme.ink; font-size: 13px; }
+                Text { x: 0px; y: 494px; width: 504px; height: 48px; text: "Show the compact focus panel when more than one Claude Code session is active."; wrap: word-wrap; color: Theme.ink; font-size: 13px; }
                 TogglePill { x: 538px; y: 482px; width: 46px; height: 24px; checked <=> root.show_session_switcher; }
 
                 ActionButton { x: 408px; y: 556px; width: 80px; height: 32px; text: "Save"; kind: "primary"; clicked => { root.save_basic(); } }
@@ -897,12 +900,12 @@ slint::slint! {
 
                 Text { x: 0px; y: 72px; text: "Profile"; color: Theme.ink-faint; font-size: 12px; }
                 PointerComboBox {
-                    x: 0px; y: 92px; width: 244px; height: 32px;
+                    x: 0px; y: 92px; width: 200px; height: 32px;
                     model: root.profile_model;
                     current-index <=> root.selected_profile_index;
                     selected(index) => { root.select_profile(index); }
                 }
-                Text { x: 256px; y: 98px; width: 40px; text: root.profile_position; color: Theme.ink-faint; font-size: 12px; }
+                Text { x: 208px; y: 98px; width: 88px; text: root.profile_position; overflow: elide; color: Theme.ink-faint; font-size: 12px; }
                 ActionButton { x: 304px; y: 92px; width: 60px; height: 32px; text: "New"; clicked => { root.new_profile(); } }
                 ActionButton { x: 372px; y: 92px; width: 124px; height: 32px; text: "Import Current"; clicked => { root.import_profile(); } }
                 ActionButton { x: 504px; y: 92px; width: 80px; height: 32px; text: "Delete"; kind: "danger"; clicked => { root.delete_profile(); } }
@@ -947,7 +950,7 @@ slint::slint! {
 
                 Rectangle { x: 0px; y: 72px; width: 284px; height: 240px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
                 Text { x: 24px; y: 92px; width: 236px; text: root.stats_today_title; color: Theme.ink; font-size: 14px; font-weight: 600; }
-                Text { x: 24px; y: 116px; width: 236px; height: 28px; text: root.stats_today_summary; overflow: elide; color: Theme.ink; font-size: 12px; }
+                Text { x: 24px; y: 116px; width: 236px; height: 28px; text: root.stats_today_summary; wrap: word-wrap; color: Theme.ink; font-size: 12px; }
                 StatBarRow { x: 24px; y: 152px; width: 236px; height: 20px; label: "Write"; value: root.stats_today_write_value; bar: root.stats_today_write_bar; accent: Theme.chart-teal; }
                 StatBarRow { x: 24px; y: 176px; width: 236px; height: 20px; label: "Bash"; value: root.stats_today_bash_value; bar: root.stats_today_bash_bar; accent: Theme.chart-blue; }
                 StatBarRow { x: 24px; y: 200px; width: 236px; height: 20px; label: "Search"; value: root.stats_today_search_value; bar: root.stats_today_search_bar; accent: Theme.chart-amber; }
@@ -957,7 +960,7 @@ slint::slint! {
 
                 Rectangle { x: 300px; y: 72px; width: 284px; height: 240px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
                 Text { x: 324px; y: 92px; width: 236px; text: root.stats_recent_title; color: Theme.ink; font-size: 14px; font-weight: 600; }
-                Text { x: 324px; y: 116px; width: 236px; height: 28px; text: root.stats_recent_summary; overflow: elide; color: Theme.ink; font-size: 12px; }
+                Text { x: 324px; y: 116px; width: 236px; height: 28px; text: root.stats_recent_summary; wrap: word-wrap; color: Theme.ink; font-size: 12px; }
                 StatBarRow { x: 324px; y: 152px; width: 236px; height: 20px; label: "Write"; value: root.stats_recent_write_value; bar: root.stats_recent_write_bar; accent: Theme.chart-teal; }
                 StatBarRow { x: 324px; y: 176px; width: 236px; height: 20px; label: "Bash"; value: root.stats_recent_bash_value; bar: root.stats_recent_bash_bar; accent: Theme.chart-blue; }
                 StatBarRow { x: 324px; y: 200px; width: 236px; height: 20px; label: "Search"; value: root.stats_recent_search_value; bar: root.stats_recent_search_bar; accent: Theme.chart-amber; }
@@ -1063,7 +1066,10 @@ slint::slint! {
                     text: line.text;
                     wrap: word-wrap;
                     vertical-alignment: top;
-                    font-family: "Consolas";
+                    // Maple Mono CN is a 2:1 monospace grid (half-width Latin
+                    // / full-width CJK) that matches the mono line-count
+                    // estimate, so code/diff rows neither clip nor show tofu.
+                    font-family: "Maple Mono CN";
                     font-size: 12px;
                     color: line.tone == 1 ? #1a7f37
                         : (line.tone == 2 ? #cf222e : #57606a);
@@ -1077,7 +1083,7 @@ slint::slint! {
             height: parent.height - 16px;
             text: data.text;
             wrap: word-wrap;
-            font-family: "Consolas";
+            font-family: "Maple Mono CN";
             font-size: 12px;
             color: Theme.ink;
         }
@@ -1224,7 +1230,7 @@ slint::slint! {
         title: "claudie request";
         icon: @image-url("../../assets/icon.ico");
         background: Theme.window-bg;
-        default-font-family: "Segoe UI";
+        default-font-family: "Maple Mono CN";
 
         in property <bool> is_choice: false;
         in property <string> title_text;
