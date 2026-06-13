@@ -608,6 +608,67 @@ slint::slint! {
         value: string,
     }
 
+    struct StatTrendBar {
+        day_label: string,
+        height: float,
+        today: bool,
+    }
+
+    struct StatHighlight {
+        label: string,
+        value: string,
+    }
+
+    // Compact headline metric card used by the Stats tab.
+    component StatKpiCard inherits Rectangle {
+        in property <string> label;
+        in property <string> value;
+        in property <string> sub;
+        in property <brush> accent: Theme.accent;
+
+        background: Theme.sunken;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.card-border;
+
+        Rectangle {
+            x: parent.width - 18px;
+            y: 14px;
+            width: 6px;
+            height: 6px;
+            border-radius: 3px;
+            background: root.accent;
+        }
+        Text {
+            x: 14px;
+            y: 12px;
+            width: parent.width - 40px;
+            text: root.label;
+            overflow: elide;
+            color: Theme.ink-faint;
+            font-size: 11px;
+        }
+        Text {
+            x: 14px;
+            y: 28px;
+            width: parent.width - 28px;
+            text: root.value;
+            overflow: elide;
+            color: Theme.ink;
+            font-size: 20px;
+            font-weight: 700;
+        }
+        Text {
+            x: 14px;
+            y: 54px;
+            width: parent.width - 28px;
+            text: root.sub;
+            overflow: elide;
+            color: Theme.ink-muted;
+            font-size: 11px;
+        }
+    }
+
     export component SettingsWindow inherits Window {
         min-width: 400px;
         preferred-width: 800px;
@@ -665,22 +726,17 @@ slint::slint! {
         in property <float> profile_usage_five_hour_bar;
         in property <float> profile_usage_seven_day_bar;
 
-        in property <string> stats_today_title;
-        in property <string> stats_today_summary;
-        in property <string> stats_recent_title;
-        in property <string> stats_recent_summary;
-        in property <string> stats_today_write_value;
-        in property <string> stats_today_bash_value;
-        in property <string> stats_today_search_value;
-        in property <string> stats_today_subagent_value;
-        in property <string> stats_today_permission_value;
-        in property <string> stats_today_choice_value;
-        in property <float> stats_today_write_bar;
-        in property <float> stats_today_bash_bar;
-        in property <float> stats_today_search_bar;
-        in property <float> stats_today_subagent_bar;
-        in property <float> stats_today_permission_bar;
-        in property <float> stats_today_choice_bar;
+        in property <string> stats_kpi_prompts;
+        in property <string> stats_kpi_prompts_sub;
+        in property <string> stats_kpi_tokens;
+        in property <string> stats_kpi_tokens_sub;
+        in property <string> stats_kpi_cache;
+        in property <string> stats_kpi_cache_sub;
+        in property <string> stats_kpi_tools;
+        in property <string> stats_kpi_tools_sub;
+        in property <[StatTrendBar]> stats_trend;
+        in property <string> stats_trend_caption;
+        in property <[StatHighlight]> stats_highlights;
         in property <string> stats_recent_write_value;
         in property <string> stats_recent_bash_value;
         in property <string> stats_recent_search_value;
@@ -693,14 +749,6 @@ slint::slint! {
         in property <float> stats_recent_subagent_bar;
         in property <float> stats_recent_permission_bar;
         in property <float> stats_recent_choice_bar;
-        in property <string> stats_today_input_value;
-        in property <string> stats_today_output_value;
-        in property <string> stats_today_cache_write_value;
-        in property <string> stats_today_cache_read_value;
-        in property <float> stats_today_input_bar;
-        in property <float> stats_today_output_bar;
-        in property <float> stats_today_cache_write_bar;
-        in property <float> stats_today_cache_read_bar;
         in property <string> stats_recent_input_value;
         in property <string> stats_recent_output_value;
         in property <string> stats_recent_cache_write_value;
@@ -786,7 +834,7 @@ slint::slint! {
             width: root.width - 192px;
             height: root.height - 56px;
             viewport-width: root.content_width;
-            viewport-height: root.active_tab == 0 ? 608px : (root.active_tab == 1 ? 456px : (root.active_tab == 2 ? 612px : 536px));
+            viewport-height: root.active_tab == 0 ? 608px : (root.active_tab == 1 ? 456px : (root.active_tab == 2 ? 612px : 600px));
 
             if active_tab == 0: Rectangle {
                 width: root.content_width;
@@ -942,45 +990,75 @@ slint::slint! {
 
             if active_tab == 3: Rectangle {
                 width: root.content_width;
-                height: 536px;
+                height: 600px;
                 background: transparent;
 
                 Text { x: 0px; y: 0px; text: "Session ledger"; font-size: 17px; font-weight: 700; color: Theme.ink; }
                 Text { x: 0px; y: 28px; width: 576px; text: "A quiet local record of Claude Code activity observed by claudie."; font-size: 13px; color: Theme.ink-faint; }
 
-                Rectangle { x: 0px; y: 72px; width: 284px; height: 240px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
-                Text { x: 24px; y: 92px; width: 236px; text: root.stats_today_title; color: Theme.ink; font-size: 14px; font-weight: 600; }
-                Text { x: 24px; y: 116px; width: 236px; height: 28px; text: root.stats_today_summary; wrap: word-wrap; color: Theme.ink; font-size: 12px; }
-                StatBarRow { x: 24px; y: 152px; width: 236px; height: 20px; label: "Write"; value: root.stats_today_write_value; bar: root.stats_today_write_bar; accent: Theme.chart-teal; }
-                StatBarRow { x: 24px; y: 176px; width: 236px; height: 20px; label: "Bash"; value: root.stats_today_bash_value; bar: root.stats_today_bash_bar; accent: Theme.chart-blue; }
-                StatBarRow { x: 24px; y: 200px; width: 236px; height: 20px; label: "Search"; value: root.stats_today_search_value; bar: root.stats_today_search_bar; accent: Theme.chart-amber; }
-                StatBarRow { x: 24px; y: 224px; width: 236px; height: 20px; label: "Agent"; value: root.stats_today_subagent_value; bar: root.stats_today_subagent_bar; accent: Theme.chart-purple; }
-                StatBarRow { x: 24px; y: 248px; width: 236px; height: 20px; label: "Perm"; value: root.stats_today_permission_value; bar: root.stats_today_permission_bar; accent: Theme.accent; }
-                StatBarRow { x: 24px; y: 272px; width: 236px; height: 20px; label: "Choice"; value: root.stats_today_choice_value; bar: root.stats_today_choice_bar; accent: Theme.chart-olive; }
+                // Headline metrics — today, with a 7-day comparison beneath.
+                StatKpiCard { x: 0px; y: 60px; width: 137px; height: 74px; label: "Prompts"; value: root.stats_kpi_prompts; sub: root.stats_kpi_prompts_sub; accent: Theme.accent; }
+                StatKpiCard { x: 149px; y: 60px; width: 137px; height: 74px; label: "Tokens"; value: root.stats_kpi_tokens; sub: root.stats_kpi_tokens_sub; accent: Theme.chart-blue; }
+                StatKpiCard { x: 298px; y: 60px; width: 137px; height: 74px; label: "Cache hit"; value: root.stats_kpi_cache; sub: root.stats_kpi_cache_sub; accent: Theme.chart-teal; }
+                StatKpiCard { x: 447px; y: 60px; width: 137px; height: 74px; label: "Tool calls"; value: root.stats_kpi_tools; sub: root.stats_kpi_tools_sub; accent: Theme.chart-purple; }
 
-                Rectangle { x: 300px; y: 72px; width: 284px; height: 240px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
-                Text { x: 324px; y: 92px; width: 236px; text: root.stats_recent_title; color: Theme.ink; font-size: 14px; font-weight: 600; }
-                Text { x: 324px; y: 116px; width: 236px; height: 28px; text: root.stats_recent_summary; wrap: word-wrap; color: Theme.ink; font-size: 12px; }
-                StatBarRow { x: 324px; y: 152px; width: 236px; height: 20px; label: "Write"; value: root.stats_recent_write_value; bar: root.stats_recent_write_bar; accent: Theme.chart-teal; }
-                StatBarRow { x: 324px; y: 176px; width: 236px; height: 20px; label: "Bash"; value: root.stats_recent_bash_value; bar: root.stats_recent_bash_bar; accent: Theme.chart-blue; }
-                StatBarRow { x: 324px; y: 200px; width: 236px; height: 20px; label: "Search"; value: root.stats_recent_search_value; bar: root.stats_recent_search_bar; accent: Theme.chart-amber; }
-                StatBarRow { x: 324px; y: 224px; width: 236px; height: 20px; label: "Agent"; value: root.stats_recent_subagent_value; bar: root.stats_recent_subagent_bar; accent: Theme.chart-purple; }
-                StatBarRow { x: 324px; y: 248px; width: 236px; height: 20px; label: "Perm"; value: root.stats_recent_permission_value; bar: root.stats_recent_permission_bar; accent: Theme.accent; }
-                StatBarRow { x: 324px; y: 272px; width: 236px; height: 20px; label: "Choice"; value: root.stats_recent_choice_value; bar: root.stats_recent_choice_bar; accent: Theme.chart-olive; }
+                // Activity trend — prompts per day across the last 14 days.
+                Rectangle { x: 0px; y: 148px; width: 584px; height: 154px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border;
+                    Text { x: 14px; y: 14px; text: "Activity"; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                    Text { x: 200px; y: 16px; width: 370px; text: root.stats_trend_caption; horizontal-alignment: right; overflow: elide; color: Theme.ink-muted; font-size: 11px; }
+                    for bar[i] in root.stats_trend: Rectangle {
+                        x: 14px + i * 39px;
+                        y: 50px;
+                        width: 39px;
+                        height: 90px;
+                        Rectangle {
+                            x: (parent.width - 22px) / 2;
+                            width: 22px;
+                            height: bar.height <= 0 ? 0px : max(3px, 64px * bar.height / 100);
+                            y: 64px - self.height;
+                            border-radius: 3px;
+                            background: bar.today ? Theme.accent : Theme.chart-blue;
+                        }
+                        Text {
+                            x: 0px;
+                            y: 70px;
+                            width: parent.width;
+                            text: bar.day_label;
+                            horizontal-alignment: center;
+                            color: bar.today ? Theme.accent : Theme.ink-faint;
+                            font-size: 9px;
+                        }
+                    }
+                }
 
-                Rectangle { x: 0px; y: 336px; width: 284px; height: 168px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
-                Text { x: 24px; y: 356px; width: 236px; text: "Tokens today"; color: Theme.ink; font-size: 14px; font-weight: 600; }
-                StatBarRow { x: 24px; y: 386px; width: 236px; height: 18px; label: "Input"; value: root.stats_today_input_value; bar: root.stats_today_input_bar; accent: Theme.chart-teal; }
-                StatBarRow { x: 24px; y: 408px; width: 236px; height: 18px; label: "Output"; value: root.stats_today_output_value; bar: root.stats_today_output_bar; accent: Theme.chart-blue; }
-                StatBarRow { x: 24px; y: 430px; width: 236px; height: 18px; label: "Cache W"; value: root.stats_today_cache_write_value; bar: root.stats_today_cache_write_bar; accent: Theme.chart-amber; }
-                StatBarRow { x: 24px; y: 452px; width: 236px; height: 18px; label: "Cache R"; value: root.stats_today_cache_read_value; bar: root.stats_today_cache_read_bar; accent: Theme.chart-purple; }
+                // Productivity highlights over the last 7 days.
+                Rectangle { x: 0px; y: 314px; width: 584px; height: 64px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border;
+                    for h[i] in root.stats_highlights: Rectangle {
+                        x: 14px + i * 139px;
+                        y: 0px;
+                        width: 139px;
+                        height: 64px;
+                        Text { x: 0px; y: 14px; width: parent.width - 14px; text: h.label; overflow: elide; color: Theme.ink-faint; font-size: 11px; }
+                        Text { x: 0px; y: 32px; width: parent.width - 14px; text: h.value; overflow: elide; color: Theme.ink; font-size: 15px; font-weight: 600; }
+                    }
+                }
 
-                Rectangle { x: 300px; y: 336px; width: 284px; height: 168px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
-                Text { x: 324px; y: 356px; width: 236px; text: "Tokens last 7 days"; color: Theme.ink; font-size: 14px; font-weight: 600; }
-                StatBarRow { x: 324px; y: 386px; width: 236px; height: 18px; label: "Input"; value: root.stats_recent_input_value; bar: root.stats_recent_input_bar; accent: Theme.chart-teal; }
-                StatBarRow { x: 324px; y: 408px; width: 236px; height: 18px; label: "Output"; value: root.stats_recent_output_value; bar: root.stats_recent_output_bar; accent: Theme.chart-blue; }
-                StatBarRow { x: 324px; y: 430px; width: 236px; height: 18px; label: "Cache W"; value: root.stats_recent_cache_write_value; bar: root.stats_recent_cache_write_bar; accent: Theme.chart-amber; }
-                StatBarRow { x: 324px; y: 452px; width: 236px; height: 18px; label: "Cache R"; value: root.stats_recent_cache_read_value; bar: root.stats_recent_cache_read_bar; accent: Theme.chart-purple; }
+                // Detailed 7-day distribution.
+                Rectangle { x: 0px; y: 390px; width: 284px; height: 200px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
+                Text { x: 24px; y: 410px; width: 236px; text: "Tool mix · 7 days"; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                StatBarRow { x: 24px; y: 440px; width: 236px; height: 20px; label: "Write"; value: root.stats_recent_write_value; bar: root.stats_recent_write_bar; accent: Theme.chart-teal; }
+                StatBarRow { x: 24px; y: 464px; width: 236px; height: 20px; label: "Bash"; value: root.stats_recent_bash_value; bar: root.stats_recent_bash_bar; accent: Theme.chart-blue; }
+                StatBarRow { x: 24px; y: 488px; width: 236px; height: 20px; label: "Search"; value: root.stats_recent_search_value; bar: root.stats_recent_search_bar; accent: Theme.chart-amber; }
+                StatBarRow { x: 24px; y: 512px; width: 236px; height: 20px; label: "Agent"; value: root.stats_recent_subagent_value; bar: root.stats_recent_subagent_bar; accent: Theme.chart-purple; }
+                StatBarRow { x: 24px; y: 536px; width: 236px; height: 20px; label: "Perm"; value: root.stats_recent_permission_value; bar: root.stats_recent_permission_bar; accent: Theme.accent; }
+                StatBarRow { x: 24px; y: 560px; width: 236px; height: 20px; label: "Choice"; value: root.stats_recent_choice_value; bar: root.stats_recent_choice_bar; accent: Theme.chart-olive; }
+
+                Rectangle { x: 300px; y: 390px; width: 284px; height: 200px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
+                Text { x: 324px; y: 410px; width: 236px; text: "Tokens · 7 days"; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                StatBarRow { x: 324px; y: 440px; width: 236px; height: 20px; label: "Input"; value: root.stats_recent_input_value; bar: root.stats_recent_input_bar; accent: Theme.chart-teal; }
+                StatBarRow { x: 324px; y: 464px; width: 236px; height: 20px; label: "Output"; value: root.stats_recent_output_value; bar: root.stats_recent_output_bar; accent: Theme.chart-blue; }
+                StatBarRow { x: 324px; y: 488px; width: 236px; height: 20px; label: "Cache W"; value: root.stats_recent_cache_write_value; bar: root.stats_recent_cache_write_bar; accent: Theme.chart-amber; }
+                StatBarRow { x: 324px; y: 512px; width: 236px; height: 20px; label: "Cache R"; value: root.stats_recent_cache_read_value; bar: root.stats_recent_cache_read_bar; accent: Theme.chart-purple; }
             }
         }
 

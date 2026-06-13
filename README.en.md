@@ -137,6 +137,35 @@ CLAUDIE_PROXY_FORWARD_IMAGES=auto
 
 The default `CLAUDIE_PROXY_SUMMARY_MODE=local` uses local extractive summaries and does not call the upstream model for summarization. Set `CLAUDIE_PROXY_SUMMARY_MODE=model` to use upstream model summaries. If the summary request fails, claudie still forwards the request with long-content compression applied. Set `CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=0` to disable the output-token cap.
 
+## Stats Panel
+
+The Settings -> Stats tab visualizes Claude Code activity from the local `daily_stats.json` (up to 45 days). All data stays on your machine.
+
+**Top KPI cards** — the large number is today; the `7d · N` line below is the last-7-day total for comparison.
+
+| Card | Meaning |
+|------|---------|
+| Prompts | Number of prompt turns submitted to Claude Code. |
+| Tokens | Total token usage (input + output + cache write + cache read); `k`=thousand, `m`=million. |
+| Cache hit | Cache hit rate = cache-read tokens ÷ all context-input tokens; higher means better prompt-cache reuse and lower cost. Shows `—` when there is no traffic. |
+| Tool calls | Total number of tool invocations. |
+
+**Activity (14-day chart)** — each bar is one of the last 14 days, height drawn relative to the busiest day's prompt count. Idle days stay as empty bars (not skipped); today's bar is highlighted. The caption `prompts/day · peak N · X/7 active` reports prompts per day, the 14-day peak N, and how many of the last 7 days had activity.
+
+**Productivity highlights (last 7 days)**:
+
+| Metric | Meaning |
+|--------|---------|
+| Active days | `X / 7`, the number of days actually used in the last 7. |
+| Avg / prompt | Average tokens per prompt = 7-day total tokens ÷ 7-day prompt count; reflects how "heavy" each conversation is. Shows `—` with no prompts. |
+| Top tool | Most-used tool category and its count over 7 days, e.g. `Search · 142`. |
+| Focus done | Completed Pomodoro focus sessions. |
+
+**Detail (7-day distribution, bar length is relative within each group)**:
+
+- Tool mix: `Write` edits/writes, `Bash` commands, `Search` reads/searches, `Agent` sub-tasks, `Perm` permission prompts, `Choice` question cards.
+- Tokens: `Input` non-cached input, `Output` model output, `Cache W` cache writes, `Cache R` cache-read hits (usually the largest).
+
 ## Project Structure
 
 ```text

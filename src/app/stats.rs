@@ -90,17 +90,6 @@ impl DailyStatsDb {
             })
     }
 
-    pub(crate) fn recent_total(&self, count: usize) -> DailyStats {
-        let mut total = DailyStats {
-            date: format!("last {} days", count),
-            ..DailyStats::default()
-        };
-        for day in self.days.iter().rev().take(count) {
-            total.merge(day);
-        }
-        total
-    }
-
     pub(crate) fn record(&mut self, update: impl FnOnce(&mut DailyStats)) {
         let key = today_key();
         let index = match self.days.iter().position(|day| day.date == key) {
@@ -156,6 +145,16 @@ impl DailyStats {
             .cache_read_tokens
             .saturating_add(other.cache_read_tokens);
     }
+}
+
+/// Sum an arbitrary set of daily buckets into a single aggregate (used by the
+/// Stats tab to total a calendar window).
+pub(crate) fn sum_days<'a>(days: impl IntoIterator<Item = &'a DailyStats>) -> DailyStats {
+    let mut total = DailyStats::default();
+    for day in days {
+        total.merge(day);
+    }
+    total
 }
 
 pub(crate) fn tool_stats_kind(tool_name: &str) -> ToolStatsKind {

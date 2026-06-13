@@ -163,6 +163,45 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
     i64::from(era * 146_097 + doe - 719_468)
 }
 
+/// Inverse of [`days_from_civil`]: days since 1970-01-01 back to a civil date.
+fn civil_from_days(serial: i64) -> (i32, u32, u32) {
+    let z = serial + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (
+        (year + if month <= 2 { 1 } else { 0 }) as i32,
+        month as u32,
+        day,
+    )
+}
+
+/// Parse a local `YYYY-MM-DD` date key into its (year, month, day) parts.
+pub(crate) fn parse_date_key(key: &str) -> Option<(i32, u32, u32)> {
+    let mut parts = key.trim().split('-');
+    let year = parts.next()?.parse::<i32>().ok()?;
+    let month = parts.next()?.parse::<u32>().ok()?;
+    let day = parts.next()?.parse::<u32>().ok()?;
+    if parts.next().is_some() || !valid_date(year, month, day) {
+        return None;
+    }
+    Some((year, month, day))
+}
+
+/// Returns the `YYYY-MM-DD` key for `days` days before `key`, handling month and
+/// year boundaries. Returns `None` if `key` is not a valid date.
+pub(crate) fn date_key_minus_days(key: &str, days: i64) -> Option<String> {
+    let (year, month, day) = parse_date_key(key)?;
+    let serial = days_from_civil(year, month, day) - days;
+    let (y, m, d) = civil_from_days(serial);
+    Some(format!("{:04}-{:02}-{:02}", y, m, d))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,6 +250,27 @@ mod tests {
             Some(1_776_697_200_000)
         );
         assert_eq!(date_value_unix_ms(&json!(-1)), None);
+    }
+
+    #[test]
+    fn date_key_minus_days_crosses_boundaries() {
+        assert_eq!(
+            date_key_minus_days("2026-06-14", 13).as_deref(),
+            Some("2026-06-01")
+        );
+        assert_eq!(
+            date_key_minus_days("2026-03-01", 1).as_deref(),
+            Some("2026-02-28")
+        );
+        assert_eq!(
+            date_key_minus_days("2024-03-01", 1).as_deref(),
+            Some("2024-02-29")
+        );
+        assert_eq!(
+            date_key_minus_days("2026-01-01", 1).as_deref(),
+            Some("2025-12-31")
+        );
+        assert_eq!(date_key_minus_days("nope", 1), None);
     }
 
     #[test]

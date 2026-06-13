@@ -137,6 +137,35 @@ CLAUDIE_PROXY_FORWARD_IMAGES=auto
 
 默认 `CLAUDIE_PROXY_SUMMARY_MODE=local`，使用本地抽取式摘要，不额外调用上游模型。设置 `CLAUDIE_PROXY_SUMMARY_MODE=model` 可改用上游模型摘要；若摘要请求失败，仍会转发经过长内容压缩的请求。设置 `CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=0` 可关闭输出 token 上限。
 
+## Stats 面板
+
+Settings -> Stats 标签页基于本地 `daily_stats.json`（最多保留 45 天）展示 Claude Code 的使用情况，数据完全留在本机。
+
+**顶部 KPI 卡片**：大字是今天的数值，下方 `7d · N` 是最近 7 天合计，用于对比。
+
+| 卡片 | 含义 |
+|------|------|
+| Prompts | 提交给 Claude Code 的提问轮次数。 |
+| Tokens | 总 token 消耗（输入 + 输出 + 缓存写 + 缓存读），`k`=千、`m`=百万。 |
+| Cache hit | 缓存命中率 = 缓存读取 token ÷ 全部上下文输入 token；越高代表 prompt 缓存复用越好、越省钱，无流量时显示 `—`。 |
+| Tool calls | 工具调用总次数。 |
+
+**Activity（14 天柱状图）**：每根柱子是过去 14 天中某一天的提问数，高度按区间最大值相对绘制；空闲日保留为空柱不跳过，今天的柱子高亮。说明文字 `prompts/day · peak N · X/7 active` 表示每天提问数、14 天峰值 N、最近 7 天有 X 天活跃。
+
+**Productivity highlights（最近 7 天衍生指标）**：
+
+| 指标 | 含义 |
+|------|------|
+| Active days | `X / 7`，最近 7 天里实际使用过的天数。 |
+| Avg / prompt | 平均每条 prompt 的 token 消耗 = 7 天总 token ÷ 7 天 prompt 数，反映单次对话的「重量」，无 prompt 时显示 `—`。 |
+| Top tool | 最近 7 天使用最多的工具类别及次数，例如 `Search · 142`。 |
+| Focus done | 完成的番茄钟专注时段数。 |
+
+**底部明细（最近 7 天分布，柱长为组内相对比例）**：
+
+- Tool mix：`Write` 写入/编辑、`Bash` 命令、`Search` 读取/搜索、`Agent` 子任务、`Perm` 权限弹窗、`Choice` 选择题。
+- Tokens：`Input` 未命中缓存的输入、`Output` 模型输出、`Cache W` 写入缓存、`Cache R` 命中缓存读取（通常最大）。
+
 ## 项目结构
 
 ```text
