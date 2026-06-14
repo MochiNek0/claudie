@@ -2,125 +2,120 @@
 
 中文 | [English](README.en.md)
 
-`claudie` 是一个 Windows-only 的 Claude Code 轻量桌面宠物，使用 Rust + Win32/GDI+ 原生窗口实现。运行时由桌面 UI、同步 `std::net::TcpListener` hook server，以及本地 Anthropic Messages 兼容代理组成。代理会把 Claude Code 请求转换到 OpenAI Chat Completions 风格的上游服务。
+> 一只住在 Claude Code 旁边的桌面宠物——它随着 Claude 的工作状态切换动画，在窗口里替你回答权限/选择请求，还能把 Claude Code 接到任意 OpenAI 兼容的模型上。
 
-项目刻意避免 Electron、WebView、async runtime 和 Web 框架。宠物资源使用轻量 GIF 目录，每种 mood 映射一个 GIF。
+`claudie` 是一个 **Windows-only** 的轻量桌面宠物，用 **Rust + 原生 Win32/GDI+** 实现，刻意避开 Electron、WebView、async runtime 和 Web 框架——常驻内存小、无浏览器内核。
 
-## 致谢
+灵感来自 [rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/clawd-on-desk) 和 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)。
 
-claudie 受 [rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/clawd-on-desk) 和 [farion1231/cc-switch](https://github.com/farion1231/cc-switch) 启发。
+## 它由三部分组成
+
+| 组件 | 作用 |
+|------|------|
+| **桌面宠物 UI** | 根据 Claude Code 活动切换 GIF 动画，并在窗口里直接回答权限/选择请求。 |
+| **Hook server** | 同步的 `std::net::TcpListener`，接收 Claude Code 的 HTTP hook 事件（`127.0.0.1:17387/hook`）。 |
+| **OpenAI 兼容代理** | 把 Claude Code 的 Anthropic Messages 请求转换为 OpenAI Chat Completions 风格的上游服务（`127.0.0.1:17388`）。 |
 
 ## 功能
 
-- **Hook 事件驱动**：接收 Claude Code HTTP hooks，并根据事件切换宠物状态。
+- **状态随动** — 接收 hook 事件并切换宠物状态：思考、打字、执行命令、搜索、子任务、报错、睡眠……完整映射见下方折叠表。
+- **权限请求** — 在宠物窗口显示 Allow / Always / Deny。Deny 写回 `continue=false` + `interrupt=true`，等同终端里回答 “No”：中断本轮，而不是把否决当作可重试的工具反馈喂回模型。终端与宠物两侧任一答复都会同步关闭弹窗。
+- **选择卡片** — 支持 `AskUserQuestion`（带「Other…」自由输入）和 `ExitPlanMode`（计划以 Markdown 渲染），可在窗口里选项 + Submit / Cancel。
+- **多会话切换** — 跟踪各会话状态，在宠物旁渲染会话切换面板，滚轮切换关注的会话；焦点会话决定宠物 mood 与 HUD。仅单会话时自动隐藏。
+- **快捷键** — `Ctrl+Shift+Y` 允许 / 提交；`Ctrl+Shift+N` 拒绝 / 取消。
+- **番茄钟** — 内置 Pomodoro，支持 Start / Stop / Pause / Resume / Skip，阶段结束弹通知。
+- **钓鱼小游戏** — 点击宠物开始「等待 → 提竿 → 收线 → 上钩/脱钩」，收线阶段需在移动目标区维持张力。
+- **官方用量监控** — 右键菜单与设置面板实时显示官方 5 小时 / 7 天用量（OAuth 轮询），识别 Max/Pro/Team 订阅与重置倒计时。
+- **LLM Profiles** — 保存官方或自定义 profile，写入 Claude Code settings，右键菜单一键切换。
+- **OpenAI 兼容代理** — 工具调用、流式响应、图片转发、reasoning 输出、并行工具调用、工具历史降级、上下文压缩与历史总结。详见[下文](#openai-兼容代理)。
+- **本地小账本** — 按天记录 prompts、工具分类、权限/选择、错误、番茄钟完成数和 token 用量，Stats 页展示今日与近 7 天，数据不出本机。
+- **其它** — 系统托盘图标、宠物缩放与窗口位置记忆、短按互动动画、空闲自动睡眠、Secrets（API key / OAuth token）DPAPI 加密存储。
 
-  | 事件 | 行为 |
-  |------|------|
-  | `SessionStart` | 回到空闲待命 |
-  | `UserPromptSubmit` | 思考中 |
-  | `PreToolUse` | 开始执行工具；写入类 -> typing，shell 类 -> building，读取/搜索类 -> search |
-  | `PostToolUse` | 工具完成 |
-  | `PostToolBatch` | 一批工具完成，并刷新配额快照 |
-  | `PostToolUseFailure` / `StopFailure` / `PermissionDenied` | 错误状态 |
-  | `PermissionRequest` | 等待用户在宠物 UI 中 Allow / Always / Deny |
-  | `SubagentStart` / `TaskCreated` | 子任务进行中 |
-  | `SubagentStop` / `TaskCompleted` | 子任务完成 |
-  | `PreCompact` / `PostCompact` | 上下文压缩开始 / 完成 |
-  | `Notification` / `Elicitation` | 通知提示 |
-  | `WorktreeCreate` | 创建 worktree |
-  | `Stop` | 任务结束 |
-  | `SessionEnd` | 会话结束，清除待处理交互 |
+<details>
+<summary>Hook 事件 → 宠物状态对照表</summary>
 
-- **权限请求**：通过 `PermissionRequest` hook 接管权限请求，在宠物窗口中显示 Allow / Always / Deny。Deny 会写回 `continue=false`、`interrupt=true`，等同于终端里直接回答 "No"——中断本轮而不是把否决当作可重试的工具反馈喂回模型。
-- **选择卡片**：支持 `PreToolUse` 中的 `AskUserQuestion` 和 `ExitPlanMode`，显示选项、Submit 和 Cancel。
-- **多会话切换**：跟踪 Claude Code 各会话状态（streaming / waiting permission / waiting choice / idle），在宠物旁渲染独立的会话切换面板，鼠标滚轮即可切换关注的会话，焦点会话决定宠物的 mood 与 HUD。
-- **系统托盘**：在通知区域注册托盘图标，左键/右键托盘菜单与宠物的右键菜单一致。
-- **快捷键**：`Ctrl+Shift+Y` 允许权限或提交选择；`Ctrl+Shift+N` 拒绝权限或取消选择。
-- **番茄钟**：内置 Pomodoro，支持 Start / Stop / Pause / Resume / Skip，阶段结束时弹出通知。
-- **宠物互动**：短按左键播放 `wave` / `stretch` 互动动画，按住移动仍可拖动窗口；专注阶段可使用 `pomodoro` 动画。
-- **空闲睡眠**：长时间无活动后进入睡眠，有新活动时唤醒。
-- **窗口与资源设置**：支持宠物缩放、窗口位置记忆、GIF 目录和 mood -> GIF 映射。
-- **钓鱼小游戏**：在宠物上点击即可开始钓鱼，经历「等待 → 提竿 → 收线 → 上钩/脱钩」流程；收线阶段需在移动目标区维持张力以填满进度条。每个阶段都有独立 GIF（`fishing` / `reel` / `caught` / `missed`），仍使用内置目录的旧配置会被自动迁移到四段动画。
-- **Settings 面板**：Basic、Pomodoro、LLM Profiles、Stats 四个标签页，使用 Slint 原生窗口。
-- **LLM Profiles**：保存官方或自定义 LLM profile，可写入 Claude Code settings，并可从右键菜单快速切换。
-- **会话小账本**：按天记录 prompts、工具分类、权限/选择、错误、番茄钟完成数和 token 用量；Stats 页展示今日与最近 7 天。
-- **官方用量监控**：右键菜单与设置面板实时显示 Claude Code 官方 5 小时/7 天用量限制，支持 Max/Pro/Team 订阅计划识别和自动刷新（OAuth 轮询）。
-- **Secrets 加密存储**：敏感凭据使用 Windows DPAPI 加密保存，透明加密/解密。
-- **OpenAI 兼容代理**：把 Claude Code 的 Anthropic Messages 请求转换到 OpenAI Chat Completions，支持工具调用、流式响应、图片转发、reasoning 输出、并行工具调用、工具历史降级、上下文压缩、历史总结和能力缓存。代理使用 Bearer Token 鉴权传入请求（即 Claude Code 的 `ANTHROPIC_AUTH_TOKEN`）；上游 429/529 的 `Retry-After` 会原样回传给 Claude Code，临时不可用统一映射为 HTTP 529，对齐 Anthropic 的过载语义。
-- **Windows-only**：应用只支持 Windows，包含桌面宠物 UI、hook/proxy 服务、Settings 面板和权限/选择交互。
+| 事件 | 行为 |
+|------|------|
+| `SessionStart` | 回到空闲待命 |
+| `UserPromptSubmit` | 思考中 |
+| `PreToolUse` | 开始执行工具；写入类 → typing，shell 类 → building，读取/搜索类 → search |
+| `PostToolUse` | 工具完成 |
+| `PostToolBatch` | 一批工具完成，并刷新配额快照 |
+| `PostToolUseFailure` / `StopFailure` / `PermissionDenied` | 错误状态 |
+| `PermissionRequest` | 等待用户在宠物 UI 中 Allow / Always / Deny |
+| `SubagentStart` / `TaskCreated` | 子任务进行中 |
+| `SubagentStop` / `TaskCompleted` | 子任务完成 |
+| `PreCompact` / `PostCompact` | 上下文压缩开始 / 完成 |
+| `Notification` / `Elicitation` | 通知提示 |
+| `WorktreeCreate` | 创建 worktree |
+| `Stop` | 任务结束 |
+| `SessionEnd` | 会话结束，清除待处理交互 |
+
+</details>
 
 ## 快速开始
 
-开发运行：
+环境要求：Windows 10/11 + [Rust 工具链](https://rustup.rs/)（仅支持 Windows，非 Windows 不编译）。
 
 ```powershell
 cargo run --release
 ```
 
-正常启动会监听 hook 地址 `http://127.0.0.1:17387/hook` 和本地代理 `http://127.0.0.1:17388`，并确保 Claude Code hooks 指向当前 claudie 端口。UI 退出时会清理 claudie 管理的 hooks。
+正常启动会监听 hook (`:17387`) 和代理 (`:17388`)，并自动把 Claude Code hooks 指向当前端口；UI 退出时清理 claudie 管理的 hooks。无需手动安装 hook 即可使用。
 
-常用命令：
+常用命令（`--install` / `--uninstall` 为短别名，`--quiet` 抑制安装通知弹窗）：
 
 ```powershell
 cargo run --release -- --help
 cargo run --release -- --port 17387
-cargo run --release -- --install-claude-hooks
-cargo run --release -- --uninstall-claude-hooks
+cargo run --release -- --install-claude-hooks      # 别名：--install
+cargo run --release -- --uninstall-claude-hooks    # 别名：--uninstall
 cargo run --release -- --print-claude-settings
-cargo run --release -- --install-claude-hooks --quiet
 ```
 
-`--install` 和 `--uninstall` 也可作为短别名使用。`--quiet` 会抑制安装/卸载 hook 时的系统通知弹窗。
+打成安装包给非开发者使用见 [打包](#打包)。
 
-## OpenAI 兼容 API 代理
+## OpenAI 兼容代理
 
-claudie 启动时会监听：
+代理监听 `http://127.0.0.1:17388`，实现 `POST /v1/messages`、`POST /v1/messages/count_tokens` 和 `GET /v1/models`，让 Claude Code 跑在任意 OpenAI 兼容上游（DeepSeek、Qwen、Kimi、GLM、OpenRouter、OneAPI/NewAPI 等）上。
 
-```text
-http://127.0.0.1:17388
-```
+在 **Settings → LLM Profiles** 中配置 profile：
 
-在 Settings -> LLM Profiles 中新增或编辑 profile：
+| 字段 | 说明 |
+|------|------|
+| `Base URL` | 上游 OpenAI 兼容地址，如 `https://example.com/v1/chat/completions` 或 `https://example.com/v1`。 |
+| `API key` | 上游服务 key；留空则用 `Auth token` 作为上游 key。 |
+| `Model` | 上游支持的模型名。 |
+| `OpenAI body` | 可选额外请求体，JSON object 或逐行 `key=value` / `key: value`，如 `{"reasoning_effort":"xhigh"}`。会合并进上游请求，但不能覆盖 claudie 管理的 `messages` / `stream`。 |
+| `Extra env` | 每行一个 `KEY=VALUE` 的代理开关或 Claude Code 环境变量。 |
 
-- `Base URL` 填上游 OpenAI 兼容地址，例如 `https://example.com/v1/chat/completions` 或 `https://example.com/v1`。
-- `API key` 填上游服务 key；如果该字段为空，代理会使用 `Auth token` 作为上游 key。
-- `Model` 填上游支持的模型名。
-- `OpenAI body` 可选填额外请求体字段，支持 JSON object 或逐行 `key=value` / `key: value`，例如 `{"reasoning_effort":"xhigh"}` 或 `model_reasoning_effort = "xhigh"`。
-- `Extra env` 可填每行一个 `KEY=VALUE` 的代理开关或 Claude Code 环境变量。
+点击 `Use` 后，若 profile 是 OpenAI 格式，claudie 会把 Claude Code 的 `ANTHROPIC_BASE_URL` 指向本地代理（上游 URL/key 只留在 claudie profile 中）。`Base URL` 含 `/chat/completions` 会自动启用代理；若填的是上游根地址，在 `Extra env` 加 `CLAUDIE_API_FORMAT=openai`。
 
-点击 `Use` 后，如果 profile 是 OpenAI Chat Completions 格式，claudie 会把 Claude Code 的 `ANTHROPIC_BASE_URL` 写成本地代理地址；上游 URL 和 key 只保存在 claudie profile 中。`Base URL` 包含 `/chat/completions` 会自动启用代理；如果填的是上游根地址，可在 `Extra env` 中加入：
+**代理能力**：
 
-```text
-CLAUDIE_API_FORMAT=openai
-```
+- 流式与非流式 OpenAI 响应都转换回 Anthropic Messages / SSE 事件。
+- Anthropic tool use / tool result ↔ OpenAI `tools` / `tool_calls` / `tool` message。
+- 有工具且模型支持时默认 `parallel_tool_calls=true`（可在 `OpenAI body` 设 `false` 关闭）。
+- DeepSeek R1、QwQ、GLM-Zero 等 reasoning 流映射为 Anthropic thinking block；OpenAI/Azure/OpenRouter reasoning 模型自动从 `thinking.budget_tokens` 推导 `reasoning_effort`。
+- 图片转发按模型名自动判断，可用 `CLAUDIE_PROXY_FORWARD_IMAGES=always/never` 强制。
+- 已识别的主流上游默认关闭兼容提示，泛用 OneAPI/NewAPI 类默认开启（`CLAUDIE_PROXY_COMPAT_PROMPT=0/1`）。
+- 上游拒绝原生工具历史时自动降级为文本 transcript 模式并缓存能力探测结果。
+- 上游 429/529 的 `Retry-After` 原样透传给 Claude Code 触发原生退避；连接失败/超时等临时错误统一返回 HTTP 529（对齐 Anthropic 过载语义）。
 
-代理实现了 `POST /v1/messages`、`POST /v1/messages/count_tokens` 和 `GET /v1/models`。`OpenAI body` 会合并进转发到上游的 chat completions 请求，但不能覆盖 claudie 管理的 `messages` 和 `stream` 字段。
+**上下文优化**（默认开启）：压缩超长工具结果和文本；输入超阈值时保留最近消息、对较早对话分块总结。缓存只保存摘要文本和能力探测结果，不保存 API key 或原始请求体。默认 `local`（本地抽取式摘要，不调上游）；设 `CLAUDIE_PROXY_SUMMARY_MODE=model` 改用上游模型摘要。
 
-当前代理能力：
-
-- 非流式和流式 OpenAI 响应都会转换回 Anthropic Messages / SSE 事件。
-- Anthropic tool use / tool result 会转换为 OpenAI `tools`、`tool_calls` 和 `tool` message。
-- 请求包含工具且模型支持工具时，默认发送 `parallel_tool_calls=true`；可用 `{"parallel_tool_calls": false}` 关闭。
-- DeepSeek R1、QwQ、GLM-Zero 等 reasoning 流会映射为 Anthropic thinking block。
-- OpenAI/Azure/OpenRouter reasoning 模型会自动从 Anthropic `thinking.budget_tokens` 推导 `reasoning_effort`，用户在 `OpenAI body` 中显式设置时优先。
-- 支持图片内容转发；默认根据模型名判断 vision 能力，也可用 `CLAUDIE_PROXY_FORWARD_IMAGES=always` 或 `CLAUDIE_PROXY_FORWARD_IMAGES=never` 强制控制。
-- 对识别出的 OpenAI/Azure/DeepSeek/Qwen/Kimi/GLM/OpenRouter 上游，兼容提示默认关闭；泛用 OneAPI/NewAPI 类上游默认开启。可用 `CLAUDIE_PROXY_COMPAT_PROMPT=0/1` 控制。
-- 若上游拒绝原生工具历史，代理会重试文本 transcript 模式，并把能力探测结果缓存到 `proxy_cache/capabilities/`。
-- 上游返回 429 或 529 时会读取 `Retry-After` 头并透传给 Claude Code，触发其原生退避；上游连接失败、超时等临时错误统一返回 HTTP 529。
-
-上下文优化默认开启。claudie 会压缩超长工具结果和普通文本；当估算输入超过阈值时，保留最近消息并对较早对话分块总结。缓存只保存摘要文本或能力探测结果，不保存 API key 或完整原始请求体。
-
-可在 profile 的 `Extra env` 中调整：
+<details>
+<summary><code>Extra env</code> 可调参数（默认值）</summary>
 
 ```text
-CLAUDIE_PROXY_OPTIMIZE=0
+CLAUDIE_PROXY_OPTIMIZE=1
 CLAUDIE_PROXY_SUMMARY_MODE=local
 CLAUDIE_PROXY_SUMMARY_THRESHOLD=24000
 CLAUDIE_PROXY_KEEP_RECENT_MESSAGES=12
 CLAUDIE_PROXY_KEEP_RECENT_TOKENS=10000
 CLAUDIE_PROXY_TOOL_RESULT_LIMIT=3000
 CLAUDIE_PROXY_TEXT_LIMIT=6000
-CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=32000
+CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=32000   # 设 0 关闭输出上限
 CLAUDIE_PROXY_LOCAL_SUMMARY_TOKENS=2000
 CLAUDIE_PROXY_CACHE_MAX_MB=10
 CLAUDIE_PROXY_SUMMARY_CACHE_TTL_HOURS=168
@@ -135,149 +130,45 @@ CLAUDIE_PROXY_COMPAT_PROMPT=0
 CLAUDIE_PROXY_FORWARD_IMAGES=auto
 ```
 
-默认 `CLAUDIE_PROXY_SUMMARY_MODE=local`，使用本地抽取式摘要，不额外调用上游模型。设置 `CLAUDIE_PROXY_SUMMARY_MODE=model` 可改用上游模型摘要；若摘要请求失败，仍会转发经过长内容压缩的请求。设置 `CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=0` 可关闭输出 token 上限。
+</details>
 
 ## Stats 面板
 
-Settings -> Stats 标签页基于本地 `daily_stats.json`（最多保留 45 天）展示 Claude Code 的使用情况，数据完全留在本机。
+Settings → Stats 基于本地 `daily_stats.json`（最多 45 天）展示使用情况，数据完全留在本机。
 
-**顶部 KPI 卡片**：大字是今天的数值，下方 `7d · N` 是最近 7 天合计，用于对比。
-
-| 卡片 | 含义 |
-|------|------|
-| Prompts | 提交给 Claude Code 的提问轮次数。 |
-| Tokens | 总 token 消耗（输入 + 输出 + 缓存写 + 缓存读），`k`=千、`m`=百万。 |
-| Cache hit | 缓存命中率 = 缓存读取 token ÷ 全部上下文输入 token；越高代表 prompt 缓存复用越好、越省钱，无流量时显示 `—`。 |
-| Tool calls | 工具调用总次数。 |
-
-**Activity（14 天柱状图）**：每根柱子是过去 14 天中某一天的提问数，高度按区间最大值相对绘制；空闲日保留为空柱不跳过，今天的柱子高亮。说明文字 `prompts/day · peak N · X/7 active` 表示每天提问数、14 天峰值 N、最近 7 天有 X 天活跃。
-
-**Productivity highlights（最近 7 天衍生指标）**：
-
-| 指标 | 含义 |
-|------|------|
-| Active days | `X / 7`，最近 7 天里实际使用过的天数。 |
-| Avg / prompt | 平均每条 prompt 的 token 消耗 = 7 天总 token ÷ 7 天 prompt 数，反映单次对话的「重量」，无 prompt 时显示 `—`。 |
-| Top tool | 最近 7 天使用最多的工具类别及次数，例如 `Search · 142`。 |
-| Focus done | 完成的番茄钟专注时段数。 |
-
-**底部明细（最近 7 天分布，柱长为组内相对比例）**：
-
-- Tool mix：`Write` 写入/编辑、`Bash` 命令、`Search` 读取/搜索、`Agent` 子任务、`Perm` 权限弹窗、`Choice` 选择题。
-- Tokens：`Input` 未命中缓存的输入、`Output` 模型输出、`Cache W` 写入缓存、`Cache R` 命中缓存读取（通常最大）。
-
-## 项目结构
-
-```text
-src/
-  main.rs                  CLI、启动流程、hook/proxy 初始化和 Windows UI 入口
-  config.rs                端口、窗口尺寸、菜单 ID、overlay 几何和常量
-  globals.rs               进程级 OnceLock 全局句柄
-  notifier.rs              Win32 消息框通知封装
-  util.rs                  参数解析、路径、文本截断和 UTF-16 helper
-  time_util.rs             时间戳解析、时长格式化和百分比解析
-  official_usage.rs        Claude Code 官方用量 OAuth 轮询线程
-  usage_display.rs         官方用量格式化与 UI 显示适配
-  app/                     AppState、mood、权限/选择、钓鱼、番茄钟、统计等领域状态
-  hooks/                   Claude Code hook server、事件语义、配额提取和 settings 合并
-  proxy/                   Anthropic Messages -> OpenAI Chat Completions 代理
-  proxy_optimizer/         长上下文压缩、分块摘要和代理缓存
-  settings/                用户设置、LLM profiles、Secrets、Claude env 集成和 JSON 存储
-  ui/                      Win32/GDI+ 主窗口、Slint 设置窗/弹窗和渲染逻辑
-```
-
-关键文件：
-
-- `src/app/fishing.rs`：钓鱼小游戏状态机（等待/提竿/收线/上钩/脱钩）。
-- `src/hooks/events.rs`：hook 事件语义、权限等待、选择响应和 stats 记录。
-- `src/hooks/claude_settings.rs`：hook settings 安装、卸载、合并和备份。
-- `src/hooks/quota.rs`：Token、模型、provider、配额、速率限制、官方用量窗口捕获。
-- `src/proxy/request_conv.rs` / `response_conv.rs` / `streaming.rs`：请求、响应、流式转换。
-- `src/proxy/provider.rs`：provider/model 能力检测、图片转发、reasoning 和 compat prompt 策略。
-- `src/proxy/tool_history.rs` / `capability_cache.rs`：工具历史文本降级和能力缓存。
-- `src/proxy_optimizer/config.rs` / `compress.rs` / `summary.rs` / `cache.rs`：上下文优化和缓存。
-- `src/settings/mod.rs`：profile、OpenAI body、Extra env、Claude settings 写入和路径规范化。
-- `src/settings/secrets.rs`：Windows DPAPI 加密存储、自定义 serde 序列化。
-- `src/official_usage.rs`：Claude Code OAuth 用量 API 轮询和凭据管理。
-- `src/usage_display.rs`：用量百分比条、重置倒计时、订阅计划格式化。
-- `src/time_util.rs`：RFC3339/epoch 时间戳解析、百分比值提取。
-- `src/ui/window/mod.rs`：主窗口生命周期、热键、右键菜单、拖动、profile 菜单、系统托盘图标和多会话切换器辅助窗口。
-- `src/ui/window/render.rs`：HUD、宠物绘制、权限 overlay、选择卡片、会话切换行渲染。
-- `src/ui/window_position.rs`：多显示器感知的窗口居中与边界辅助函数，供 Slint 弹窗/设置窗使用。
-- `src/ui/slint_views.rs` 与 `src/ui/settings_panel/`：Settings / Prompt 窗口声明与控制器。
-
-其它目录：
-
-- `assets/claudie/`：内置 GIF 动画资源。
-- `assets/icon.*`、`assets/claudie.manifest`：应用图标和 Windows manifest。
-- `packaging/`：Windows 安装包脚本。
+- **顶部 KPI** — 大字为今天，下方 `7d · N` 为近 7 天合计。涵盖 Prompts（提问轮次）、Tokens（输入+输出+缓存读写）、Cache hit（缓存读 ÷ 全部上下文输入，越高越省钱）、Tool calls。
+- **Activity** — 14 天提问数柱状图，今天高亮，空闲日保留空柱；标题给出每日提问数、14 天峰值和近 7 天活跃天数。
+- **Productivity highlights**（近 7 天）— 活跃天数、平均每 prompt token、最常用工具类别、完成的番茄钟数。
+- **Detail**（近 7 天分布）— Tool mix（Write/Bash/Search/Agent/Perm/Choice）与 Tokens（Input/Output/Cache W/Cache R）。
 
 ## 本地数据
 
-- `%USERPROFILE%\.claudie\settings.json`：资源目录、GIF 映射、缩放、睡眠时间、窗口位置和番茄钟设置。
-- `%USERPROFILE%\.claudie\llm_profiles.json`：LLM profiles、active profile、上游 auth、OpenAI body 和 Extra env。
-- `%USERPROFILE%\.claudie\secrets.json`：Windows DPAPI 加密的敏感凭据（API key、OAuth token）。
-- `%USERPROFILE%\.claudie\daily_stats.json`：每日 prompt、工具分类、权限/选择、错误、focus session 和 token 计数，最多保留 45 天。
-- `%USERPROFILE%\.claudie\proxy_summaries.json`：旧版单块摘要缓存。
-- `%USERPROFILE%\.claudie\proxy_cache\`：代理缓存目录，包含 `summaries/`、`chunks/` 和 `capabilities/`。
-- `%USERPROFILE%\.claude\settings.json`：Claude Code hook settings 和 claudie 管理的 LLM env。
-- `%USERPROFILE%\.claude\settings.json.claudie.bak`：首次修改 Claude settings 前创建的一次性备份。
+均位于 `%USERPROFILE%\.claudie\`（除最后两项在 `.claude\`）：
+
+| 文件 | 内容 |
+|------|------|
+| `settings.json` | 资源目录、GIF 映射、缩放、睡眠时间、窗口位置、番茄钟设置 |
+| `llm_profiles.json` | LLM profiles、active profile、上游 auth、OpenAI body、Extra env |
+| `secrets.json` | DPAPI 加密的敏感凭据（API key、OAuth token），仅当前 Windows 用户可解密 |
+| `daily_stats.json` | 每日计数（prompt、工具、权限/选择、错误、focus、token），保留 45 天 |
+| `proxy_cache/` | 代理缓存：`summaries/`、`chunks/`、`capabilities/`（另有旧版 `proxy_summaries.json`） |
+| `.claude\settings.json` | Claude Code hook settings 和 claudie 管理的 LLM env |
+| `.claude\settings.json.claudie.bak` | 首次修改前的一次性备份 |
 
 ## 宠物资源
 
-内置资源位于：
-
-```text
-assets/claudie/
-  idle.gif
-  thinking.gif
-  typing.gif
-  building.gif
-  search.gif
-  happy.gif
-  error.gif
-  sleeping.gif
-  subagent.gif
-  pomodoro.gif
-  wave.gif
-  stretch.gif
-  fishing.gif
-  reel.gif
-  caught.gif
-  missed.gif
-```
-
-Settings 面板可以调整 GIF 目录和每个 mood 对应的文件名。替换资源时保持文件名映射一致即可。
+内置 GIF 位于 `assets/claudie/`，每种 mood 一个文件：`idle` `thinking` `typing` `building` `search` `happy` `error` `sleeping` `subagent` `pomodoro` `wave` `stretch` `fishing` `reel` `caught` `missed`。在 Settings 面板可调整 GIF 目录与各 mood 的文件名，替换素材时保持映射一致即可。
 
 ## 打包
 
-Windows 安装包模板位于 `packaging/windows/claudie.iss`：
+Windows 安装包模板位于 `packaging/windows/claudie.iss`，输出 `dist\claudie-setup.exe`：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 ```
 
-输出文件为 `dist\claudie-setup.exe`。
+## 开发
 
-## 验证
+提交前至少运行 `cargo fmt` 和 `cargo check`；触及 hook、配额、profile、代理转换/流式、优化器、stats、番茄钟等纯领域逻辑时运行 `cargo test`；UI/hook/权限/代理行为改动还需 `cargo run --release` 手动验证。
 
-提交前至少运行：
-
-```powershell
-cargo fmt
-cargo check
-```
-
-修改 hook settings、配额提取、LLM profile、代理转换/流式、上下文优化、stats、番茄钟或纯领域规则时，也运行：
-
-```powershell
-cargo test
-```
-
-涉及 UI、hook、权限、settings 或代理行为时，再手动运行：
-
-```powershell
-cargo run --release
-```
-
-重点检查窗口位置恢复、右键菜单和 LLM Profile 快速切换、Settings 四个 tabs、左键互动与拖动、GIF 加载、`POST /hook` 状态更新、权限/选择卡片、Stats 图表，以及需要时本地代理、流式转换、`OpenAI body` 和上下文优化是否工作。
+代码结构、关键文件清单和完整验证清单见 [AGENTS.md](AGENTS.md)。

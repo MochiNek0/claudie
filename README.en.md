@@ -2,125 +2,120 @@
 
 [中文](README.md) | English
 
-`claudie` is a Windows-only lightweight desktop pet for Claude Code, built with Rust and a native Win32/GDI+ window. At runtime it runs the desktop UI, a synchronous `std::net::TcpListener` hook server, and a local Anthropic Messages compatible proxy that forwards Claude Code requests to OpenAI Chat Completions style providers.
+> A desktop pet that lives next to Claude Code — it animates with Claude's activity, answers permission/choice requests right in its window, and can route Claude Code through any OpenAI-compatible model.
 
-The project intentionally avoids Electron, WebView, async runtimes, and web frameworks. Pet assets use a lightweight GIF directory, with one GIF mapped to each mood.
+`claudie` is a **Windows-only** lightweight desktop pet built in **Rust with a native Win32/GDI+** window. It intentionally avoids Electron, WebView, async runtimes, and web frameworks — small resident footprint, no browser engine.
 
-## Inspiration
+Inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/clawd-on-desk) and [farion1231/cc-switch](https://github.com/farion1231/cc-switch).
 
-claudie is inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/clawd-on-desk) and [farion1231/cc-switch](https://github.com/farion1231/cc-switch).
+## Three parts
+
+| Component | Role |
+|-----------|------|
+| **Desktop pet UI** | Switches GIF animations based on Claude Code activity and answers permission/choice requests right in the window. |
+| **Hook server** | A synchronous `std::net::TcpListener` that receives Claude Code HTTP hook events (`127.0.0.1:17387/hook`). |
+| **OpenAI-compatible proxy** | Converts Claude Code's Anthropic Messages requests to OpenAI Chat Completions style upstreams (`127.0.0.1:17388`). |
 
 ## Features
 
-- **Hook-driven pet states**: receives Claude Code HTTP hooks and switches pet states.
+- **State follows activity** — receives hook events and switches the pet's state: thinking, typing, running commands, searching, subagents, errors, sleep… Full mapping in the table below.
+- **Permission requests** — shows Allow / Always / Deny in the pet window. Deny writes back `continue=false` + `interrupt=true`, matching a terminal "No": it stops the current turn instead of feeding the rejection back as a retriable tool error. Answering on either side (pet or terminal) closes the popup on both.
+- **Choice cards** — supports `AskUserQuestion` (with a free-text "Other…" option) and `ExitPlanMode` (plan rendered as Markdown), with options plus Submit / Cancel.
+- **Multi-session switcher** — tracks each session's status and renders a switcher panel beside the pet; scroll to change the focused session, which drives the pet mood and HUD. Hidden automatically when only one session is active.
+- **Hotkeys** — `Ctrl+Shift+Y` allows / submits; `Ctrl+Shift+N` denies / cancels.
+- **Pomodoro** — built-in timer with Start / Stop / Pause / Resume / Skip and phase-completion notifications.
+- **Fishing minigame** — click the pet for a "waiting → reeling → caught/missed" sequence; keep tension inside the moving target zone while reeling.
+- **Official usage monitoring** — real-time 5h / 7d usage in the right-click menu and Settings panel via OAuth polling, with Max/Pro/Team plan detection and a reset countdown.
+- **LLM Profiles** — save official or custom profiles, write the active one to Claude Code settings, switch from the right-click menu in one click.
+- **OpenAI-compatible proxy** — tools, streaming, image forwarding, reasoning output, parallel tool calls, tool-history fallback, context compression, and summaries. See [below](#openai-compatible-proxy).
+- **Local ledger** — daily prompts, tool categories, permission/choice counts, errors, completed focus sessions, and token usage; Stats shows today and the last 7 days, never leaving your machine.
+- **Also** — system tray icon, pet scaling and window-position memory, short-click interaction animations, idle auto-sleep, and DPAPI-encrypted secrets (API keys / OAuth tokens).
 
-  | Event | Behavior |
-  |-------|----------|
-  | `SessionStart` | Return to idle |
-  | `UserPromptSubmit` | Thinking |
-  | `PreToolUse` | Start tool activity; write tools -> typing, shell tools -> building, read/search tools -> search |
-  | `PostToolUse` | Finish tool activity |
-  | `PostToolBatch` | Batch complete, refresh quota snapshot |
-  | `PostToolUseFailure` / `StopFailure` / `PermissionDenied` | Error state |
-  | `PermissionRequest` | Wait for Allow / Always / Deny in the pet UI |
-  | `SubagentStart` / `TaskCreated` | Subagent working |
-  | `SubagentStop` / `TaskCompleted` | Subagent done |
-  | `PreCompact` / `PostCompact` | Context compression starts / finishes |
-  | `Notification` / `Elicitation` | Notification prompt |
-  | `WorktreeCreate` | Creating worktree |
-  | `Stop` | Task complete |
-  | `SessionEnd` | Session ended, clear pending interactions |
+<details>
+<summary>Hook event → pet state mapping</summary>
 
-- **Permission requests**: intercepts `PermissionRequest` hooks and shows Allow / Always / Deny controls in the pet window. Deny writes back `continue=false` with `interrupt=true`, matching a terminal "No" — it stops the current turn rather than feeding the rejection back as a retriable tool error.
-- **Choice cards**: supports interactive `PreToolUse` choices for `AskUserQuestion` and `ExitPlanMode`, with options plus Submit / Cancel.
-- **Multi-session switcher**: tracks each Claude Code session's status (streaming / waiting permission / waiting choice / idle) and renders a separate switcher panel beside the pet; scroll the mouse wheel to change the focused session, which drives the pet mood and HUD.
-- **System tray**: registers a tray icon in the notification area whose left/right-click menu mirrors the pet's right-click menu.
-- **Hotkeys**: `Ctrl+Shift+Y` allows a permission or submits a choice; `Ctrl+Shift+N` denies a permission or cancels a choice.
-- **Pomodoro timer**: built-in Pomodoro with Start / Stop / Pause / Resume / Skip and notifications on phase completion.
-- **Fishing minigame**: click on the pet to start fishing through a "waiting → reeling → caught/missed" sequence; maintain tension by keeping the mouse inside a moving target zone during the reeling phase. Each phase has its own GIF (`fishing` / `reel` / `caught` / `missed`); legacy single-`fishing` configs on the bundled GIF directory are auto-migrated to the four-asset layout.
-- **Pet interaction**: short left-click plays `wave` / `stretch`; click-and-move still drags the window; focus sessions can use the `pomodoro` animation.
-- **Idle sleep**: auto-sleeps after inactivity and wakes on new activity.
-- **Window and asset settings**: pet scaling, window position memory, GIF directory, and mood-to-GIF mapping.
-- **Settings panel**: Basic, Pomodoro, LLM Profiles, and Stats tabs using native Slint windows.
-- **LLM Profiles**: save official or custom LLM profiles, write the active profile to Claude Code settings, and switch quickly from the right-click menu.
-- **Session ledger**: records daily prompts, tool categories, permission/choice counts, errors, completed focus sessions, and token usage; Stats shows today and the last 7 days.
-- **Official usage monitoring**: real-time Claude Code 5h/7d usage limits in the right-click menu and Settings panel, with subscription plan detection (Max/Pro/Team) and auto-refresh via OAuth polling.
-- **Secrets encrypted storage**: sensitive credentials encrypted/decrypted transparently with Windows DPAPI.
-- **OpenAI-compatible proxy**: converts Claude Code Anthropic Messages requests to OpenAI Chat Completions with tools, streaming, image forwarding, reasoning output, parallel tool calls, tool-history fallback, context compression, summaries, and capability caching. Incoming requests are authenticated with a Bearer token (Claude Code's `ANTHROPIC_AUTH_TOKEN`); upstream 429/529 `Retry-After` headers are forwarded back to Claude Code, and transient upstream unavailability is uniformly returned as HTTP 529 to match Anthropic's overload semantics.
-- **Windows-only**: ships the desktop pet UI, hook/proxy services, Settings panel, and permission/choice interactions for Windows.
+| Event | Behavior |
+|-------|----------|
+| `SessionStart` | Return to idle |
+| `UserPromptSubmit` | Thinking |
+| `PreToolUse` | Start tool activity; write tools → typing, shell tools → building, read/search tools → search |
+| `PostToolUse` | Finish tool activity |
+| `PostToolBatch` | Batch complete, refresh quota snapshot |
+| `PostToolUseFailure` / `StopFailure` / `PermissionDenied` | Error state |
+| `PermissionRequest` | Wait for Allow / Always / Deny in the pet UI |
+| `SubagentStart` / `TaskCreated` | Subagent working |
+| `SubagentStop` / `TaskCompleted` | Subagent done |
+| `PreCompact` / `PostCompact` | Context compression starts / finishes |
+| `Notification` / `Elicitation` | Notification prompt |
+| `WorktreeCreate` | Creating worktree |
+| `Stop` | Task complete |
+| `SessionEnd` | Session ended, clear pending interactions |
+
+</details>
 
 ## Quick Start
 
-Run in development:
+Requirements: Windows 10/11 + the [Rust toolchain](https://rustup.rs/) (Windows only; non-Windows does not build).
 
 ```powershell
 cargo run --release
 ```
 
-Normal startup listens on hook URL `http://127.0.0.1:17387/hook` and local proxy `http://127.0.0.1:17388`, then ensures Claude Code hooks point at the selected claudie port. Exiting the UI removes claudie-managed hooks.
+Normal startup listens on the hook (`:17387`) and proxy (`:17388`), then automatically points Claude Code hooks at the current port; exiting the UI removes claudie-managed hooks. No manual hook install is needed to get started.
 
-Useful commands:
+Common commands (`--install` / `--uninstall` are short aliases; `--quiet` suppresses install notification popups):
 
 ```powershell
 cargo run --release -- --help
 cargo run --release -- --port 17387
-cargo run --release -- --install-claude-hooks
-cargo run --release -- --uninstall-claude-hooks
+cargo run --release -- --install-claude-hooks      # alias: --install
+cargo run --release -- --uninstall-claude-hooks    # alias: --uninstall
 cargo run --release -- --print-claude-settings
-cargo run --release -- --install-claude-hooks --quiet
 ```
 
-`--install` and `--uninstall` are accepted as short aliases. `--quiet` suppresses system notification popups during hook install/uninstall.
+To build an installer for non-developers, see [Packaging](#packaging).
 
-## OpenAI-Compatible API Proxy
+## OpenAI-Compatible Proxy
 
-claudie listens on:
+The proxy listens on `http://127.0.0.1:17388` and implements `POST /v1/messages`, `POST /v1/messages/count_tokens`, and `GET /v1/models`, letting Claude Code run on any OpenAI-compatible upstream (DeepSeek, Qwen, Kimi, GLM, OpenRouter, OneAPI/NewAPI, …).
 
-```text
-http://127.0.0.1:17388
-```
+Configure a profile in **Settings → LLM Profiles**:
 
-In Settings -> LLM Profiles, create or edit a profile:
+| Field | Description |
+|-------|-------------|
+| `Base URL` | OpenAI-compatible endpoint, e.g. `https://example.com/v1/chat/completions` or `https://example.com/v1`. |
+| `API key` | Upstream service key; if empty, the proxy uses `Auth token` as the upstream key. |
+| `Model` | A model supported by that service. |
+| `OpenAI body` | Optional extra request fields — JSON object or one `key=value` / `key: value` per line, e.g. `{"reasoning_effort":"xhigh"}`. Merged into the upstream request, but cannot override claudie-managed `messages` / `stream`. |
+| `Extra env` | One `KEY=VALUE` proxy switch or Claude Code env var per line. |
 
-- Set `Base URL` to an OpenAI-compatible endpoint, such as `https://example.com/v1/chat/completions` or `https://example.com/v1`.
-- Set `API key` to the upstream service key. If it is empty, the proxy uses `Auth token` as the upstream key.
-- Set `Model` to a model supported by that service.
-- Optionally set `OpenAI body` to extra request body fields, using either a JSON object or one `key=value` / `key: value` entry per line; for example `{"reasoning_effort":"xhigh"}` or `model_reasoning_effort = "xhigh"`.
-- Use `Extra env` for one `KEY=VALUE` proxy switch or Claude Code environment variable per line.
+After clicking `Use`, if the profile is OpenAI format claudie points Claude Code's `ANTHROPIC_BASE_URL` at the local proxy (the upstream URL/key stay only in the claudie profile). A `Base URL` containing `/chat/completions` enables the proxy automatically; if you enter an upstream root URL, add `CLAUDIE_API_FORMAT=openai` to `Extra env`.
 
-After clicking `Use`, if the profile is OpenAI Chat Completions format, claudie writes Claude Code's `ANTHROPIC_BASE_URL` to the local proxy address. The upstream URL and key stay in the claudie profile. A `Base URL` containing `/chat/completions` enables the proxy automatically. If you enter an upstream root URL instead, add this to `Extra env`:
+**Proxy capabilities:**
 
-```text
-CLAUDIE_API_FORMAT=openai
-```
+- Streaming and non-streaming OpenAI responses are converted back to Anthropic Messages / SSE events.
+- Anthropic tool use / tool result ↔ OpenAI `tools` / `tool_calls` / `tool` messages.
+- `parallel_tool_calls=true` by default when tools are present and supported (set `false` in `OpenAI body` to disable).
+- DeepSeek R1, QwQ, GLM-Zero and similar reasoning streams map to Anthropic thinking blocks; OpenAI/Azure/OpenRouter reasoning models auto-derive `reasoning_effort` from `thinking.budget_tokens`.
+- Image forwarding is auto-detected from the model name; force with `CLAUDIE_PROXY_FORWARD_IMAGES=always/never`.
+- Recognized mainstream upstreams keep the compat prompt off by default; generic OneAPI/NewAPI-style upstreams get it on (`CLAUDIE_PROXY_COMPAT_PROMPT=0/1`).
+- If an upstream rejects native tool history, the proxy falls back to text transcript mode and caches the capability probe.
+- Upstream 429/529 `Retry-After` is forwarded to Claude Code to trigger native backoff; connection failures/timeouts and other transient errors uniformly return HTTP 529 (matching Anthropic's overload semantics).
 
-The proxy implements `POST /v1/messages`, `POST /v1/messages/count_tokens`, and `GET /v1/models`. `OpenAI body` is merged into the upstream chat completions request, but it cannot override claudie-managed `messages` or `stream` fields.
+**Context optimization** (on by default): compresses very long tool results and text; when input exceeds the threshold it keeps recent messages and summarizes older history in chunks. The cache stores only summary text and capability probes — never API keys or original request bodies. Defaults to `local` (local extractive summaries, no upstream call); set `CLAUDIE_PROXY_SUMMARY_MODE=model` to use upstream model summaries.
 
-Current proxy capabilities:
-
-- Non-streaming and streaming OpenAI responses are converted back to Anthropic Messages / SSE events.
-- Anthropic tool use / tool result is converted to OpenAI `tools`, `tool_calls`, and `tool` messages.
-- When tools are present and the model supports tools, `parallel_tool_calls=true` is sent by default; set `{"parallel_tool_calls": false}` to disable it.
-- DeepSeek R1, QwQ, GLM-Zero, and similar reasoning streams are mapped to Anthropic thinking blocks.
-- OpenAI/Azure/OpenRouter reasoning models auto-map Anthropic `thinking.budget_tokens` to `reasoning_effort`, unless the user explicitly sets it in `OpenAI body`.
-- Image content forwarding is supported. By default claudie detects vision support from the model name; force it with `CLAUDIE_PROXY_FORWARD_IMAGES=always` or disable it with `CLAUDIE_PROXY_FORWARD_IMAGES=never`.
-- Recognized OpenAI/Azure/DeepSeek/Qwen/Kimi/GLM/OpenRouter upstreams keep the compat prompt off by default; generic OneAPI/NewAPI-style upstreams get it by default. Control it with `CLAUDIE_PROXY_COMPAT_PROMPT=0/1`.
-- If an upstream rejects native tool history, the proxy retries with text transcript mode and caches the result under `proxy_cache/capabilities/`.
-- When the upstream returns 429 or 529, claudie reads its `Retry-After` header and forwards it back to Claude Code to trigger native backoff; connection failures, timeouts, and other transient upstream errors are uniformly reported as HTTP 529.
-
-Context optimization is enabled by default. claudie compresses very long tool results and text; when estimated input exceeds the threshold, it keeps recent messages and summarizes older history in chunks. The cache stores summary text or capability probe results only, not API keys or full original request bodies.
-
-You can tune it from a profile's `Extra env`:
+<details>
+<summary><code>Extra env</code> tunables (defaults)</summary>
 
 ```text
-CLAUDIE_PROXY_OPTIMIZE=0
+CLAUDIE_PROXY_OPTIMIZE=1
 CLAUDIE_PROXY_SUMMARY_MODE=local
 CLAUDIE_PROXY_SUMMARY_THRESHOLD=24000
 CLAUDIE_PROXY_KEEP_RECENT_MESSAGES=12
 CLAUDIE_PROXY_KEEP_RECENT_TOKENS=10000
 CLAUDIE_PROXY_TOOL_RESULT_LIMIT=3000
 CLAUDIE_PROXY_TEXT_LIMIT=6000
-CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=32000
+CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=32000   # set 0 to disable the output cap
 CLAUDIE_PROXY_LOCAL_SUMMARY_TOKENS=2000
 CLAUDIE_PROXY_CACHE_MAX_MB=10
 CLAUDIE_PROXY_SUMMARY_CACHE_TTL_HOURS=168
@@ -135,149 +130,45 @@ CLAUDIE_PROXY_COMPAT_PROMPT=0
 CLAUDIE_PROXY_FORWARD_IMAGES=auto
 ```
 
-The default `CLAUDIE_PROXY_SUMMARY_MODE=local` uses local extractive summaries and does not call the upstream model for summarization. Set `CLAUDIE_PROXY_SUMMARY_MODE=model` to use upstream model summaries. If the summary request fails, claudie still forwards the request with long-content compression applied. Set `CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=0` to disable the output-token cap.
+</details>
 
 ## Stats Panel
 
-The Settings -> Stats tab visualizes Claude Code activity from the local `daily_stats.json` (up to 45 days). All data stays on your machine.
+Settings → Stats visualizes usage from the local `daily_stats.json` (up to 45 days); all data stays on your machine.
 
-**Top KPI cards** — the large number is today; the `7d · N` line below is the last-7-day total for comparison.
-
-| Card | Meaning |
-|------|---------|
-| Prompts | Number of prompt turns submitted to Claude Code. |
-| Tokens | Total token usage (input + output + cache write + cache read); `k`=thousand, `m`=million. |
-| Cache hit | Cache hit rate = cache-read tokens ÷ all context-input tokens; higher means better prompt-cache reuse and lower cost. Shows `—` when there is no traffic. |
-| Tool calls | Total number of tool invocations. |
-
-**Activity (14-day chart)** — each bar is one of the last 14 days, height drawn relative to the busiest day's prompt count. Idle days stay as empty bars (not skipped); today's bar is highlighted. The caption `prompts/day · peak N · X/7 active` reports prompts per day, the 14-day peak N, and how many of the last 7 days had activity.
-
-**Productivity highlights (last 7 days)**:
-
-| Metric | Meaning |
-|--------|---------|
-| Active days | `X / 7`, the number of days actually used in the last 7. |
-| Avg / prompt | Average tokens per prompt = 7-day total tokens ÷ 7-day prompt count; reflects how "heavy" each conversation is. Shows `—` with no prompts. |
-| Top tool | Most-used tool category and its count over 7 days, e.g. `Search · 142`. |
-| Focus done | Completed Pomodoro focus sessions. |
-
-**Detail (7-day distribution, bar length is relative within each group)**:
-
-- Tool mix: `Write` edits/writes, `Bash` commands, `Search` reads/searches, `Agent` sub-tasks, `Perm` permission prompts, `Choice` question cards.
-- Tokens: `Input` non-cached input, `Output` model output, `Cache W` cache writes, `Cache R` cache-read hits (usually the largest).
-
-## Project Structure
-
-```text
-src/
-  main.rs                  CLI, startup flow, hook/proxy initialization, Windows UI entrypoint
-  config.rs                Ports, window dimensions, menu IDs, overlay geometry, constants
-  globals.rs               Process-wide OnceLock handles
-  notifier.rs              Win32 message-box notification wrapper
-  util.rs                  Arg parsing, paths, text shortening, UTF-16 helpers
-  time_util.rs             Timestamp parsing, duration formatting, percentage extraction
-  official_usage.rs        Claude Code official usage OAuth polling thread
-  usage_display.rs         Official usage formatting and UI display adapter
-  app/                     AppState, moods, permissions/choices, fishing, Pomodoro, stats domain state
-  hooks/                   Claude Code hook server, event semantics, quota extraction, settings merge
-  proxy/                   Anthropic Messages -> OpenAI Chat Completions proxy
-  proxy_optimizer/         Long-context compression, chunk summaries, proxy cache
-  settings/                User settings, LLM profiles, Secrets, Claude env integration, JSON storage
-  ui/                      Win32/GDI+ main window, Slint settings/prompt windows, rendering
-```
-
-Key files:
-
-- `src/app/fishing.rs`: fishing minigame state machine (waiting/reeling/caught/missed).
-- `src/hooks/events.rs`: hook semantics, permission waiting, choice responses, and stats recording.
-- `src/hooks/claude_settings.rs`: hook settings install, uninstall, merge, and backup.
-- `src/hooks/quota.rs`: token, model, provider, quota, rate-limit, and official usage window capture.
-- `src/proxy/request_conv.rs` / `response_conv.rs` / `streaming.rs`: request, response, and streaming conversion.
-- `src/proxy/provider.rs`: provider/model capability detection, image forwarding, reasoning, and compat prompt policy.
-- `src/proxy/tool_history.rs` / `capability_cache.rs`: tool-history transcript fallback and capability cache.
-- `src/proxy_optimizer/config.rs` / `compress.rs` / `summary.rs` / `cache.rs`: context optimization and cache.
-- `src/settings/mod.rs`: profiles, OpenAI body, Extra env, Claude settings writes, and path normalization.
-- `src/settings/secrets.rs`: Windows DPAPI encrypted storage and custom serde serialization.
-- `src/official_usage.rs`: Claude Code OAuth usage API polling and credential management.
-- `src/usage_display.rs`: usage percentage bars, reset countdown, subscription plan formatting.
-- `src/time_util.rs`: RFC3339/epoch timestamp parsing and percentage value extraction.
-- `src/ui/window/mod.rs`: main window lifecycle, hotkeys, right-click menu, dragging, profile menu, system tray icon, and the multi-session switcher auxiliary window.
-- `src/ui/window/render.rs`: HUD, pet drawing, permission overlay, choice cards, and session switcher row rendering.
-- `src/ui/window_position.rs`: monitor-aware centering and bounds helpers used by Slint popups and the Settings window.
-- `src/ui/slint_views.rs` and `src/ui/settings_panel/`: Settings / Prompt declarations and controllers.
-
-Other directories:
-
-- `assets/claudie/`: bundled pet GIF animations.
-- `assets/icon.*`, `assets/claudie.manifest`: application icons and Windows manifest.
-- `packaging/`: Windows packaging scripts.
+- **Top KPIs** — large number is today, `7d · N` below is the 7-day total. Covers Prompts (turns), Tokens (input + output + cache read/write), Cache hit (cache-read ÷ all context input — higher is cheaper), and Tool calls.
+- **Activity** — 14-day prompt bar chart with today highlighted and idle days kept as empty bars; the caption gives prompts/day, the 14-day peak, and active days in the last 7.
+- **Productivity highlights** (last 7 days) — active days, avg tokens per prompt, top tool category, and completed Pomodoro sessions.
+- **Detail** (last 7 days) — Tool mix (Write/Bash/Search/Agent/Perm/Choice) and Tokens (Input/Output/Cache W/Cache R).
 
 ## Local Data
 
-- `%USERPROFILE%\.claudie\settings.json`: asset path, GIF mapping, scale, sleep timeout, window position, and Pomodoro settings.
-- `%USERPROFILE%\.claudie\llm_profiles.json`: LLM profiles, active profile, upstream auth, OpenAI body, and Extra env.
-- `%USERPROFILE%\.claudie\secrets.json`: Windows DPAPI-encrypted sensitive credentials (API keys, OAuth tokens).
-- `%USERPROFILE%\.claudie\daily_stats.json`: daily prompt, tool, permission/choice, error, focus-session, and token counters; keeps up to 45 days.
-- `%USERPROFILE%\.claudie\proxy_summaries.json`: legacy single-block summary cache.
-- `%USERPROFILE%\.claudie\proxy_cache\`: proxy cache directory containing `summaries/`, `chunks/`, and `capabilities/`.
-- `%USERPROFILE%\.claude\settings.json`: Claude Code hook settings and claudie-managed LLM env.
-- `%USERPROFILE%\.claude\settings.json.claudie.bak`: one-time backup created before the first Claude settings modification.
+All under `%USERPROFILE%\.claudie\` (except the last two, under `.claude\`):
+
+| File | Contents |
+|------|----------|
+| `settings.json` | asset path, GIF mapping, scale, sleep timeout, window position, Pomodoro settings |
+| `llm_profiles.json` | LLM profiles, active profile, upstream auth, OpenAI body, Extra env |
+| `secrets.json` | DPAPI-encrypted credentials (API keys, OAuth tokens), decryptable only by the current Windows user |
+| `daily_stats.json` | daily counters (prompts, tools, permissions/choices, errors, focus, tokens), kept 45 days |
+| `proxy_cache/` | proxy cache: `summaries/`, `chunks/`, `capabilities/` (plus legacy `proxy_summaries.json`) |
+| `.claude\settings.json` | Claude Code hook settings and claudie-managed LLM env |
+| `.claude\settings.json.claudie.bak` | one-time backup created before the first modification |
 
 ## Pet Assets
 
-Bundled assets live in:
-
-```text
-assets/claudie/
-  idle.gif
-  thinking.gif
-  typing.gif
-  building.gif
-  search.gif
-  happy.gif
-  error.gif
-  sleeping.gif
-  subagent.gif
-  pomodoro.gif
-  wave.gif
-  stretch.gif
-  fishing.gif
-  reel.gif
-  caught.gif
-  missed.gif
-```
-
-The Settings panel can adjust the GIF directory and file name mapped to each mood. When replacing art assets, keep the file name mapping consistent.
+Bundled GIFs live in `assets/claudie/`, one file per mood: `idle` `thinking` `typing` `building` `search` `happy` `error` `sleeping` `subagent` `pomodoro` `wave` `stretch` `fishing` `reel` `caught` `missed`. The Settings panel can adjust the GIF directory and the file name for each mood; keep the mapping consistent when replacing art.
 
 ## Packaging
 
-The Windows installer template is in `packaging/windows/claudie.iss`:
+The Windows installer template is in `packaging/windows/claudie.iss`; output is `dist\claudie-setup.exe`:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 ```
 
-The output is `dist\claudie-setup.exe`.
+## Development
 
-## Verification
+Before submitting, run at least `cargo fmt` and `cargo check`; run `cargo test` when touching hooks, quota, profiles, proxy conversion/streaming, the optimizer, stats, Pomodoro, or other pure domain logic; UI/hook/permission/proxy behavior changes also need a manual `cargo run --release`.
 
-Before submitting changes, run at least:
-
-```powershell
-cargo fmt
-cargo check
-```
-
-Run this when touching hook settings, quota extraction, LLM profiles, proxy conversion/streaming, context optimization, stats, Pomodoro, or pure domain rules:
-
-```powershell
-cargo test
-```
-
-For UI, hook, permission, settings, or proxy behavior changes, also run manually:
-
-```powershell
-cargo run --release
-```
-
-Check window position restore, right-click menu and LLM Profile switching, the four Settings tabs, left-click interaction and dragging, GIF loading, `POST /hook` state updates, permission/choice cards, Stats charts, and when relevant the local proxy, streaming conversion, `OpenAI body`, and context optimization.
+For the code map, key-file list, and full verification checklist, see [AGENTS.md](AGENTS.md).
