@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::path::Path;
 
 use crate::settings::LlmProfile;
@@ -10,31 +10,6 @@ use super::cache::{
 use super::compress::head_tail_compress;
 use super::config::ProxyOptimizationConfig;
 use super::{CHARS_PER_TOKEN, message_role};
-
-const SUMMARY_MAX_TOKENS: u64 = 800;
-
-pub(super) fn build_summary_request(request: &Value, old_messages: &[Value]) -> Value {
-    let model = request.get("model").cloned().unwrap_or_else(|| json!(""));
-    json!({
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You summarize older Claude Code conversation context so a coding assistant can continue. Preserve user goals, decisions, constraints, file paths, tool results, errors, and pending tasks. Be concise, specific, and do not invent facts."
-            },
-            {
-                "role": "user",
-                "content": format!(
-                    "Summarize these older messages for continuation. Keep durable facts and omit unimportant repetition.\n\nOlder messages JSON:\n{}",
-                    Value::Array(old_messages.to_vec())
-                )
-            }
-        ],
-        "temperature": 0,
-        "max_tokens": SUMMARY_MAX_TOKENS,
-        "stream": false
-    })
-}
 
 pub(super) fn local_summary_for_request(
     profile: &LlmProfile,

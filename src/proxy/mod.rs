@@ -167,27 +167,7 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
             return;
         }
     };
-    let optimized = proxy_optimizer::optimize_openai_request(openai_request, &profile);
-    let openai_request = if let Some(pending) = optimized.pending_summary {
-        match call_openai(&agent, &profile, &pending.summary_request) {
-            Ok(summary_response) => {
-                match proxy_optimizer::summary_text_from_openai_response(&summary_response) {
-                    Some(summary) => {
-                        let _ = proxy_optimizer::save_summary(
-                            &pending.cache_key,
-                            &summary,
-                            &pending.config,
-                        );
-                        pending.request_with_summary(&summary)
-                    }
-                    None => pending.fallback_request,
-                }
-            }
-            Err(_) => pending.fallback_request,
-        }
-    } else {
-        optimized.request
-    };
+    let openai_request = proxy_optimizer::optimize_openai_request(openai_request, &profile).request;
 
     let outbound_model = openai_request
         .get("model")

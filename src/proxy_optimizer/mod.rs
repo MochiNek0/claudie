@@ -11,8 +11,8 @@ mod summary;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use cache::{proxy_cache_dir, prune_cache_dir, save_summary};
-pub(crate) use config::{ProxyOptimizationConfig, SummaryMode};
+pub(crate) use cache::{proxy_cache_dir, prune_cache_dir};
+pub(crate) use config::ProxyOptimizationConfig;
 
 pub(super) const OPTIMIZER_VERSION: &str = "v5";
 pub(super) const CHARS_PER_TOKEN: usize = 4;
@@ -20,39 +20,13 @@ const MESSAGE_ENVELOPE_CHARS: usize = 24;
 
 #[derive(Clone, Debug)]
 pub(crate) struct OptimizedRequest {
-    /// Request ready to send upstream. `Value::Null` placeholder when
-    /// `pending_summary` is `Some`; callers then use the pending summary's
-    /// `request_with_summary`/`fallback_request` instead.
+    /// Request ready to send upstream.
     pub(crate) request: Value,
-    pub(crate) pending_summary: Option<PendingSummary>,
     // Optimizer outcome flags: asserted by the optimizer tests, not read in production.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) cache_hit: bool,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) compressed: bool,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) local_summary: bool,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct PendingSummary {
-    pub(crate) cache_key: String,
-    pub(crate) config: ProxyOptimizationConfig,
-    pub(crate) summary_request: Value,
-    pub(crate) fallback_request: Value,
-    prefix_messages: Vec<Value>,
-    recent_messages: Vec<Value>,
-}
-
-impl PendingSummary {
-    pub(crate) fn request_with_summary(self, summary: &str) -> Value {
-        let mut request = self.fallback_request;
-        set_messages(
-            &mut request,
-            messages_with_summary(self.prefix_messages, summary, self.recent_messages),
-        );
-        request
-    }
 }
 
 pub(crate) fn optimize_openai_request(request: Value, profile: &LlmProfile) -> OptimizedRequest {
@@ -60,8 +34,6 @@ pub(crate) fn optimize_openai_request(request: Value, profile: &LlmProfile) -> O
     if !config.enabled {
         return OptimizedRequest {
             request,
-            pending_summary: None,
-            cache_hit: false,
             compressed: false,
             local_summary: false,
         };
@@ -71,23 +43,18 @@ pub(crate) fn optimize_openai_request(request: Value, profile: &LlmProfile) -> O
     let Some(mut messages) = take_messages(&mut request) else {
         return OptimizedRequest {
             request,
-            pending_summary: None,
-            cache_hit: false,
             compressed: false,
             local_summary: false,
         };
     };
 
     let compressed = compress::compress_messages_in_place(&mut messages, &config);
-    let output_capped = cap_output_tokens(&mut request, config.max_output_tokens);
 
     if estimate_messages_tokens(&messages) <= config.summary_threshold_tokens {
         set_messages(&mut request, messages);
         return OptimizedRequest {
             request,
-            pending_summary: None,
-            cache_hit: false,
-            compressed: compressed || output_capped,
+            compressed,
             local_summary: false,
         };
     }
@@ -98,92 +65,26 @@ pub(crate) fn optimize_openai_request(request: Value, profile: &LlmProfile) -> O
         set_messages(&mut request, messages);
         return OptimizedRequest {
             request,
-            pending_summary: None,
-            cache_hit: false,
-            compressed: compressed || output_capped,
+            compressed,
             local_summary: false,
         };
     }
 
-    let cache_key = cache::summary_cache_key(
-        profile,
-        &request,
-        &messages[prefix_len..recent_start],
-        &config,
-    );
-
-    if let Some(summary) = cache::load_summary(&cache_key, &config) {
-        let (prefix_messages, _old_messages, recent_messages) =
-            split_into_segments(messages, prefix_len, recent_start);
-        set_messages(
-            &mut request,
-            messages_with_summary(prefix_messages, &summary, recent_messages),
-        );
-        return OptimizedRequest {
-            request,
-            pending_summary: None,
-            cache_hit: true,
-            compressed: true,
-            local_summary: false,
-        };
-    }
-
-    if config.summary_mode == SummaryMode::Local {
-        let summary = {
-            let old_messages = &messages[prefix_len..recent_start];
-            summary::local_summary_for_request(profile, &request, old_messages, &config)
-        };
-        let _ = save_summary(&cache_key, &summary, &config);
-        let (prefix_messages, _old_messages, recent_messages) =
-            split_into_segments(messages, prefix_len, recent_start);
-        set_messages(
-            &mut request,
-            messages_with_summary(prefix_messages, &summary, recent_messages),
-        );
-        return OptimizedRequest {
-            request,
-            pending_summary: None,
-            cache_hit: false,
-            compressed: true,
-            local_summary: true,
-        };
-    }
-
-    let summary_request =
-        summary::build_summary_request(&request, &messages[prefix_len..recent_start]);
-    let (prefix_messages, old_messages, recent_messages) =
+    let summary = {
+        let old_messages = &messages[prefix_len..recent_start];
+        summary::local_summary_for_request(profile, &request, old_messages, &config)
+    };
+    let (prefix_messages, _old_messages, recent_messages) =
         split_into_segments(messages, prefix_len, recent_start);
-    let mut combined =
-        Vec::with_capacity(prefix_messages.len() + old_messages.len() + recent_messages.len());
-    combined.extend_from_slice(&prefix_messages);
-    combined.extend(old_messages);
-    combined.extend_from_slice(&recent_messages);
-    set_messages(&mut request, combined);
+    set_messages(
+        &mut request,
+        messages_with_summary(prefix_messages, &summary, recent_messages),
+    );
     OptimizedRequest {
-        // The caller only consumes the pending summary's requests, so move the
-        // full request into fallback_request instead of cloning it.
-        request: Value::Null,
-        pending_summary: Some(PendingSummary {
-            cache_key,
-            config,
-            summary_request,
-            fallback_request: request,
-            prefix_messages,
-            recent_messages,
-        }),
-        cache_hit: false,
+        request,
         compressed: true,
-        local_summary: false,
+        local_summary: true,
     }
-}
-
-pub(crate) fn summary_text_from_openai_response(response: &Value) -> Option<String> {
-    response
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(ToString::to_string)
 }
 
 fn take_messages(request: &mut Value) -> Option<Vec<Value>> {
@@ -199,26 +100,6 @@ fn split_into_segments(
     let recent_messages = messages.split_off(recent_start);
     let old_messages = messages.split_off(prefix_len);
     (messages, old_messages, recent_messages)
-}
-
-fn cap_output_tokens(request: &mut Value, cap: u64) -> bool {
-    if cap == 0 {
-        return false;
-    }
-    let mut changed = false;
-    if let Some(object) = request.as_object_mut() {
-        for key in ["max_tokens", "max_completion_tokens"] {
-            if object
-                .get(key)
-                .and_then(Value::as_u64)
-                .is_some_and(|value| value > cap)
-            {
-                object.insert(key.to_string(), Value::Number(cap.into()));
-                changed = true;
-            }
-        }
-    }
-    changed
 }
 
 fn leading_system_count(messages: &[Value]) -> usize {

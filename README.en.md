@@ -102,24 +102,20 @@ After clicking `Use`, if the profile is OpenAI format claudie points Claude Code
 - If an upstream rejects native tool history, the proxy falls back to text transcript mode and caches the capability probe.
 - Upstream 429/529 `Retry-After` is forwarded to Claude Code to trigger native backoff; connection failures/timeouts and other transient errors uniformly return HTTP 529 (matching Anthropic's overload semantics).
 
-**Context optimization** (on by default): compresses very long tool results and text; when input exceeds the threshold it keeps recent messages and summarizes older history in chunks. The cache stores only summary text and capability probes — never API keys or original request bodies. Defaults to `local` (local extractive summaries, no upstream call); set `CLAUDIE_PROXY_SUMMARY_MODE=model` to use upstream model summaries.
+**Context optimization** (on by default): compresses very long tool results and text; when input exceeds the threshold it keeps recent messages and summarizes older history in chunks using a local extractive summary (no upstream call). The cache stores only chunk summaries and capability probes — never API keys or original request bodies.
 
 <details>
 <summary><code>Extra env</code> tunables (defaults)</summary>
 
 ```text
 CLAUDIE_PROXY_OPTIMIZE=1
-CLAUDIE_PROXY_SUMMARY_MODE=local
 CLAUDIE_PROXY_SUMMARY_THRESHOLD=24000
 CLAUDIE_PROXY_KEEP_RECENT_MESSAGES=12
 CLAUDIE_PROXY_KEEP_RECENT_TOKENS=10000
 CLAUDIE_PROXY_TOOL_RESULT_LIMIT=3000
 CLAUDIE_PROXY_TEXT_LIMIT=6000
-CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=32000   # set 0 to disable the output cap
 CLAUDIE_PROXY_LOCAL_SUMMARY_TOKENS=2000
 CLAUDIE_PROXY_CACHE_MAX_MB=10
-CLAUDIE_PROXY_SUMMARY_CACHE_TTL_HOURS=168
-CLAUDIE_PROXY_SUMMARY_CACHE_MAX_ENTRIES=200
 CLAUDIE_PROXY_CHUNK_SUMMARY=1
 CLAUDIE_PROXY_CHUNK_SIZE_MESSAGES=8
 CLAUDIE_PROXY_CHUNK_CACHE_TTL_HOURS=168
@@ -151,7 +147,7 @@ All under `%USERPROFILE%\.claudie\` (except the last two, under `.claude\`):
 | `llm_profiles.json` | LLM profiles, active profile, upstream auth, OpenAI body, Extra env |
 | `secrets.json` | DPAPI-encrypted credentials (API keys, OAuth tokens), decryptable only by the current Windows user |
 | `daily_stats.json` | daily counters (prompts, tools, permissions/choices, errors, focus, tokens), kept 45 days |
-| `proxy_cache/` | proxy cache: `summaries/`, `chunks/`, `capabilities/` (plus legacy `proxy_summaries.json`) |
+| `proxy_cache/` | proxy cache: `chunks/`, `capabilities/` |
 | `.claude\settings.json` | Claude Code hook settings and claudie-managed LLM env |
 | `.claude\settings.json.claudie.bak` | one-time backup created before the first modification |
 

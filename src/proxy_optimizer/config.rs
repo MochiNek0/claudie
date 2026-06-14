@@ -7,23 +7,11 @@ pub(super) const DEFAULT_KEEP_RECENT_MESSAGES: usize = 12;
 pub(super) const DEFAULT_KEEP_RECENT_TOKENS: usize = 10_000;
 pub(super) const DEFAULT_TOOL_RESULT_LIMIT_TOKENS: usize = 3_000;
 pub(super) const DEFAULT_TEXT_LIMIT_TOKENS: usize = 6_000;
-// High enough not to clip the long outputs Claude Code routinely asks for
-// (file writes, plans). Acts as a sanity ceiling on absurd values rather than an
-// active truncator; set CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=0 to disable entirely.
-pub(super) const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 32_000;
 pub(super) const DEFAULT_LOCAL_SUMMARY_TOKENS: usize = 2_000;
 pub(super) const DEFAULT_CACHE_MAX_BYTES: u64 = 10 * 1024 * 1024;
-pub(super) const DEFAULT_SUMMARY_CACHE_TTL_HOURS: u64 = 168;
-pub(super) const DEFAULT_SUMMARY_CACHE_MAX_ENTRIES: usize = 200;
 pub(super) const DEFAULT_CHUNK_SIZE_MESSAGES: usize = 8;
 pub(super) const DEFAULT_CHUNK_CACHE_TTL_HOURS: u64 = 168;
 pub(super) const DEFAULT_CHUNK_CACHE_MAX_ENTRIES: usize = 200;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SummaryMode {
-    Local,
-    Model,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProxyOptimizationConfig {
@@ -33,12 +21,8 @@ pub(crate) struct ProxyOptimizationConfig {
     pub(crate) keep_recent_tokens: usize,
     pub(crate) tool_result_limit_tokens: usize,
     pub(crate) text_limit_tokens: usize,
-    pub(crate) max_output_tokens: u64,
     pub(crate) local_summary_tokens: usize,
-    pub(crate) summary_mode: SummaryMode,
     pub(crate) cache_max_bytes: u64,
-    pub(crate) summary_cache_ttl_hours: u64,
-    pub(crate) summary_cache_max_entries: usize,
     pub(crate) chunk_summary_enabled: bool,
     pub(crate) chunk_size_messages: usize,
     pub(crate) chunk_cache_ttl_hours: u64,
@@ -79,11 +63,6 @@ impl ProxyOptimizationConfig {
             "CLAUDIE_PROXY_TEXT_LIMIT",
             config.text_limit_tokens,
         );
-        config.max_output_tokens = env_u64_allow_zero(
-            profile,
-            "CLAUDIE_PROXY_MAX_OUTPUT_TOKENS",
-            config.max_output_tokens,
-        );
         config.local_summary_tokens = env_usize(
             profile,
             "CLAUDIE_PROXY_LOCAL_SUMMARY_TOKENS",
@@ -95,16 +74,6 @@ impl ProxyOptimizationConfig {
             config.cache_max_bytes / (1024 * 1024),
         )
         .saturating_mul(1024 * 1024);
-        config.summary_cache_ttl_hours = env_u64(
-            profile,
-            "CLAUDIE_PROXY_SUMMARY_CACHE_TTL_HOURS",
-            config.summary_cache_ttl_hours,
-        );
-        config.summary_cache_max_entries = env_usize(
-            profile,
-            "CLAUDIE_PROXY_SUMMARY_CACHE_MAX_ENTRIES",
-            config.summary_cache_max_entries,
-        );
         config.chunk_summary_enabled = env_bool(
             profile,
             "CLAUDIE_PROXY_CHUNK_SUMMARY",
@@ -125,26 +94,18 @@ impl ProxyOptimizationConfig {
             "CLAUDIE_PROXY_CHUNK_CACHE_MAX_ENTRIES",
             config.chunk_cache_max_entries,
         );
-        if let Some(value) = profile.extra_env_value("CLAUDIE_PROXY_SUMMARY_MODE") {
-            config.summary_mode = match value.trim().to_ascii_lowercase().as_str() {
-                "model" | "remote" | "llm" => SummaryMode::Model,
-                _ => SummaryMode::Local,
-            };
-        }
         config
     }
 
     pub(super) fn signature(&self) -> String {
         format!(
-            "{OPTIMIZER_VERSION}:{}:{}:{}:{}:{}:{}:{}:{:?}:{}:{}",
+            "{OPTIMIZER_VERSION}:{}:{}:{}:{}:{}:{}:{}:{}",
             self.summary_threshold_tokens,
             self.keep_recent_messages,
             self.keep_recent_tokens,
             self.tool_result_limit_tokens,
             self.text_limit_tokens,
-            self.max_output_tokens,
             self.local_summary_tokens,
-            self.summary_mode,
             self.chunk_summary_enabled,
             self.chunk_size_messages
         )
@@ -160,12 +121,8 @@ impl Default for ProxyOptimizationConfig {
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
             tool_result_limit_tokens: DEFAULT_TOOL_RESULT_LIMIT_TOKENS,
             text_limit_tokens: DEFAULT_TEXT_LIMIT_TOKENS,
-            max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             local_summary_tokens: DEFAULT_LOCAL_SUMMARY_TOKENS,
-            summary_mode: SummaryMode::Local,
             cache_max_bytes: DEFAULT_CACHE_MAX_BYTES,
-            summary_cache_ttl_hours: DEFAULT_SUMMARY_CACHE_TTL_HOURS,
-            summary_cache_max_entries: DEFAULT_SUMMARY_CACHE_MAX_ENTRIES,
             chunk_summary_enabled: true,
             chunk_size_messages: DEFAULT_CHUNK_SIZE_MESSAGES,
             chunk_cache_ttl_hours: DEFAULT_CHUNK_CACHE_TTL_HOURS,
@@ -193,10 +150,6 @@ fn env_usize(profile: &LlmProfile, key: &str, default: usize) -> usize {
 
 fn env_u64(profile: &LlmProfile, key: &str, default: u64) -> u64 {
     env_parse_filtered(profile, key, default, |value: &u64| *value > 0)
-}
-
-fn env_u64_allow_zero(profile: &LlmProfile, key: &str, default: u64) -> u64 {
-    env_parse_filtered(profile, key, default, |_| true)
 }
 
 fn env_bool(profile: &LlmProfile, key: &str, default: bool) -> bool {

@@ -5,14 +5,12 @@ use std::time::SystemTime;
 use crate::settings::LlmProfile;
 use crate::settings::storage::save_pretty_json;
 
-use super::cache::{SummaryCacheFile, chunk_summary_cache_key, summary_cache_key};
-use super::config::{
-    DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_TOOL_RESULT_LIMIT_TOKENS, ProxyOptimizationConfig,
-};
+use super::cache::{SummaryCacheFile, chunk_summary_cache_key};
+use super::config::{DEFAULT_TOOL_RESULT_LIMIT_TOKENS, ProxyOptimizationConfig};
 use super::summary::{local_summary_from_messages, local_summary_with_chunk_cache_at};
 use super::{
     CHARS_PER_TOKEN, OPTIMIZER_VERSION, avoid_leading_tool_messages, now_millis,
-    optimize_openai_request, prune_cache_dir, summary_text_from_openai_response,
+    optimize_openai_request, prune_cache_dir,
 };
 
 fn profile() -> LlmProfile {
@@ -48,8 +46,6 @@ fn below_threshold_request_does_not_summarize() {
 
     let optimized = optimize_openai_request(request.clone(), &profile());
 
-    assert!(optimized.pending_summary.is_none());
-    assert!(!optimized.cache_hit);
     assert_eq!(optimized.request, request);
 }
 
@@ -66,7 +62,6 @@ fn disabled_optimizer_leaves_request_unchanged() {
     let optimized = optimize_openai_request(request.clone(), &profile);
 
     assert_eq!(optimized.request, request);
-    assert!(optimized.pending_summary.is_none());
     assert!(!optimized.compressed);
 }
 
@@ -112,7 +107,6 @@ fn over_threshold_uses_local_summary_by_default_and_keeps_recent_messages() {
     let output_messages = optimized.request["messages"].as_array().unwrap();
 
     assert!(optimized.local_summary);
-    assert!(optimized.pending_summary.is_none());
     assert!(output_messages.iter().any(|message| {
         message["content"]
             .as_str()
@@ -120,53 +114,6 @@ fn over_threshold_uses_local_summary_by_default_and_keeps_recent_messages() {
             .contains("Local extractive summary")
     }));
     assert!(output_messages.iter().any(|message| {
-        message["content"]
-            .as_str()
-            .unwrap_or("")
-            .contains("message-29")
-    }));
-}
-
-#[test]
-fn model_summary_mode_creates_pending_summary() {
-    let mut profile = profile();
-    profile.extra_env = "CLAUDIE_PROXY_SUMMARY_MODE=model".to_string();
-    let messages = (0..30)
-        .map(|index| {
-            json!({
-                "role": if index % 2 == 0 { "user" } else { "assistant" },
-                "content": format!("message-{index}-{}", "x".repeat(8_000))
-            })
-        })
-        .collect::<Vec<_>>();
-    let request = request_with_messages(messages);
-
-    let optimized = optimize_openai_request(request, &profile);
-
-    assert!(!optimized.local_summary);
-    let pending = optimized.pending_summary.expect("pending summary");
-
-    // The full (compressed) conversation moves into fallback_request so a
-    // failed summary call still sends every message upstream.
-    let fallback_messages = pending.fallback_request["messages"].as_array().unwrap();
-    assert_eq!(fallback_messages.len(), 30);
-    assert!(
-        fallback_messages[29]["content"]
-            .as_str()
-            .unwrap()
-            .contains("message-29")
-    );
-
-    // Applying a model summary keeps the summary block plus the recent tail.
-    let with_summary = pending.request_with_summary("model summary text");
-    let messages = with_summary["messages"].as_array().unwrap();
-    assert!(messages.iter().any(|message| {
-        message["content"]
-            .as_str()
-            .unwrap_or("")
-            .contains("model summary text")
-    }));
-    assert!(messages.iter().any(|message| {
         message["content"]
             .as_str()
             .unwrap_or("")
@@ -212,67 +159,11 @@ fn local_summary_preserves_original_user_goal() {
 }
 
 #[test]
-fn output_token_budget_is_capped_by_default() {
-    let request = json!({
-        "model": "gpt-test",
-        "messages": [{ "role": "user", "content": "hello" }],
-        "max_tokens": 100_000_u64,
-        "max_completion_tokens": 100_000_u64
-    });
-
-    let optimized = optimize_openai_request(request, &profile());
-
-    assert_eq!(optimized.request["max_tokens"], DEFAULT_MAX_OUTPUT_TOKENS);
-    assert_eq!(
-        optimized.request["max_completion_tokens"],
-        DEFAULT_MAX_OUTPUT_TOKENS
-    );
-    assert!(optimized.compressed);
-}
-
-#[test]
-fn output_token_cap_can_be_disabled() {
-    let mut profile = profile();
-    profile.extra_env = "CLAUDIE_PROXY_MAX_OUTPUT_TOKENS=0".to_string();
-    let request = json!({
-        "model": "gpt-test",
-        "messages": [{ "role": "user", "content": "hello" }],
-        "max_tokens": 100_000_u64
-    });
-
-    let optimized = optimize_openai_request(request, &profile);
-
-    assert_eq!(optimized.request["max_tokens"], 100_000_u64);
-    assert!(!optimized.compressed);
-}
-
-#[test]
-fn cache_key_is_stable_and_changes_with_tools() {
-    let config = ProxyOptimizationConfig::default();
-    let old = vec![json!({ "role": "user", "content": "same old history" })];
-    let request_a = json!({
-        "model": "gpt-test",
-        "tools": [{ "type": "function", "function": { "name": "Read" } }]
-    });
-    let request_b = json!({
-        "model": "gpt-test",
-        "tools": [{ "type": "function", "function": { "name": "Write" } }]
-    });
-
-    let key_a1 = summary_cache_key(&profile(), &request_a, &old, &config);
-    let key_a2 = summary_cache_key(&profile(), &request_a, &old, &config);
-    let key_b = summary_cache_key(&profile(), &request_b, &old, &config);
-
-    assert_eq!(key_a1, key_a2);
-    assert_ne!(key_a1, key_b);
-}
-
-#[test]
 fn cache_dir_prune_removes_expired_and_over_limit_files() {
     let dir = std::env::temp_dir().join(format!("claudie-cache-prune-{}", now_millis()));
     let payload = SummaryCacheFile {
         version: OPTIMIZER_VERSION.to_string(),
-        kind: "summary".to_string(),
+        kind: "chunk_summary".to_string(),
         summary: "payload".to_string(),
         created_at_ms: now_millis(),
         last_used_at_ms: now_millis(),
@@ -347,18 +238,6 @@ fn chunk_summary_can_be_disabled_from_profile_env() {
     let config = ProxyOptimizationConfig::from_profile(&profile);
 
     assert!(!config.chunk_summary_enabled);
-}
-
-#[test]
-fn summary_text_extracts_openai_message_content() {
-    let response = json!({
-        "choices": [{ "message": { "content": " summary text " } }]
-    });
-
-    assert_eq!(
-        summary_text_from_openai_response(&response).as_deref(),
-        Some("summary text")
-    );
 }
 
 #[test]

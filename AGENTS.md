@@ -60,7 +60,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `src/hooks/quota.rs`: token, model, provider, quota, rate-limit, and official usage window capture from payloads/transcripts.
 - `src/hooks/claude_settings.rs`: hook settings generation, merge, install, uninstall, and one-time backup handling.
 - `src/proxy/`: local Anthropic Messages to OpenAI Chat Completions compatibility proxy.
-- `src/proxy/mod.rs`: proxy server, active profile lookup, Bearer-token request auth (`proxy_auth_authorized`), optimization handoff, upstream call/retry flow, upstream `Retry-After` forwarding, and `/v1/messages` routing.
+- `src/proxy/mod.rs`: proxy server, active profile lookup, Bearer-token request auth (`proxy_auth_authorized`), request optimization, upstream call/retry flow, upstream `Retry-After` forwarding, and `/v1/messages` routing.
 - `src/proxy/http.rs`: minimal HTTP request/response helpers, including extra-header responses.
 - `src/proxy/provider.rs`: provider/model capability detection, image forwarding policy, reasoning model detection, and compat prompt defaults.
 - `src/proxy/request_conv.rs`: Anthropic request to OpenAI request conversion, tools, images, reasoning effort, and `OpenAI body` merge.
@@ -71,10 +71,10 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `src/proxy/upstream.rs`: OpenAI-compatible upstream transport, error mapping, and 429/529 `Retry-After` capture.
 - `src/proxy_optimizer/`: long-context compression, chunk summaries, and on-disk cache.
 - `src/proxy_optimizer/mod.rs`: `optimize_openai_request` orchestration and shared helpers.
-- `src/proxy_optimizer/config.rs`: `ProxyOptimizationConfig`, `SummaryMode`, env parsing, and cache-key signature inputs.
+- `src/proxy_optimizer/config.rs`: `ProxyOptimizationConfig`, env parsing, and cache-key signature inputs.
 - `src/proxy_optimizer/compress.rs`: in-place head/tail message compression and long-text trimming.
-- `src/proxy_optimizer/summary.rs`: local extractive summaries, optional model summary request building, and chunk generation.
-- `src/proxy_optimizer/cache.rs`: legacy summary cache, summary/chunk cache files, cache pruning, and FNV-1a keys.
+- `src/proxy_optimizer/summary.rs`: local extractive summaries and chunk generation.
+- `src/proxy_optimizer/cache.rs`: chunk summary cache files, cache pruning, and FNV-1a keys.
 - `src/proxy_optimizer/tests.rs`: optimizer integration-style unit tests.
 - `src/settings/`: user settings, LLM profile persistence, secrets encryption, Claude env merge, and JSON storage.
 - `src/settings/mod.rs`: settings/profile structs, normalization, OpenAI profile detection, extra env/body parsing, Claude settings writes, and onboarding helper.
@@ -107,9 +107,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `%USERPROFILE%\.claudie\llm_profiles.json`: saved LLM profiles, active profile id, upstream auth fields, OpenAI body, and extra env.
 - `%USERPROFILE%\.claudie\daily_stats.json`: daily counters for prompts, tools, permissions, choices, errors, completed focus sessions, token usage, and fishing attempts.
 - `%USERPROFILE%\.claudie\secrets.json`: Windows DPAPI-encrypted sensitive credentials (API keys, OAuth tokens).
-- `%USERPROFILE%\.claudie\proxy_summaries.json`: legacy single-block summary cache.
 - `%USERPROFILE%\.claudie\proxy_cache\`: OpenAI proxy cache directory:
-  - `summaries/`: single-block summary cache JSON files.
   - `chunks/`: chunk summary cache JSON files.
   - `capabilities/`: upstream tool-history compatibility cache.
 - `%USERPROFILE%\.claude\settings.json`: Claude Code hook settings and claudie-managed LLM env values.
