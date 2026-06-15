@@ -147,6 +147,10 @@ pub(crate) struct PendingPermission {
     pub(crate) session_id: String,
     pub(crate) tool_name: String,
     pub(crate) tool_use_id: String,
+    // Fallback identity for matching a follow-up state event back to this
+    // permission when Claude Code's PermissionRequest payload carried no
+    // tool_use_id: a normalized fingerprint of the tool input.
+    pub(crate) tool_input_fingerprint: String,
     pub(crate) summary: String,
     pub(crate) cwd: String,
     pub(crate) suggestions: Vec<Value>,
@@ -1982,6 +1986,7 @@ mod tests {
             session_id: "s1".to_string(),
             tool_name: "Edit".to_string(),
             tool_use_id: String::new(),
+            tool_input_fingerprint: String::new(),
             summary: String::new(),
             cwd: String::new(),
             suggestions: Vec::new(),
@@ -2028,6 +2033,7 @@ mod tests {
             session_id: "s1".to_string(),
             tool_name: "Edit".to_string(),
             tool_use_id: String::new(),
+            tool_input_fingerprint: String::new(),
             summary: String::new(),
             cwd: String::new(),
             suggestions: Vec::new(),

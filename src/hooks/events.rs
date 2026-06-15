@@ -213,6 +213,7 @@ fn handle_permission_request(
                 tool_name
             },
             tool_use_id: payload_tool_use_id(&payload).unwrap_or_default(),
+            tool_input_fingerprint: tool_input_fingerprint(&payload).unwrap_or_default(),
             summary: summarize_payload(&payload),
             cwd,
             suggestions,
@@ -905,6 +906,7 @@ fn sweep_terminal_answered_permissions(
     match event {
         "PostToolUse" | "PostToolUseFailure" => {
             let tool_use_id = payload_tool_use_id(payload);
+            let fingerprint = tool_input_fingerprint(payload);
             resolve_pending_permissions(state, |pending| {
                 if pending.session_id != session_id {
                     return false;
@@ -912,6 +914,21 @@ fn sweep_terminal_answered_permissions(
                 if let Some(id) = tool_use_id.as_deref() {
                     if !pending.tool_use_id.is_empty() && pending.tool_use_id == id {
                         return true;
+                    }
+                }
+                // Fingerprint fallback: when the PermissionRequest carried no
+                // tool_use_id we cannot match by id, so a follow-up event for
+                // the same tool + identical input is treated as "answered in
+                // the terminal". Restricted to entries without a tool_use_id so
+                // a parallel tool that does have one is only ever matched by id.
+                if pending.tool_use_id.is_empty() {
+                    if let Some(fingerprint) = fingerprint.as_deref() {
+                        if !pending.tool_input_fingerprint.is_empty()
+                            && pending.tool_input_fingerprint == fingerprint
+                            && pending.tool_name.eq_ignore_ascii_case(tool_name)
+                        {
+                            return true;
+                        }
                     }
                 }
                 deny_falls_back_to_terminal(&pending.tool_name)
@@ -1445,6 +1462,7 @@ mod tests {
             session_id: "s1".to_string(),
             tool_name: "Edit".to_string(),
             tool_use_id: String::new(),
+            tool_input_fingerprint: String::new(),
             summary: "edit file".to_string(),
             cwd: String::new(),
             suggestions: Vec::new(),
@@ -1553,6 +1571,71 @@ mod tests {
                 "session_id": "s1",
                 "tool_name": "Read",
                 "tool_use_id": "read-1"
+            }),
+            state.clone(),
+        );
+
+        let state = state.lock().expect("state poisoned");
+        assert_eq!(state.pending_permissions.len(), 1);
+    }
+
+    #[test]
+    fn post_tool_use_fingerprint_resolves_idless_permission() {
+        // A PermissionRequest that carried no tool_use_id cannot be matched by
+        // id, so the follow-up PostToolUse for the same tool + identical input
+        // (answered in the terminal) must dismiss it via the fingerprint path.
+        let tool_input = json!({ "command": "cargo test" });
+        let fingerprint = tool_input_fingerprint(&json!({ "tool_input": tool_input.clone() }))
+            .expect("fingerprint");
+
+        let state = Arc::new(Mutex::new(AppState::new()));
+        {
+            let mut state = state.lock().expect("state poisoned");
+            let mut permission = build_permission("Bash");
+            permission.session_id = "s1".to_string();
+            permission.tool_use_id = String::new();
+            permission.tool_input_fingerprint = fingerprint;
+            state.pending_permissions.push_back(permission);
+        }
+
+        process_hook(
+            json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "s1",
+                "tool_name": "Bash",
+                "tool_input": tool_input,
+            }),
+            state.clone(),
+        );
+
+        let state = state.lock().expect("state poisoned");
+        assert!(state.pending_permissions.is_empty());
+    }
+
+    #[test]
+    fn post_tool_use_fingerprint_ignores_other_sessions() {
+        // The fingerprint fallback must stay session-scoped: an identical tool
+        // call in a different session must not dismiss this popup.
+        let tool_input = json!({ "command": "cargo test" });
+        let fingerprint = tool_input_fingerprint(&json!({ "tool_input": tool_input.clone() }))
+            .expect("fingerprint");
+
+        let state = Arc::new(Mutex::new(AppState::new()));
+        {
+            let mut state = state.lock().expect("state poisoned");
+            let mut permission = build_permission("Bash");
+            permission.session_id = "s1".to_string();
+            permission.tool_use_id = String::new();
+            permission.tool_input_fingerprint = fingerprint;
+            state.pending_permissions.push_back(permission);
+        }
+
+        process_hook(
+            json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "s2",
+                "tool_name": "Bash",
+                "tool_input": tool_input,
             }),
             state.clone(),
         );
@@ -2155,6 +2238,7 @@ mod tests {
             session_id: "s1".to_string(),
             tool_name: tool_name.to_string(),
             tool_use_id: String::new(),
+            tool_input_fingerprint: String::new(),
             summary: String::new(),
             cwd: String::new(),
             suggestions: Vec::new(),
