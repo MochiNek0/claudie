@@ -254,10 +254,14 @@ fn session_status_text(item: &SessionSwitcherItem) -> String {
 }
 
 fn draw_fishing_hud(hdc: HDC, state: &RenderState, x: i32, y: i32, hud_w: i32, hud_h: i32) {
-    let panel = rgb(27, 43, 58);
-    let panel_border = rgb(63, 92, 113);
-    let ink_on_panel = rgb(248, 252, 255);
-    let soft_on_panel = rgb(174, 202, 218);
+    let water = rgb(65, 154, 192);
+    let caught = rgb(72, 173, 121);
+    let missed = rgb(222, 86, 80);
+    let accent = match state.fishing.phase {
+        FishingPhase::Caught => caught,
+        FishingPhase::Missed => missed,
+        _ => water,
+    };
     filled_round_rect(
         hdc,
         x,
@@ -265,82 +269,57 @@ fn draw_fishing_hud(hdc: HDC, state: &RenderState, x: i32, y: i32, hud_w: i32, h
         hud_w,
         hud_h,
         theme::RADIUS_FIELD,
-        panel,
-        panel_border,
+        theme::SURFACE,
+        theme::HAIRLINE,
     );
-    filled_rect(hdc, x + 8, y + 8, 4, hud_h - 16, rgb(65, 154, 192));
 
     match state.fishing.phase {
         FishingPhase::Waiting => {
-            draw_bobber_icon(hdc, x + 26, y + 23);
+            draw_bobber_icon(hdc, x + 18, y + 20, water);
+            text_fit(hdc, x + 46, y + 10, (hud_w - 58).max(1), "CASTING", accent);
             text_fit(
                 hdc,
-                x + 58,
-                y + 15,
-                (hud_w - 72).max(1),
-                "CASTING",
-                ink_on_panel,
-            );
-            text_fit(
-                hdc,
-                x + 58,
-                y + 35,
-                (hud_w - 72).max(1),
+                x + 46,
+                y + 30,
+                (hud_w - 58).max(1),
                 "Waiting for a bite",
-                soft_on_panel,
+                theme::INK_MUTED,
             );
-            draw_water_waves(hdc, x + 58, y + 58, (hud_w - 82).max(1), rgb(65, 154, 192));
         }
         FishingPhase::Reeling => {
-            text_fit(hdc, x + 18, y + 10, 88, "FISH ON!", ink_on_panel);
+            text_fit(hdc, x + 16, y + 7, 70, "FISH ON!", accent);
             text_fit(
                 hdc,
-                x + 112,
-                y + 10,
-                (hud_w - 128).max(1),
+                x + 88,
+                y + 7,
+                (hud_w - 100).max(1),
                 "TAP TO REEL",
-                soft_on_panel,
+                theme::INK_MUTED,
             );
-            draw_fishing_meter(hdc, &state.fishing, x + 18, y + 31, (hud_w - 36).max(1));
+            draw_fishing_meter(hdc, &state.fishing, x + 16, y + 28, (hud_w - 32).max(1));
             draw_catch_progress(
                 hdc,
-                x + 18,
-                y + 58,
-                (hud_w - 36).max(1),
+                x + 16,
+                y + 46,
+                (hud_w - 32).max(1),
                 state.fishing.progress,
             );
         }
         FishingPhase::Caught => {
-            filled_rect(hdc, x + 8, y + 8, 4, hud_h - 16, rgb(72, 173, 121));
-            draw_fish_icon(hdc, x + 24, y + 27, rgb(72, 173, 121));
-            text_fit(
-                hdc,
-                x + 64,
-                y + 18,
-                (hud_w - 82).max(1),
-                "CAUGHT!",
-                ink_on_panel,
-            );
-            draw_catch_progress(hdc, x + 64, y + 47, (hud_w - 84).max(1), 1.0);
+            draw_fish_icon(hdc, x + 18, y + 22, caught);
+            text_fit(hdc, x + 54, y + 11, (hud_w - 66).max(1), "CAUGHT!", accent);
+            draw_catch_progress(hdc, x + 54, y + 34, (hud_w - 68).max(1), 1.0);
         }
         FishingPhase::Missed => {
-            filled_rect(hdc, x + 8, y + 8, 4, hud_h - 16, rgb(222, 86, 80));
-            draw_fish_icon(hdc, x + 24, y + 27, rgb(222, 86, 80));
+            draw_fish_icon(hdc, x + 18, y + 22, missed);
+            text_fit(hdc, x + 54, y + 11, (hud_w - 66).max(1), "ESCAPED", accent);
             text_fit(
                 hdc,
-                x + 64,
-                y + 18,
-                (hud_w - 82).max(1),
-                "ESCAPED",
-                ink_on_panel,
-            );
-            text_fit(
-                hdc,
-                x + 64,
-                y + 43,
-                (hud_w - 82).max(1),
+                x + 54,
+                y + 32,
+                (hud_w - 66).max(1),
                 "The line went slack",
-                soft_on_panel,
+                theme::INK_MUTED,
             );
         }
         FishingPhase::Inactive => {}
@@ -348,10 +327,17 @@ fn draw_fishing_hud(hdc: HDC, state: &RenderState, x: i32, y: i32, hud_w: i32, h
 }
 
 fn draw_fishing_meter(hdc: HDC, fishing: &FishingState, x: i32, y: i32, w: i32) {
-    const BAR_H: i32 = 14;
-    let track = rgb(16, 30, 43);
-    let track_border = rgb(75, 103, 121);
-    filled_round_rect(hdc, x, y, w, BAR_H, theme::RADIUS_CHIP, track, track_border);
+    const BAR_H: i32 = 12;
+    filled_round_rect(
+        hdc,
+        x,
+        y,
+        w,
+        BAR_H,
+        theme::RADIUS_CHIP,
+        theme::SURFACE_HOVER,
+        theme::HAIRLINE,
+    );
     let (target_min, target_max) = fishing.target_range();
     let target_x = x + (w as f32 * target_min).round() as i32;
     let target_w = (w as f32 * (target_max - target_min)).round() as i32;
@@ -362,27 +348,14 @@ fn draw_fishing_meter(hdc: HDC, fishing: &FishingState, x: i32, y: i32, w: i32) 
         target_w.max(4),
         BAR_H - 4,
         theme::RADIUS_CHIP,
-        rgb(96, 191, 123),
-        rgb(96, 191, 123),
+        rgb(72, 173, 121),
+        rgb(72, 173, 121),
     );
+    let marker = rgb(245, 174, 64);
     let marker_x = x + (w as f32 * fishing.tension).round() as i32;
-    filled_rect(hdc, marker_x - 3, y - 4, 6, BAR_H + 8, rgb(255, 216, 106));
-    line(
-        hdc,
-        marker_x - 7,
-        y - 6,
-        marker_x,
-        y - 1,
-        rgb(255, 216, 106),
-    );
-    line(
-        hdc,
-        marker_x + 7,
-        y - 6,
-        marker_x,
-        y - 1,
-        rgb(255, 216, 106),
-    );
+    filled_rect(hdc, marker_x - 2, y - 3, 5, BAR_H + 6, marker);
+    line(hdc, marker_x - 6, y - 5, marker_x, y - 1, marker);
+    line(hdc, marker_x + 6, y - 5, marker_x, y - 1, marker);
 }
 
 fn draw_catch_progress(hdc: HDC, x: i32, y: i32, w: i32, progress: f32) {
@@ -393,31 +366,19 @@ fn draw_catch_progress(hdc: HDC, x: i32, y: i32, w: i32, progress: f32) {
     for index in 0..segments {
         let sx = x + index * (segment_w + gap);
         let color = if index < filled {
-            rgb(10, 132, 255)
+            theme::ACCENT
         } else {
-            rgb(55, 75, 91)
+            rgb(206, 214, 226)
         };
         filled_round_rect(hdc, sx, y, segment_w, 8, theme::RADIUS_CHIP, color, color);
     }
 }
 
-fn draw_bobber_icon(hdc: HDC, x: i32, y: i32) {
-    line(hdc, x + 11, y - 15, x + 11, y - 2, rgb(200, 222, 234));
-    filled_ellipse(hdc, x, y, 22, 22, rgb(248, 252, 255));
-    filled_rect(hdc, x + 1, y + 11, 20, 10, rgb(222, 86, 80));
-    filled_ellipse(hdc, x + 7, y + 7, 4, 4, rgb(248, 252, 255));
-}
-
-fn draw_water_waves(hdc: HDC, x: i32, y: i32, w: i32, color: u32) {
-    let wave_w = 30;
-    let mut next_x = x;
-    while next_x + wave_w <= x + w {
-        line(hdc, next_x, y + 5, next_x + 7, y, color);
-        line(hdc, next_x + 7, y, next_x + 15, y + 5, color);
-        line(hdc, next_x + 15, y + 5, next_x + 23, y, color);
-        line(hdc, next_x + 23, y, next_x + 30, y + 5, color);
-        next_x += wave_w + 8;
-    }
+fn draw_bobber_icon(hdc: HDC, x: i32, y: i32, water: u32) {
+    line(hdc, x + 11, y - 15, x + 11, y - 1, theme::INK_MUTED);
+    filled_ellipse(hdc, x, y, 22, 22, rgb(222, 86, 80));
+    filled_rect(hdc, x + 1, y + 11, 20, 9, water);
+    filled_ellipse(hdc, x + 6, y + 6, 5, 5, rgb(250, 252, 255));
 }
 
 fn draw_fish_icon(hdc: HDC, x: i32, y: i32, body: u32) {

@@ -93,7 +93,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `src/ui/settings_panel/`: Settings window Slint bridge, tab controllers, and live timers.
 - `src/ui/settings_panel/mod.rs`: settings panel top-level refcell bridge and timer thread lifecycle.
 - `src/ui/settings_panel/controller.rs`: settings controller dispatching, official profile usage refresh, and shared helpers.
-- `src/ui/settings_panel/controller/basic.rs`: basic settings tab controller (asset dir, scale, sleep timeout, windowed mode).
+- `src/ui/settings_panel/controller/basic.rs`: basic settings tab controller (GIF folder picker, scale, sleep timeout, session switcher).
 - `src/ui/settings_panel/controller/pomodoro.rs`: pomodoro timer settings tab controller.
 - `src/ui/settings_panel/controller/stats.rs`: daily stats display tab controller.
 - `src/ui/settings_panel/controller/profiles.rs`: LLM profile management and official usage display tab controller.
@@ -103,7 +103,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 
 ## Runtime Files
 
-- `%USERPROFILE%\.claudie\settings.json`: pet asset base directory, GIF directory, animation mapping, scale, sleep timeout, window position, and pomodoro settings.
+- `%USERPROFILE%\.claudie\settings.json`: custom GIF folder (empty = bundled), scale, sleep timeout, session switcher toggle, window position, and pomodoro settings.
 - `%USERPROFILE%\.claudie\llm_profiles.json`: saved LLM profiles, active profile id, upstream auth fields, OpenAI body, and extra env.
 - `%USERPROFILE%\.claudie\daily_stats.json`: daily counters for prompts, tools, permissions, choices, errors, completed focus sessions, token usage, and fishing attempts.
 - `%USERPROFILE%\.claudie\secrets.json`: Windows DPAPI-encrypted sensitive credentials (API keys, OAuth tokens).
@@ -143,7 +143,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - When settings change, update both persisted files and in-memory `AppState`.
 - Secrets in `src/settings/secrets.rs` use Windows DPAPI (`CryptProtectData`/`CryptUnprotectData`) for encryption at rest. The `Secrets` struct wraps a `serde_json::Value` and serializes encrypted. Secrets are scoped to the current Windows user — they cannot be decrypted by another user or on another machine.
 - Official usage polling runs in a dedicated thread spawned at startup. It polls the Claude Code OAuth API (`/api/v2/organizations/.../usage` and `/api/v2/billing/subscription`) every 60 seconds with a cached `token.json` from the Claude Code config directory. Results are stored in `AppState` and displayed in the Settings panel Usage tab and the right-click menu live quota bar.
-- The fishing minigame in `src/app/fishing.rs` is a turn-based state machine: `Inactive → Waiting → Reeling → Caught | Missed`. Left-click on the pet starts the game. During the `Reeling` phase, the player must click when the tension bar is within the green zone. Each phase maps to its own GIF (`fishing` / `fishing_reel` / `fishing_caught` / `fishing_missed`); the loader migrates legacy single-`fishing` configs to the four-asset default when the user is still on the bundled GIF directory. Fishing stats are recorded in `daily_stats.json` alongside tool usage stats.
+- The fishing minigame in `src/app/fishing.rs` is a turn-based state machine: `Inactive → Waiting → Reeling → Caught | Missed`. Left-click on the pet starts the game. During the `Reeling` phase, the player must click when the tension bar is within the green zone. Each phase maps to its own GIF file by the fixed naming convention (`fishing.gif` / `reel.gif` / `caught.gif` / `missed.gif`), resolved per-mood from the user's GIF folder with a fallback to the bundled default. Fishing stats are recorded in `daily_stats.json` alongside tool usage stats.
 
 ## Maintenance Guidelines
 

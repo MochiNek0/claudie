@@ -419,21 +419,12 @@ slint::slint! {
         border-color: Theme.card-border;
         background: Theme.surface;
 
-        Rectangle {
-            x: 0px;
-            y: 0px;
-            width: 100%;
-            height: 4px;
-            border-radius: 8px;
-            background: root.accent;
-        }
-
         Text {
             x: 16px;
             y: 16px;
             width: root.width - 32px;
             text: root.title;
-            color: Theme.ink;
+            color: root.accent;
             font-size: 14px;
             font-weight: 700;
             overflow: elide;
@@ -461,8 +452,9 @@ slint::slint! {
 
         Text {
             x: root.width - 36px;
-            y: 76px;
+            y: 70px;
             width: 28px;
+            height: 32px;
             text: "min";
             color: Theme.ink-muted;
             font-size: 12px;
@@ -603,11 +595,6 @@ slint::slint! {
         }
     }
 
-    struct AnimField {
-        label: string,
-        value: string,
-    }
-
     struct StatTrendBar {
         day_label: string,
         height: float,
@@ -691,11 +678,14 @@ slint::slint! {
         in-out property <float> pet_scale: 80;
         in-out property <float> sleep_after: 75;
         in-out property <bool> show_session_switcher: true;
-        in-out property <string> pet_dir;
+        // Custom GIF folder (absolute path); empty means the bundled GIFs.
         in-out property <string> gif_dir;
-        // Mood GIF filenames; order is fixed in settings_panel/controller/basic.rs.
-        in property <[AnimField]> anim_fields;
-        callback anim_field_changed(int, string);
+        // Human-readable label for gif_dir ("Bundled GIFs" when empty).
+        in property <string> gif_dir_label;
+        // Naming-convention hint plus which moods fall back to the default.
+        in property <string> gif_status;
+        callback browse_gif_dir();
+        callback clear_gif_dir();
 
         in-out property <int> focus_minutes: 25;
         in-out property <int> short_break_minutes: 5;
@@ -834,15 +824,15 @@ slint::slint! {
             width: root.width - 192px;
             height: root.height - 56px;
             viewport-width: root.content_width;
-            viewport-height: root.active_tab == 0 ? 608px : (root.active_tab == 1 ? 456px : (root.active_tab == 2 ? 612px : 600px));
+            viewport-height: root.active_tab == 0 ? 512px : (root.active_tab == 1 ? 456px : (root.active_tab == 2 ? 612px : 600px));
 
             if active_tab == 0: Rectangle {
                 width: root.content_width;
-                height: 608px;
+                height: 512px;
                 background: transparent;
 
                 Text { x: 0px; y: 0px; text: "Pet renderer"; font-size: 17px; font-weight: 700; color: Theme.ink; }
-                Text { x: 0px; y: 28px; width: 576px; text: "Tune the desktop pet size and map each mood to a GIF filename."; font-size: 13px; color: Theme.ink-faint; }
+                Text { x: 0px; y: 28px; width: 576px; text: "Tune the desktop pet size and point it at a folder of GIFs."; font-size: 13px; color: Theme.ink-faint; }
 
                 Text { x: 0px; y: 64px; text: "Pet size"; color: Theme.ink-faint; font-size: 12px; }
                 PointerSlider {
@@ -861,24 +851,47 @@ slint::slint! {
                 }
                 Text { x: 532px; y: 90px; width: 52px; text: Math.round(root.sleep_after) + "s"; color: Theme.ink; font-size: 13px; }
 
-                FieldGroup { x: 0px; y: 128px; width: 284px; label: "Pet asset directory"; value <=> root.pet_dir; }
-                FieldGroup { x: 300px; y: 128px; width: 284px; label: "GIF directory"; value <=> root.gif_dir; }
+                Text { x: 0px; y: 128px; text: "GIF folder"; color: Theme.ink-faint; font-size: 12px; }
+                Rectangle {
+                    x: 0px; y: 148px; width: 372px; height: 32px;
+                    background: Theme.sunken;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: Theme.card-border;
+                    Text {
+                        x: 10px; width: parent.width - 20px; height: parent.height;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        text: root.gif_dir_label;
+                        color: Theme.ink;
+                        font-size: 12px;
+                    }
+                }
+                ActionButton { x: 384px; y: 148px; width: 92px; height: 32px; text: "Browse…"; kind: "primary"; clicked => { root.browse_gif_dir(); } }
+                ActionButton { x: 484px; y: 148px; width: 100px; height: 32px; text: "Use default"; clicked => { root.clear_gif_dir(); } }
 
-                for field[i] in root.anim_fields: FieldGroup {
-                    x: Math.mod(i, 4) * 150px;
-                    y: 204px + Math.floor(i / 4) * 64px;
-                    width: 134px;
-                    label: field.label;
-                    value: field.value;
-                    edited(text) => { root.anim_field_changed(i, text); }
+                Rectangle {
+                    x: 0px; y: 192px; width: 584px; height: 132px;
+                    background: Theme.sunken;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Theme.card-border;
+                    Text {
+                        x: 14px; y: 0px; width: parent.width - 28px; height: parent.height;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                        text: root.gif_status;
+                        color: Theme.ink-muted;
+                        font-size: 12px;
+                    }
                 }
 
-                Text { x: 0px; y: 472px; text: "Session switcher"; color: Theme.ink-faint; font-size: 12px; }
-                Text { x: 0px; y: 494px; width: 504px; height: 48px; text: "Show the compact focus panel when more than one Claude Code session is active."; wrap: word-wrap; color: Theme.ink; font-size: 13px; }
-                TogglePill { x: 538px; y: 482px; width: 46px; height: 24px; checked <=> root.show_session_switcher; }
+                Text { x: 0px; y: 344px; text: "Session switcher"; color: Theme.ink-faint; font-size: 12px; }
+                Text { x: 0px; y: 366px; width: 504px; height: 48px; text: "Show the compact focus panel when more than one Claude Code session is active."; wrap: word-wrap; color: Theme.ink; font-size: 13px; }
+                TogglePill { x: 538px; y: 354px; width: 46px; height: 24px; checked <=> root.show_session_switcher; }
 
-                ActionButton { x: 408px; y: 556px; width: 80px; height: 32px; text: "Save"; kind: "primary"; clicked => { root.save_basic(); } }
-                ActionButton { x: 504px; y: 556px; width: 80px; height: 32px; text: "Reset"; clicked => { root.reset_basic(); } }
+                ActionButton { x: 408px; y: 460px; width: 80px; height: 32px; text: "Save"; kind: "primary"; clicked => { root.save_basic(); } }
+                ActionButton { x: 504px; y: 460px; width: 80px; height: 32px; text: "Reset"; clicked => { root.reset_basic(); } }
             }
 
             if active_tab == 1: Rectangle {
@@ -899,7 +912,6 @@ slint::slint! {
                     border-width: 1px;
                     border-color: Theme.accent-tint-border;
                 }
-                Rectangle { x: 0px; y: 64px; width: 5px; height: 128px; background: Theme.accent; border-radius: 8px; }
                 Rectangle { x: 24px; y: 88px; width: 52px; height: 52px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.accent-tint-border; }
                 Image { x: 38px; y: 102px; width: 24px; height: 24px; source: @image-url("../../assets/lucide/timer.svg"); image-fit: contain; colorize: Theme.accent; }
                 Text { x: 96px; y: 86px; width: 160px; text: "Current cycle"; color: Theme.ink-muted; font-size: 12px; font-weight: 700; }

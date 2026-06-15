@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
-const BITE_WAIT_MIN_MS: u64 = 2_200;
-const BITE_WAIT_SPREAD_MS: u64 = 4_500;
+const BITE_WAIT_MIN_MS: u64 = 1_600;
+const BITE_WAIT_SPREAD_MS: u64 = 3_200;
 const RESULT_VISIBLE: Duration = Duration::from_secs(3);
 const REEL_LIMIT: Duration = Duration::from_secs(32);
 const MISS_GRACE: Duration = Duration::from_secs(4);
@@ -89,7 +89,7 @@ impl FishingState {
         if !self.is_reeling() {
             return self.is_active();
         }
-        self.tension = (self.tension + 0.084).clamp(0.0, 1.0);
+        self.tension = (self.tension + 0.07).clamp(0.0, 1.0);
         true
     }
 
@@ -137,11 +137,11 @@ impl FishingState {
             self.shift_target(now);
         }
 
-        let drift = 0.0065 + self.next_unit() * 0.005;
+        let drift = 0.006 + self.next_unit() * 0.004;
         self.tension = (self.tension - drift).clamp(0.0, 1.0);
         let (target_min, target_max) = self.target_range();
         if self.tension >= target_min && self.tension <= target_max {
-            self.progress = (self.progress + 0.009).clamp(0.0, 1.0);
+            self.progress = (self.progress + 0.010).clamp(0.0, 1.0);
         } else {
             self.progress = (self.progress - 0.008).clamp(0.0, 1.0);
         }
@@ -162,9 +162,9 @@ impl FishingState {
     }
 
     fn shift_target(&mut self, now: Instant) {
-        self.target_center = 0.28 + self.next_unit() * 0.44;
-        self.target_half_width = 0.115 + self.next_unit() * 0.05;
-        let wait_ms = 950 + (self.next_unit() * 900.0) as u64;
+        self.target_center = 0.26 + self.next_unit() * 0.48;
+        self.target_half_width = 0.09 + self.next_unit() * 0.045;
+        let wait_ms = 800 + (self.next_unit() * 700.0) as u64;
         self.next_target_shift_at = now + Duration::from_millis(wait_ms);
     }
 

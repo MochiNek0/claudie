@@ -19,15 +19,11 @@ const SLEEP_AFTER_MIN_SECS: u32 = 15;
 const SLEEP_AFTER_MAX_SECS: u32 = 1800;
 pub(crate) const OFFICIAL_LLM_PROFILE_ID: &str = "official";
 const OFFICIAL_LLM_PROFILE_NAME: &str = "Official";
-const LEGACY_FISHING_ANIMATIONS: (&str, &str, &str, &str) =
-    ("pomodoro", "building", "happy", "error");
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct UserSettings {
-    pub(crate) pet_dir: String,
     pub(crate) gif_dir: String,
-    pub(crate) animations: AnimationSettings,
     pub(crate) window_position: Option<WindowPosition>,
     #[serde(default = "default_show_session_switcher")]
     pub(crate) show_session_switcher: bool,
@@ -42,28 +38,6 @@ pub(crate) struct UserSettings {
 pub(crate) struct WindowPosition {
     pub(crate) x: i32,
     pub(crate) y: i32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub(crate) struct AnimationSettings {
-    pub(crate) idle: String,
-    pub(crate) thinking: String,
-    pub(crate) typing: String,
-    pub(crate) building: String,
-    #[serde(alias = "permission")]
-    pub(crate) search: String,
-    pub(crate) happy: String,
-    pub(crate) error: String,
-    pub(crate) sleeping: String,
-    pub(crate) subagent: String,
-    pub(crate) pomodoro: String,
-    pub(crate) wave: String,
-    pub(crate) stretch: String,
-    pub(crate) fishing: String,
-    pub(crate) fishing_reel: String,
-    pub(crate) fishing_caught: String,
-    pub(crate) fishing_missed: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -102,37 +76,12 @@ pub(crate) struct LlmProfileDb {
 impl Default for UserSettings {
     fn default() -> Self {
         Self {
-            pet_dir: String::new(),
-            gif_dir: DEFAULT_GIF_DIR.to_string(),
-            animations: AnimationSettings::default(),
+            gif_dir: String::new(),
             window_position: None,
             show_session_switcher: true,
             pet_scale_percent: 80,
             sleep_after_secs: DEFAULT_SLEEP_AFTER_SECS,
             pomodoro: PomodoroSettings::default(),
-        }
-    }
-}
-
-impl Default for AnimationSettings {
-    fn default() -> Self {
-        Self {
-            idle: "idle".to_string(),
-            thinking: "thinking".to_string(),
-            typing: "typing".to_string(),
-            building: "building".to_string(),
-            search: "search".to_string(),
-            happy: "happy".to_string(),
-            error: "error".to_string(),
-            sleeping: "sleeping".to_string(),
-            subagent: "subagent".to_string(),
-            pomodoro: "pomodoro".to_string(),
-            wave: "wave".to_string(),
-            stretch: "stretch".to_string(),
-            fishing: "fishing".to_string(),
-            fishing_reel: "reel".to_string(),
-            fishing_caught: "caught".to_string(),
-            fishing_missed: "missed".to_string(),
         }
     }
 }
@@ -155,36 +104,6 @@ impl UserSettings {
     pub(crate) fn sleep_after_secs(&self) -> u32 {
         self.sleep_after_secs
             .clamp(SLEEP_AFTER_MIN_SECS, SLEEP_AFTER_MAX_SECS)
-    }
-
-    pub(crate) fn animation_value(&self, mood: PetMood) -> &str {
-        match mood {
-            PetMood::Idle => &self.animations.idle,
-            PetMood::Thinking => &self.animations.thinking,
-            PetMood::Typing => &self.animations.typing,
-            PetMood::Building => &self.animations.building,
-            PetMood::Search => &self.animations.search,
-            PetMood::Happy => &self.animations.happy,
-            PetMood::Error => &self.animations.error,
-            PetMood::Sleeping => &self.animations.sleeping,
-            PetMood::Subagent => &self.animations.subagent,
-            PetMood::Pomodoro => &self.animations.pomodoro,
-            PetMood::Wave => &self.animations.wave,
-            PetMood::Stretch => &self.animations.stretch,
-            PetMood::Fishing => &self.animations.fishing,
-            PetMood::FishingReel => &self.animations.fishing_reel,
-            PetMood::FishingCaught => &self.animations.fishing_caught,
-            PetMood::FishingMissed => &self.animations.fishing_missed,
-        }
-    }
-
-    pub(crate) fn pet_asset_base_dir(&self) -> PathBuf {
-        let trimmed = self.pet_dir.trim();
-        if trimmed.is_empty() {
-            default_bundled_pet_dir()
-        } else {
-            expand_home(trimmed)
-        }
     }
 }
 
@@ -418,47 +337,10 @@ pub(crate) fn load_user_settings() -> UserSettings {
 fn normalize_user_settings(settings: &mut UserSettings) -> bool {
     let mut changed = false;
 
-    if settings.gif_dir.trim().is_empty() {
-        settings.gif_dir = DEFAULT_GIF_DIR.to_string();
-        changed = true;
-    }
-
-    let legacy_fishing_animations = legacy_fishing_animations(&settings.animations);
-
-    let legacy_search_animation = settings
-        .animations
-        .search
-        .trim()
-        .eq_ignore_ascii_case("permission")
-        || settings
-            .animations
-            .search
-            .trim()
-            .eq_ignore_ascii_case("permission.gif");
-    if legacy_search_animation && settings.gif_dir.trim() == DEFAULT_GIF_DIR {
-        settings.animations.search = "search".to_string();
-        changed = true;
-    }
-
-    if legacy_fishing_animations && settings.gif_dir.trim() == DEFAULT_GIF_DIR {
-        set_default_fishing_animations(&mut settings.animations);
-        changed = true;
-    }
-
-    // If the persisted gif_dir doesn't actually contain the required GIFs
-    // (e.g. left over from a previous build), reset it to the bundled default
-    // so the panel surfaces the right path next time it loads.
-    if !settings.gif_dir.trim().is_empty()
-        && settings.gif_dir != DEFAULT_GIF_DIR
-        && configured_gif_dir_strict(settings).is_none()
-    {
-        settings.gif_dir = DEFAULT_GIF_DIR.to_string();
-        if legacy_search_animation {
-            settings.animations.search = "search".to_string();
-        }
-        if legacy_fishing_animations {
-            set_default_fishing_animations(&mut settings.animations);
-        }
+    // The bundled relative path was the old default sentinel; an empty gif_dir
+    // now means "use the bundled GIFs", so collapse legacy values to empty.
+    if settings.gif_dir.trim() == DEFAULT_GIF_DIR {
+        settings.gif_dir.clear();
         changed = true;
     }
 
@@ -477,26 +359,6 @@ fn normalize_user_settings(settings: &mut UserSettings) -> bool {
     }
 
     changed
-}
-
-fn legacy_fishing_animations(animations: &AnimationSettings) -> bool {
-    animation_name_matches(&animations.fishing, LEGACY_FISHING_ANIMATIONS.0)
-        && animation_name_matches(&animations.fishing_reel, LEGACY_FISHING_ANIMATIONS.1)
-        && animation_name_matches(&animations.fishing_caught, LEGACY_FISHING_ANIMATIONS.2)
-        && animation_name_matches(&animations.fishing_missed, LEGACY_FISHING_ANIMATIONS.3)
-}
-
-fn set_default_fishing_animations(animations: &mut AnimationSettings) {
-    animations.fishing = "fishing".to_string();
-    animations.fishing_reel = "reel".to_string();
-    animations.fishing_caught = "caught".to_string();
-    animations.fishing_missed = "missed".to_string();
-}
-
-fn animation_name_matches(value: &str, expected: &str) -> bool {
-    let trimmed = value.trim();
-    trimmed.eq_ignore_ascii_case(expected)
-        || trimmed.eq_ignore_ascii_case(&format!("{expected}.gif"))
 }
 
 pub(crate) fn load_llm_profile_db() -> LlmProfileDb {
@@ -612,58 +474,57 @@ pub(crate) fn current_claude_llm_profile() -> Option<LlmProfile> {
     })
 }
 
-pub(crate) fn configured_gif_dir(settings: &UserSettings) -> Option<PathBuf> {
-    let raw = settings.gif_dir.trim();
-    let candidate = if raw.is_empty() { DEFAULT_GIF_DIR } else { raw };
-    let configured = expand_home(candidate);
-
-    let configured_dir = if configured.is_absolute() {
-        configured.is_dir().then(|| configured.clone())
-    } else {
-        let direct = settings.pet_asset_base_dir().join(&configured);
-        direct.is_dir().then_some(direct)
-    };
-    if let Some(dir) = configured_dir {
-        if dir_has_required_gifs(&dir, settings) {
-            return Some(dir);
-        }
+/// Fixed filename convention for each mood's GIF. A custom GIF folder must use
+/// these names; any file that is missing falls back to the bundled default.
+pub(crate) fn mood_gif_filename(mood: PetMood) -> &'static str {
+    match mood {
+        PetMood::Idle => "idle.gif",
+        PetMood::Thinking => "thinking.gif",
+        PetMood::Typing => "typing.gif",
+        PetMood::Building => "building.gif",
+        PetMood::Search => "search.gif",
+        PetMood::Happy => "happy.gif",
+        PetMood::Error => "error.gif",
+        PetMood::Sleeping => "sleeping.gif",
+        PetMood::Subagent => "subagent.gif",
+        PetMood::Pomodoro => "pomodoro.gif",
+        PetMood::Wave => "wave.gif",
+        PetMood::Stretch => "stretch.gif",
+        PetMood::Fishing => "fishing.gif",
+        PetMood::FishingReel => "reel.gif",
+        PetMood::FishingCaught => "caught.gif",
+        PetMood::FishingMissed => "missed.gif",
     }
-
-    // Configured path is missing or stale (e.g. left over from an older
-    // build); fall back to the bundled default so the pet still renders.
-    let fallback = settings.pet_asset_base_dir().join(DEFAULT_GIF_DIR);
-    if dir_has_required_gifs(&fallback, settings) {
-        return Some(fallback);
-    }
-
-    None
 }
 
-fn configured_gif_dir_strict(settings: &UserSettings) -> Option<PathBuf> {
+/// Bundled GIF directory shipped with the app; the per-mood fallback source.
+pub(crate) fn bundled_gif_dir() -> PathBuf {
+    default_bundled_pet_dir().join(DEFAULT_GIF_DIR)
+}
+
+/// The user's chosen custom GIF folder, if set and present on disk. An empty
+/// `gif_dir` (or a path that no longer exists) means "use the bundled GIFs".
+pub(crate) fn user_gif_dir(settings: &UserSettings) -> Option<PathBuf> {
     let raw = settings.gif_dir.trim();
     if raw.is_empty() {
         return None;
     }
-    let candidate = expand_home(raw);
-    let dir = if candidate.is_absolute() {
-        candidate.is_dir().then_some(candidate)?
-    } else {
-        let direct = settings.pet_asset_base_dir().join(&candidate);
-        direct.is_dir().then_some(direct)?
-    };
-    dir_has_required_gifs(&dir, settings).then_some(dir)
+    let dir = expand_home(raw);
+    dir.is_dir().then_some(dir)
 }
 
-fn dir_has_required_gifs(dir: &Path, settings: &UserSettings) -> bool {
-    mood_rows().iter().all(|(mood, _)| {
-        let name = settings.animation_value(*mood);
-        let filename = if name.ends_with(".gif") || name.ends_with(".GIF") {
-            name.to_string()
-        } else {
-            format!("{name}.gif")
-        };
-        dir.join(filename).is_file()
-    })
+/// Resolve the GIF file for one mood: prefer the user's folder, then fall back
+/// to the bundled default. `None` means neither source has the file.
+pub(crate) fn resolve_mood_gif(settings: &UserSettings, mood: PetMood) -> Option<PathBuf> {
+    let filename = mood_gif_filename(mood);
+    if let Some(dir) = user_gif_dir(settings) {
+        let candidate = dir.join(filename);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let fallback = bundled_gif_dir().join(filename);
+    fallback.is_file().then_some(fallback)
 }
 
 pub(crate) fn mood_rows() -> &'static [(PetMood, &'static str)] {
@@ -1145,68 +1006,21 @@ mod tests {
     }
 
     #[test]
-    fn legacy_permission_animation_becomes_search_for_default_assets() {
+    fn legacy_bundled_gif_dir_collapses_to_empty() {
         let mut settings: UserSettings = serde_json::from_value(serde_json::json!({
             "gif_dir": DEFAULT_GIF_DIR,
-            "animations": {
-                "idle": "idle",
-                "thinking": "thinking",
-                "typing": "typing",
-                "building": "building",
-                "permission": "permission",
-                "happy": "happy",
-                "error": "error",
-                "sleeping": "sleeping",
-                "subagent": "subagent"
-            }
-        }))
-        .unwrap();
-
-        assert_eq!(settings.animations.search, "permission");
-        assert!(normalize_user_settings(&mut settings));
-        assert_eq!(settings.animations.search, "search");
-    }
-
-    #[test]
-    fn default_fishing_animations_use_fishing_gifs() {
-        let settings = AnimationSettings::default();
-
-        assert_eq!(settings.fishing, "fishing");
-        assert_eq!(settings.fishing_reel, "reel");
-        assert_eq!(settings.fishing_caught, "caught");
-        assert_eq!(settings.fishing_missed, "missed");
-    }
-
-    #[test]
-    fn legacy_fishing_animations_migrate_for_default_assets() {
-        let mut settings: UserSettings = serde_json::from_value(serde_json::json!({
-            "gif_dir": DEFAULT_GIF_DIR,
-            "animations": {
-                "idle": "idle",
-                "thinking": "thinking",
-                "typing": "typing",
-                "building": "building",
-                "search": "search",
-                "happy": "happy",
-                "error": "error",
-                "sleeping": "sleeping",
-                "subagent": "subagent",
-                "pomodoro": "pomodoro",
-                "wave": "wave",
-                "stretch": "stretch",
-                "fishing": "pomodoro",
-                "fishing_reel": "building",
-                "fishing_caught": "happy",
-                "fishing_missed": "error"
-            }
         }))
         .unwrap();
 
         assert!(normalize_user_settings(&mut settings));
-        assert_eq!(settings.animations.fishing, "fishing");
-        assert_eq!(settings.animations.fishing_reel, "reel");
-        assert_eq!(settings.animations.fishing_caught, "caught");
-        assert_eq!(settings.animations.fishing_missed, "missed");
+        assert!(settings.gif_dir.is_empty());
+    }
+
+    #[test]
+    fn mood_gif_filenames_cover_every_mood() {
+        for (mood, _) in mood_rows() {
+            assert!(mood_gif_filename(*mood).ends_with(".gif"));
+        }
     }
 
     #[test]

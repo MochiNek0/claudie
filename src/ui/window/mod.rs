@@ -997,19 +997,19 @@ unsafe fn pomodoro_window_position(pet_rect: &RECT, width: i32, height: i32) -> 
 
 unsafe fn fishing_window_position(pet_rect: &RECT, width: i32, height: i32) -> (i32, i32) {
     const GAP: i32 = 8;
-    let (screen_x, _, screen_w, _) = virtual_screen_bounds();
-    let screen_right = screen_x + screen_w;
-    let right_x = pet_rect.right + GAP;
-    let left_x = pet_rect.left - width - GAP;
-    let x = if right_x + width <= screen_right {
-        right_x
-    } else if left_x >= screen_x {
-        left_x
+    let (_, screen_y, _, screen_h) = virtual_screen_bounds();
+    let screen_bottom = screen_y + screen_h;
+    let pet_w = pet_rect.right - pet_rect.left;
+    let x = pet_rect.left + (pet_w - width) / 2;
+    let above_y = pet_rect.top - height - GAP;
+    let below_y = pet_rect.bottom + GAP;
+    let y = if above_y >= screen_y {
+        above_y
+    } else if below_y + height <= screen_bottom {
+        below_y
     } else {
-        right_x
+        above_y
     };
-    let pet_h = pet_rect.bottom - pet_rect.top;
-    let y = pet_rect.top + (pet_h - height) / 2;
     clamp_window_position(x, y, (0, 0, width, height))
 }
 

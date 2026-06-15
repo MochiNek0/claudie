@@ -15,7 +15,7 @@ use windows_sys::Win32::Graphics::GdiPlus::{
 
 use crate::app::PetMood;
 use crate::globals::{APP_STATE, PET_RENDERER};
-use crate::settings::{UserSettings, configured_gif_dir, load_user_settings};
+use crate::settings::{UserSettings, load_user_settings, resolve_mood_gif};
 use crate::util::wide;
 
 const MOODS: &[PetMood] = &[
@@ -321,26 +321,17 @@ unsafe impl Send for GifAnimation {}
 
 impl GifAnimation {
     unsafe fn load(settings: &UserSettings) -> Result<(Self, String), String> {
-        let dir =
-            configured_gif_dir(settings).ok_or_else(|| "assets/claudie not found".to_string())?;
         let mut clips: HashMap<PetMood, GifClip> = HashMap::new();
-        let mut loaded_paths = Vec::new();
         for mood in MOODS {
-            let name = settings.animation_value(*mood);
-            let path = resolve_gif_path(&dir, name);
-            if !path.exists() {
-                return Err(format!(
-                    "missing GIF for {}: {}",
-                    mood.key(),
-                    path.display()
-                ));
-            }
+            // Each mood resolves independently: the user's folder if it has the
+            // file, otherwise the bundled default. A mood with neither is fatal
+            // (the bundled assets are always expected to be present).
+            let path = resolve_mood_gif(settings, *mood)
+                .ok_or_else(|| format!("missing GIF for {}", mood.key()))?;
             let clip = GifClip::load(&path)?;
-            loaded_paths.push(format!("{} -> {}", mood.key(), path.display()));
             clips.insert(*mood, clip);
         }
-        let summary = format!("loaded {} GIFs from {}", clips.len(), dir.display());
-        let _ = loaded_paths;
+        let summary = format!("loaded {} GIFs", clips.len());
         Ok((
             Self {
                 clips,
@@ -458,17 +449,6 @@ fn fit_into(src_w: u32, src_h: u32, max_w: i32, max_h: i32) -> (i32, i32) {
     let w = ((src_w as f32) * scale).round() as i32;
     let h = ((src_h as f32) * scale).round() as i32;
     (w.max(1), h.max(1))
-}
-
-fn resolve_gif_path(dir: &Path, name: &str) -> PathBuf {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return dir.join("idle.gif");
-    }
-    if trimmed.ends_with(".gif") || trimmed.ends_with(".GIF") {
-        return dir.join(trimmed);
-    }
-    dir.join(format!("{trimmed}.gif"))
 }
 
 pub(crate) struct AnimationStore {

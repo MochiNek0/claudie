@@ -114,10 +114,16 @@ fn wire_callbacks(window: &SettingsWindow, controller: Rc<RefCell<SettingsContro
             controller.borrow_mut().delete_profile();
         }
     });
-    window.on_anim_field_changed({
+    window.on_browse_gif_dir({
         let controller = controller.clone();
-        move |index, text| {
-            controller.borrow_mut().set_anim_value(index, text.as_str());
+        move || {
+            controller.borrow_mut().browse_gif_dir();
+        }
+    });
+    window.on_clear_gif_dir({
+        let controller = controller.clone();
+        move || {
+            controller.borrow_mut().clear_gif_dir();
         }
     });
     window.on_save_basic({
