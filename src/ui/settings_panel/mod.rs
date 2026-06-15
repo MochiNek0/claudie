@@ -114,6 +114,12 @@ fn wire_callbacks(window: &SettingsWindow, controller: Rc<RefCell<SettingsContro
             controller.borrow_mut().delete_profile();
         }
     });
+    window.on_fetch_models({
+        let controller = controller.clone();
+        move || {
+            controller.borrow_mut().fetch_models();
+        }
+    });
     window.on_browse_gif_dir({
         let controller = controller.clone();
         move || {

@@ -66,6 +66,192 @@ pub(crate) fn start_openai_proxy_server(state: Arc<Mutex<AppState>>) -> Result<(
     Ok(())
 }
 
+/// User-Agent for model-list probes. Some `/models` endpoints (coding plans,
+/// Claude Code relays) gate on a Claude Code style agent string.
+const MODEL_FETCH_USER_AGENT: &str = "claude-code/2.1";
+
+/// Known "Anthropic protocol mounted on a sub-path" suffixes. When a base URL
+/// ends with one of these, the OpenAI-style model list usually lives at the
+/// provider root, so candidates also probe the stripped root. Ordered most
+/// specific first so `/api/anthropic` wins over `/anthropic`.
+const KNOWN_COMPAT_SUFFIXES: &[&str] = &[
+    "/api/claudecode",
+    "/api/anthropic",
+    "/apps/anthropic",
+    "/api/coding",
+    "/claudecode",
+    "/anthropic",
+    "/step_plan",
+    "/coding",
+    "/claude",
+];
+
+/// Fetch the provider's model list for the Settings UI.
+///
+/// Providers — OpenAI aggregators and Anthropic-compatible relays alike — expose
+/// the list through an OpenAI-style `GET /v1/models` (or `/models`) endpoint
+/// authenticated with a bearer token, so that is the primary probe. The genuine
+/// Anthropic API (api.anthropic.com) instead wants `x-api-key`, and the keyless
+/// official profile reuses Claude Code's OAuth token. Several candidate URLs are
+/// tried in turn; the first that answers wins.
+pub(crate) fn fetch_provider_models(profile: &LlmProfile) -> Result<Vec<String>, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(15))
+        .build();
+
+    // Resolve the credential. The OAuth token is only ever sent to the official
+    // profile so it cannot leak to a third-party base URL.
+    let api_key = profile.api_key.trim();
+    let auth_token = profile.auth_token.trim();
+    let (key, is_oauth) = if !api_key.is_empty() {
+        (api_key.to_string(), false)
+    } else if !auth_token.is_empty() {
+        (auth_token.to_string(), false)
+    } else if profile.is_official() {
+        match crate::official_usage::oauth_access_token() {
+            Some(token) => (token, true),
+            None => return Err("No Claude Code OAuth token is available.".to_string()),
+        }
+    } else {
+        return Err("Set an API key or auth token before fetching models.".to_string());
+    };
+
+    let mut last_err = String::new();
+    for url in model_url_candidates(profile) {
+        let host_is_anthropic = url.starts_with("https://api.anthropic.com")
+            || url.starts_with("http://api.anthropic.com");
+        let request = agent.get(&url).set("User-Agent", MODEL_FETCH_USER_AGENT);
+        // One auth style per case: bearer for OpenAI-compatible hosts, `x-api-key`
+        // for the genuine Anthropic API, OAuth bearer + beta for the official one.
+        let request = if is_oauth {
+            request
+                .set("Authorization", &format!("Bearer {key}"))
+                .set("anthropic-beta", crate::official_usage::oauth_beta_header())
+                .set("anthropic-version", "2023-06-01")
+        } else if host_is_anthropic {
+            request
+                .set("x-api-key", &key)
+                .set("anthropic-version", "2023-06-01")
+        } else {
+            request.set("Authorization", &format!("Bearer {key}"))
+        };
+        match parse_models_response(request.call()) {
+            Ok(models) => return Ok(models),
+            Err(err) => last_err = err,
+        }
+    }
+    Err(if last_err.is_empty() {
+        "No model list endpoint responded.".to_string()
+    } else {
+        last_err
+    })
+}
+
+/// Candidate `/models` URLs to probe for a profile, in priority order.
+fn model_url_candidates(profile: &LlmProfile) -> Vec<String> {
+    let base = profile.base_url.trim().trim_end_matches('/');
+    // OpenAI chat-completions style: derive the sibling `/models` endpoint.
+    if profile.is_openai_chat_proxy() || base.contains("/chat/completions") {
+        return vec![
+            profile
+                .openai_chat_completions_url()
+                .replace("/chat/completions", "/models"),
+        ];
+    }
+    anthropic_model_candidates(base)
+}
+
+/// Candidate model-list URLs for an Anthropic-format base URL: the endpoint under
+/// the configured base, then the provider root in OpenAI form (covering relays
+/// like `https://host/anthropic` whose `/models` lives at the root).
+fn anthropic_model_candidates(base_url: &str) -> Vec<String> {
+    let base = base_url.trim().trim_end_matches('/');
+    let base = if base.is_empty() {
+        "https://api.anthropic.com"
+    } else {
+        base
+    };
+    let mut urls: Vec<String> = Vec::new();
+    let mut push = |url: String| {
+        if !urls.contains(&url) {
+            urls.push(url);
+        }
+    };
+
+    // A base already ending in a version segment (`/v1`, `/api/coding/paas/v4`)
+    // takes `/models`; otherwise the OpenAI convention is `/v1/models`.
+    if ends_with_version_segment(base) {
+        push(format!("{base}/models"));
+        if !base.ends_with("/v1") {
+            push(format!("{base}/v1/models"));
+        }
+    } else {
+        push(format!("{base}/v1/models"));
+    }
+
+    if let Some(root) = strip_compat_suffix(base) {
+        let root = root.trim_end_matches('/');
+        if root.contains("://") && !root.ends_with("://") {
+            push(format!("{root}/v1/models"));
+            push(format!("{root}/models"));
+        }
+    }
+    urls
+}
+
+/// True when a URL's last path segment is an OpenAI-style version like `v1`/`v4`.
+fn ends_with_version_segment(url: &str) -> bool {
+    let last = url.rsplit('/').next().unwrap_or("");
+    last.strip_prefix('v')
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// If the base ends with a known Anthropic-compat sub-path, return the prefix.
+fn strip_compat_suffix(base_url: &str) -> Option<&str> {
+    KNOWN_COMPAT_SUFFIXES
+        .iter()
+        .find_map(|suffix| base_url.strip_suffix(suffix))
+}
+
+/// Extract model ids from an OpenAI- or Anthropic-style `{ "data": [{ "id" }] }`
+/// list response.
+fn parse_models_response(
+    response: Result<ureq::Response, ureq::Error>,
+) -> Result<Vec<String>, String> {
+    let text = match response {
+        Ok(resp) => resp
+            .into_string()
+            .map_err(|err| format!("Model list response failed: {err}"))?,
+        Err(ureq::Error::Status(status, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            return Err(format!(
+                "Provider returned HTTP {status}: {}",
+                http::shorten_for_error(&body)
+            ));
+        }
+        Err(err) => return Err(format!("Model list request failed: {err}")),
+    };
+
+    let value: Value =
+        serde_json::from_str(&text).map_err(|err| format!("Model list JSON was invalid: {err}"))?;
+    let mut models: Vec<String> = value
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    models.retain(|model| !model.trim().is_empty());
+    if models.is_empty() {
+        return Err("Provider returned no models.".to_string());
+    }
+    Ok(models)
+}
+
 fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent: ureq::Agent) {
     let request = match read_http_request(&mut stream) {
         Ok(request) => request,
@@ -361,6 +547,52 @@ mod tests {
             headers: vec![(name.to_string(), value.to_string())],
             body: Vec::new(),
         }
+    }
+
+    #[test]
+    fn anthropic_candidates_strip_compat_subpath() {
+        // A relay that nests the Anthropic API under `/anthropic` also gets its
+        // host-root OpenAI-style model list tried.
+        assert_eq!(
+            anthropic_model_candidates("https://token-plan-cn.xiaomimimo.com/anthropic"),
+            vec![
+                "https://token-plan-cn.xiaomimimo.com/anthropic/v1/models".to_string(),
+                "https://token-plan-cn.xiaomimimo.com/v1/models".to_string(),
+                "https://token-plan-cn.xiaomimimo.com/models".to_string(),
+            ]
+        );
+
+        // The longest matching suffix wins (`/api/anthropic`, not `/anthropic`).
+        assert_eq!(
+            anthropic_model_candidates("https://api.z.ai/api/anthropic"),
+            vec![
+                "https://api.z.ai/api/anthropic/v1/models".to_string(),
+                "https://api.z.ai/v1/models".to_string(),
+                "https://api.z.ai/models".to_string(),
+            ]
+        );
+
+        // The plain official base only probes `/v1/models`.
+        assert_eq!(
+            anthropic_model_candidates(""),
+            vec!["https://api.anthropic.com/v1/models".to_string()]
+        );
+    }
+
+    #[test]
+    fn anthropic_candidates_handle_version_segments() {
+        // A base ending in a version segment takes `/models`, not `/v1/models`.
+        assert_eq!(
+            anthropic_model_candidates("https://open.bigmodel.cn/api/coding/paas/v4"),
+            vec![
+                "https://open.bigmodel.cn/api/coding/paas/v4/models".to_string(),
+                "https://open.bigmodel.cn/api/coding/paas/v4/v1/models".to_string(),
+            ]
+        );
+        assert_eq!(
+            anthropic_model_candidates("https://api.example.com/v1"),
+            vec!["https://api.example.com/v1/models".to_string()]
+        );
     }
 
     #[test]

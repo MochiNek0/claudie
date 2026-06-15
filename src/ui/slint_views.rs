@@ -465,12 +465,21 @@ slint::slint! {
     component PointerComboBox inherits Rectangle {
         in property <[string]> model;
         in-out property <int> current-index: 0;
+        // Open the option list above the control instead of below it, for combos
+        // placed near the bottom of a window where a downward popup would clip.
+        in property <bool> popup-above: false;
+        // Greyed hint shown when nothing is selected; the list only opens when
+        // there are options, so an empty combo never flashes a tiny blank popup.
+        in property <string> placeholder;
         callback selected(int);
+
+        property <length> popup-height: min(root.model.length, 8) * 32px + 8px;
+        property <bool> has-options: root.model.length > 0;
 
         border-radius: 8px;
         border-width: 1px;
-        border-color: touch.has-hover ? Theme.accent : Theme.border;
-        background: touch.pressed ? Theme.accent-softer : (touch.has-hover ? Theme.accent-soft : Theme.surface);
+        border-color: touch.has-hover && root.has-options ? Theme.accent : Theme.border;
+        background: touch.pressed ? Theme.accent-softer : (touch.has-hover && root.has-options ? Theme.accent-soft : Theme.surface);
         animate background, border-color { duration: Theme.fast; easing: ease-out; }
 
         property <string> current-value: root.current-index >= 0 && root.current-index < root.model.length ? root.model[root.current-index] : "";
@@ -478,9 +487,11 @@ slint::slint! {
         touch := TouchArea {
             width: 100%;
             height: 100%;
-            mouse-cursor: pointer;
+            mouse-cursor: root.has-options ? pointer : default;
             clicked => {
-                popup.show();
+                if (root.has-options) {
+                    popup.show();
+                }
             }
         }
 
@@ -489,11 +500,11 @@ slint::slint! {
             y: 0px;
             width: root.width - 42px;
             height: 100%;
-            text: root.current-value;
+            text: root.current-value != "" ? root.current-value : root.placeholder;
             overflow: elide;
             vertical-alignment: center;
             font-size: 13px;
-            color: Theme.ink;
+            color: root.current-value != "" ? Theme.ink : Theme.ink-disabled;
         }
         // Drawn chevron: a font glyph here can render as tofu when the
         // fallback font lacks it.
@@ -505,15 +516,15 @@ slint::slint! {
             viewbox-width: 14;
             viewbox-height: 14;
             commands: "M 3 5.5 L 7 9.5 L 11 5.5";
-            stroke: touch.has-hover ? Theme.accent : Theme.ink-muted;
+            stroke: !root.has-options ? Theme.ink-disabled : (touch.has-hover ? Theme.accent : Theme.ink-muted);
             stroke-width: 1.5px;
         }
 
         popup := PopupWindow {
             x: 0px;
-            y: root.height + 4px;
+            y: root.popup-above ? -root.popup-height - 4px : root.height + 4px;
             width: root.width;
-            height: min(root.model.length, 8) * 32px + 8px;
+            height: root.popup-height;
             close-policy: close-on-click-outside;
 
             Rectangle {
@@ -544,6 +555,39 @@ slint::slint! {
                     }
                 }
             }
+        }
+    }
+
+    // One model row: caption, editable id, a per-model 1M toggle, and a picker
+    // that fills the id from a fetched list shared across all rows.
+    component ModelField inherits Rectangle {
+        in property <string> label;
+        in-out property <string> value;
+        in-out property <bool> one-m: false;
+        in property <[string]> options;
+
+        height: 52px;
+        background: transparent;
+
+        Text { x: 0px; y: 0px; text: root.label; color: Theme.ink-faint; font-size: 12px; }
+        MonoLineEdit { x: 0px; y: 20px; width: 332px; height: 32px; text <=> root.value; }
+
+        Text {
+            x: 344px; y: 20px; width: 20px; height: 32px;
+            vertical-alignment: center;
+            text: "1M";
+            color: Theme.ink-faint;
+            font-size: 12px;
+        }
+        TogglePill { x: 368px; y: 25px; width: 42px; height: 22px; checked <=> root.one-m; }
+
+        PointerComboBox {
+            x: 420px; y: 20px; width: 164px; height: 32px;
+            current-index: -1;
+            popup-above: true;
+            placeholder: root.options.length > 0 ? "Pick…" : "Fetch first";
+            model: root.options;
+            selected(index) => { root.value = root.options[index]; }
         }
     }
 
@@ -707,6 +751,11 @@ slint::slint! {
         in-out property <string> haiku_model;
         in-out property <string> extra_env;
         in-out property <string> openai_extra_body;
+        in-out property <bool> model_1m: false;
+        in-out property <bool> opus_1m: false;
+        in-out property <bool> sonnet_1m: false;
+        in-out property <bool> haiku_1m: false;
+        in property <[string]> available_models;
         in property <string> profile_usage_title;
         in property <string> profile_usage_summary;
         in property <string> profile_usage_five_hour_value;
@@ -760,6 +809,7 @@ slint::slint! {
         callback use_profile();
         callback import_profile();
         callback delete_profile();
+        callback fetch_models();
         callback save_basic();
         callback reset_basic();
         callback save_pomodoro();
@@ -824,7 +874,7 @@ slint::slint! {
             width: root.width - 192px;
             height: root.height - 56px;
             viewport-width: root.content_width;
-            viewport-height: root.active_tab == 0 ? 512px : (root.active_tab == 1 ? 456px : (root.active_tab == 2 ? 612px : 600px));
+            viewport-height: root.active_tab == 0 ? 512px : (root.active_tab == 1 ? 456px : (root.active_tab == 2 ? 824px : 600px));
 
             if active_tab == 0: Rectangle {
                 width: root.content_width;
@@ -952,7 +1002,7 @@ slint::slint! {
 
             if active_tab == 2: Rectangle {
                 width: root.content_width;
-                height: 612px;
+                height: 824px;
                 background: transparent;
 
                 Text { x: 0px; y: 0px; text: "Provider profiles"; font-size: 17px; font-weight: 700; color: Theme.ink; }
@@ -973,31 +1023,35 @@ slint::slint! {
                 FieldGroup { x: 0px; y: 136px; width: 284px; label: "Profile ID"; value <=> root.profile_id; }
                 FieldGroup { x: 300px; y: 136px; width: 284px; label: "Name"; value <=> root.profile_name; }
 
-                FieldGroup { x: 0px; y: 200px; width: 284px; label: "Model"; value <=> root.model; }
-                FieldGroup { x: 300px; y: 200px; width: 284px; label: "Base URL"; value <=> root.base_url; }
+                FieldGroup { x: 0px; y: 200px; width: 284px; label: "Base URL"; value <=> root.base_url; }
+                FieldGroup { x: 300px; y: 200px; width: 284px; label: "API key"; input-type: InputType.password; value <=> root.api_key; }
 
-                FieldGroup { x: 0px; y: 264px; width: 284px; label: "API key"; input-type: InputType.password; value <=> root.api_key; }
-                FieldGroup { x: 300px; y: 264px; width: 284px; label: "Auth token (proxy)"; input-type: InputType.password; value <=> root.auth_token; }
+                FieldGroup { x: 0px; y: 264px; width: 284px; label: "Auth token (proxy)"; input-type: InputType.password; value <=> root.auth_token; }
 
-                FieldGroup { x: 0px; y: 328px; width: 184px; label: "Opus"; value <=> root.opus_model; }
-                FieldGroup { x: 200px; y: 328px; width: 184px; label: "Sonnet"; value <=> root.sonnet_model; }
-                FieldGroup { x: 400px; y: 328px; width: 184px; label: "Haiku"; value <=> root.haiku_model; }
+                Text { x: 0px; y: 332px; text: "Models"; font-size: 14px; font-weight: 700; color: Theme.ink; }
+                Text { x: 0px; y: 354px; width: 420px; height: 16px; vertical-alignment: center; text: "Toggle 1M per model to request a 1M context window. Fetch, then pick an id."; overflow: elide; color: Theme.ink-faint; font-size: 11px; }
+                ActionButton { x: 448px; y: 330px; width: 136px; height: 32px; text: "Fetch models"; kind: "primary"; clicked => { root.fetch_models(); } }
 
-                Text { x: 0px; y: 392px; text: "Extra env"; color: Theme.ink-faint; font-size: 12px; }
-                MonoTextEdit { x: 0px; y: 412px; width: 284px; height: 72px; text <=> root.extra_env; }
-                Text { x: 300px; y: 392px; text: "OpenAI body"; color: Theme.ink-faint; font-size: 12px; }
-                MonoTextEdit { x: 300px; y: 412px; width: 284px; height: 72px; text <=> root.openai_extra_body; }
+                ModelField { x: 0px; y: 380px; width: 584px; label: "Default model"; value <=> root.model; one-m <=> root.model_1m; options: root.available_models; }
+                ModelField { x: 0px; y: 436px; width: 584px; label: "Opus"; value <=> root.opus_model; one-m <=> root.opus_1m; options: root.available_models; }
+                ModelField { x: 0px; y: 492px; width: 584px; label: "Sonnet"; value <=> root.sonnet_model; one-m <=> root.sonnet_1m; options: root.available_models; }
+                ModelField { x: 0px; y: 548px; width: 584px; label: "Haiku"; value <=> root.haiku_model; one-m <=> root.haiku_1m; options: root.available_models; }
 
-                Rectangle { x: 0px; y: 504px; width: 432px; height: 96px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
-                Text { x: 14px; y: 512px; width: 404px; text: root.profile_usage_title; overflow: elide; color: Theme.ink; font-size: 13px; font-weight: 600; }
-                Text { x: 14px; y: 532px; width: 404px; text: root.profile_usage_summary; overflow: elide; color: Theme.ink-secondary; font-size: 11px; }
-                StatBarRow { x: 14px; y: 554px; width: 240px; height: 18px; label: "5h"; value: root.profile_usage_five_hour_value; bar: root.profile_usage_five_hour_bar; accent: root.profile_usage_five_hour_bar >= 90 ? Theme.danger : (root.profile_usage_five_hour_bar >= 70 ? Theme.chart-amber : Theme.accent); }
-                Text { x: 262px; y: 554px; width: 156px; height: 18px; text: root.profile_usage_five_hour_reset; overflow: elide; vertical-alignment: center; color: Theme.ink-secondary; font-size: 11px; }
-                StatBarRow { x: 14px; y: 576px; width: 240px; height: 18px; label: "7d"; value: root.profile_usage_seven_day_value; bar: root.profile_usage_seven_day_bar; accent: root.profile_usage_seven_day_bar >= 90 ? Theme.danger : (root.profile_usage_seven_day_bar >= 70 ? Theme.chart-amber : Theme.chart-purple); }
-                Text { x: 262px; y: 576px; width: 156px; height: 18px; text: root.profile_usage_seven_day_reset; overflow: elide; vertical-alignment: center; color: Theme.ink-secondary; font-size: 11px; }
+                Text { x: 0px; y: 612px; text: "Extra env"; color: Theme.ink-faint; font-size: 12px; }
+                MonoTextEdit { x: 0px; y: 632px; width: 284px; height: 72px; text <=> root.extra_env; }
+                Text { x: 300px; y: 612px; text: "OpenAI body"; color: Theme.ink-faint; font-size: 12px; }
+                MonoTextEdit { x: 300px; y: 632px; width: 284px; height: 72px; text <=> root.openai_extra_body; }
 
-                ActionButton { x: 448px; y: 514px; width: 64px; height: 32px; text: "Save"; clicked => { root.save_profile(); } }
-                ActionButton { x: 520px; y: 514px; width: 64px; height: 32px; text: "Use"; kind: "primary"; clicked => { root.use_profile(); } }
+                Rectangle { x: 0px; y: 724px; width: 432px; height: 96px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
+                Text { x: 14px; y: 732px; width: 404px; text: root.profile_usage_title; overflow: elide; color: Theme.ink; font-size: 13px; font-weight: 600; }
+                Text { x: 14px; y: 752px; width: 404px; text: root.profile_usage_summary; overflow: elide; color: Theme.ink-secondary; font-size: 11px; }
+                StatBarRow { x: 14px; y: 774px; width: 240px; height: 18px; label: "5h"; value: root.profile_usage_five_hour_value; bar: root.profile_usage_five_hour_bar; accent: root.profile_usage_five_hour_bar >= 90 ? Theme.danger : (root.profile_usage_five_hour_bar >= 70 ? Theme.chart-amber : Theme.accent); }
+                Text { x: 262px; y: 774px; width: 156px; height: 18px; text: root.profile_usage_five_hour_reset; overflow: elide; vertical-alignment: center; color: Theme.ink-secondary; font-size: 11px; }
+                StatBarRow { x: 14px; y: 796px; width: 240px; height: 18px; label: "7d"; value: root.profile_usage_seven_day_value; bar: root.profile_usage_seven_day_bar; accent: root.profile_usage_seven_day_bar >= 90 ? Theme.danger : (root.profile_usage_seven_day_bar >= 70 ? Theme.chart-amber : Theme.chart-purple); }
+                Text { x: 262px; y: 796px; width: 156px; height: 18px; text: root.profile_usage_seven_day_reset; overflow: elide; vertical-alignment: center; color: Theme.ink-secondary; font-size: 11px; }
+
+                ActionButton { x: 448px; y: 724px; width: 64px; height: 32px; text: "Save"; clicked => { root.save_profile(); } }
+                ActionButton { x: 520px; y: 724px; width: 64px; height: 32px; text: "Use"; kind: "primary"; clicked => { root.use_profile(); } }
             }
 
             if active_tab == 3: Rectangle {

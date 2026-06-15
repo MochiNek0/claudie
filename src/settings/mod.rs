@@ -64,6 +64,14 @@ pub(crate) struct LlmProfile {
     pub(crate) haiku_model: String,
     pub(crate) openai_extra_body: String,
     pub(crate) extra_env: String,
+    /// Per-model 1M-context opt-in. When set, claudie appends a `[1m]` suffix to
+    /// the matching model id it writes to Claude Code so Claude Code requests a
+    /// 1M context window. The OpenAI proxy strips the suffix before forwarding
+    /// upstream.
+    pub(crate) model_1m: bool,
+    pub(crate) opus_1m: bool,
+    pub(crate) sonnet_1m: bool,
+    pub(crate) haiku_1m: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -265,40 +273,62 @@ impl LlmProfile {
     }
 
     fn env_pairs(&self) -> Vec<(&'static str, String)> {
-        let proxy_base_url = format!("http://127.0.0.1:{DEFAULT_PROXY_PORT}");
-        let proxy_auth_token = self
-            .auth_token
-            .trim()
-            .is_empty()
-            .then(|| "claudie-openai-proxy".to_string())
-            .unwrap_or_else(|| self.auth_token.trim().to_string());
-        let fields = if self.is_openai_chat_proxy() {
+        let model = apply_1m_suffix(&self.model, self.model_1m);
+        let opus = apply_1m_suffix(&self.opus_model, self.opus_1m);
+        let sonnet = apply_1m_suffix(&self.sonnet_model, self.sonnet_1m);
+        let haiku = apply_1m_suffix(&self.haiku_model, self.haiku_1m);
+        let fields: [(&'static str, String); 7] = if self.is_openai_chat_proxy() {
+            let proxy_base_url = format!("http://127.0.0.1:{DEFAULT_PROXY_PORT}");
+            let proxy_auth_token = if self.auth_token.trim().is_empty() {
+                "claudie-openai-proxy".to_string()
+            } else {
+                self.auth_token.trim().to_string()
+            };
             [
-                ("ANTHROPIC_BASE_URL", proxy_base_url.as_str()),
-                ("ANTHROPIC_AUTH_TOKEN", proxy_auth_token.as_str()),
-                ("ANTHROPIC_API_KEY", ""),
-                ("ANTHROPIC_MODEL", self.model.trim()),
-                ("ANTHROPIC_DEFAULT_OPUS_MODEL", self.opus_model.trim()),
-                ("ANTHROPIC_DEFAULT_SONNET_MODEL", self.sonnet_model.trim()),
-                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", self.haiku_model.trim()),
+                ("ANTHROPIC_BASE_URL", proxy_base_url),
+                ("ANTHROPIC_AUTH_TOKEN", proxy_auth_token),
+                ("ANTHROPIC_API_KEY", String::new()),
+                ("ANTHROPIC_MODEL", model),
+                ("ANTHROPIC_DEFAULT_OPUS_MODEL", opus),
+                ("ANTHROPIC_DEFAULT_SONNET_MODEL", sonnet),
+                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", haiku),
             ]
         } else {
             [
-                ("ANTHROPIC_BASE_URL", self.base_url.trim()),
-                ("ANTHROPIC_AUTH_TOKEN", self.auth_token.trim()),
-                ("ANTHROPIC_API_KEY", self.api_key.trim()),
-                ("ANTHROPIC_MODEL", self.model.trim()),
-                ("ANTHROPIC_DEFAULT_OPUS_MODEL", self.opus_model.trim()),
-                ("ANTHROPIC_DEFAULT_SONNET_MODEL", self.sonnet_model.trim()),
-                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", self.haiku_model.trim()),
+                ("ANTHROPIC_BASE_URL", self.base_url.trim().to_string()),
+                ("ANTHROPIC_AUTH_TOKEN", self.auth_token.trim().to_string()),
+                ("ANTHROPIC_API_KEY", self.api_key.trim().to_string()),
+                ("ANTHROPIC_MODEL", model),
+                ("ANTHROPIC_DEFAULT_OPUS_MODEL", opus),
+                ("ANTHROPIC_DEFAULT_SONNET_MODEL", sonnet),
+                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", haiku),
             ]
         };
         fields
             .into_iter()
             .filter(|(_, value)| !value.is_empty())
-            .map(|(key, value)| (key, value.to_string()))
             .collect()
     }
+}
+
+/// Append the `[1m]` 1M-context suffix to a model id when the profile opts in.
+/// Empty ids and ids that already carry the suffix are left untouched.
+fn apply_1m_suffix(model: &str, declare: bool) -> String {
+    let model = model.trim();
+    if model.is_empty() || !declare || model.ends_with("[1m]") {
+        model.to_string()
+    } else {
+        format!("{model}[1m]")
+    }
+}
+
+/// Strip a trailing `[1m]` 1M-context marker from a model id.
+fn strip_1m_suffix(model: &str) -> &str {
+    model
+        .trim_end()
+        .strip_suffix("[1m]")
+        .map(str::trim_end)
+        .unwrap_or(model)
 }
 
 fn official_llm_profile() -> LlmProfile {
@@ -444,6 +474,25 @@ pub(crate) fn current_claude_llm_profile() -> Option<LlmProfile> {
                 .map(str::to_string)
         })
         .unwrap_or_default();
+    let opus_model = env
+        .and_then(|env| env_string(env, "ANTHROPIC_DEFAULT_OPUS_MODEL"))
+        .unwrap_or_default();
+    let sonnet_model = env
+        .and_then(|env| env_string(env, "ANTHROPIC_DEFAULT_SONNET_MODEL"))
+        .unwrap_or_default();
+    let haiku_model = env
+        .and_then(|env| env_string(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL"))
+        .unwrap_or_default();
+    // A `[1m]` suffix is how claudie encodes each model's 1M-context toggle;
+    // recover the flags on import and keep the stored fields free of the suffix.
+    let model_1m = model.trim_end().ends_with("[1m]");
+    let opus_1m = opus_model.trim_end().ends_with("[1m]");
+    let sonnet_1m = sonnet_model.trim_end().ends_with("[1m]");
+    let haiku_1m = haiku_model.trim_end().ends_with("[1m]");
+    let model = strip_1m_suffix(&model).to_string();
+    let opus_model = strip_1m_suffix(&opus_model).to_string();
+    let sonnet_model = strip_1m_suffix(&sonnet_model).to_string();
+    let haiku_model = strip_1m_suffix(&haiku_model).to_string();
     let name = env
         .map(|env| provider_name_from_env(env, &model))
         .unwrap_or_else(|| provider_name_from_model(&model));
@@ -460,17 +509,15 @@ pub(crate) fn current_claude_llm_profile() -> Option<LlmProfile> {
             .and_then(|env| env_string(env, "ANTHROPIC_API_KEY"))
             .unwrap_or_default(),
         model,
-        opus_model: env
-            .and_then(|env| env_string(env, "ANTHROPIC_DEFAULT_OPUS_MODEL"))
-            .unwrap_or_default(),
-        sonnet_model: env
-            .and_then(|env| env_string(env, "ANTHROPIC_DEFAULT_SONNET_MODEL"))
-            .unwrap_or_default(),
-        haiku_model: env
-            .and_then(|env| env_string(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL"))
-            .unwrap_or_default(),
+        opus_model,
+        sonnet_model,
+        haiku_model,
         openai_extra_body: String::new(),
         extra_env: env.map(extra_env_from_claude).unwrap_or_default(),
+        model_1m,
+        opus_1m,
+        sonnet_1m,
+        haiku_1m,
     })
 }
 
@@ -1048,6 +1095,57 @@ mod tests {
         );
         assert!(!env.iter().any(|(key, _)| *key == "ANTHROPIC_API_KEY"));
         assert!(!env.iter().any(|(_, value)| value == "upstream-key"));
+    }
+
+    #[test]
+    fn per_model_1m_flags_append_suffix_to_matching_env() {
+        let profile = LlmProfile {
+            base_url: "https://api.anthropic.com".to_string(),
+            api_key: "key".to_string(),
+            model: "claude-opus-4-8".to_string(),
+            opus_model: "claude-opus-4-8".to_string(),
+            sonnet_model: "claude-sonnet-4-6".to_string(),
+            model_1m: true,
+            opus_1m: true,
+            sonnet_1m: false,
+            ..LlmProfile::default()
+        };
+        let env = profile.env_pairs();
+        let value = |key: &str| {
+            env.iter()
+                .find(|(candidate, _)| *candidate == key)
+                .map(|(_, value)| value.as_str())
+        };
+
+        assert_eq!(value("ANTHROPIC_MODEL"), Some("claude-opus-4-8[1m]"));
+        assert_eq!(
+            value("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some("claude-opus-4-8[1m]")
+        );
+        // Sonnet flag is off, so its env keeps the bare id.
+        assert_eq!(
+            value("ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            Some("claude-sonnet-4-6")
+        );
+    }
+
+    #[test]
+    fn apply_1m_suffix_does_not_duplicate_or_force() {
+        assert_eq!(
+            apply_1m_suffix("claude-opus-4-8", true),
+            "claude-opus-4-8[1m]"
+        );
+        assert_eq!(
+            apply_1m_suffix("claude-opus-4-8[1m]", true),
+            "claude-opus-4-8[1m]"
+        );
+        assert_eq!(apply_1m_suffix("claude-opus-4-8", false), "claude-opus-4-8");
+    }
+
+    #[test]
+    fn strip_1m_suffix_removes_marker() {
+        assert_eq!(strip_1m_suffix("gpt-test[1m]"), "gpt-test");
+        assert_eq!(strip_1m_suffix("gpt-test"), "gpt-test");
     }
 
     #[test]

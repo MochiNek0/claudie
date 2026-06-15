@@ -136,6 +136,22 @@ fn fetch_usage(agent: &ureq::Agent, access_token: &str) -> Result<Value, String>
     serde_json::from_str(&text).map_err(|err| format!("Official usage JSON was invalid: {err}"))
 }
 
+/// The cached Claude Code OAuth access token, if one is available. Used by the
+/// Settings model-list fetch to authenticate against the official Anthropic API
+/// when a profile carries no API key of its own.
+pub(crate) fn oauth_access_token() -> Option<String> {
+    read_oauth_credentials()
+        .ok()
+        .map(|credentials| credentials.access_token)
+}
+
+const MODELS_API_BETA: &str = USAGE_API_BETA;
+
+/// The `anthropic-beta` value to send alongside an OAuth bearer token.
+pub(crate) fn oauth_beta_header() -> &'static str {
+    MODELS_API_BETA
+}
+
 fn read_oauth_credentials() -> Result<OAuthCredentials, String> {
     if let Ok(token) = env::var("CLAUDE_CODE_OAUTH_TOKEN") {
         let token = token.trim();

@@ -19,6 +19,12 @@ pub(super) fn anthropic_to_openai_request(
         .filter(|model| !model.is_empty())
         .unwrap_or_else(|| profile.model.trim())
         .to_string();
+    // Claude Code appends a `[1m]` suffix to request a 1M context window; the
+    // upstream OpenAI-compatible provider only knows the bare model id.
+    let model = match model.strip_suffix("[1m]") {
+        Some(stripped) => stripped.trim_end().to_string(),
+        None => model,
+    };
     let vision_enabled = images_enabled_for(profile, &model);
 
     let mut messages = Vec::new();
@@ -554,6 +560,22 @@ fn copy_number(input: &Value, output: &mut Map<String, Value>, key: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strips_1m_suffix_from_request_model() {
+        let profile = LlmProfile {
+            model: "gpt-test".to_string(),
+            ..LlmProfile::default()
+        };
+        let request = json!({
+            "model": "gpt-test[1m]",
+            "messages": [{ "role": "user", "content": [{ "type": "text", "text": "hi" }] }],
+            "max_tokens": 16
+        });
+
+        let converted = anthropic_to_openai_request(&request, &profile).unwrap();
+        assert_eq!(converted["model"], "gpt-test");
+    }
 
     #[test]
     fn converts_basic_text_request() {

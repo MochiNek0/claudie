@@ -100,7 +100,36 @@ impl SettingsController {
             haiku_model: ui.get_haiku_model().to_string(),
             openai_extra_body: ui.get_openai_extra_body().to_string(),
             extra_env: ui.get_extra_env().to_string(),
+            model_1m: ui.get_model_1m(),
+            opus_1m: ui.get_opus_1m(),
+            sonnet_1m: ui.get_sonnet_1m(),
+            haiku_1m: ui.get_haiku_1m(),
         })
+    }
+
+    pub(in crate::ui::settings_panel) fn fetch_models(&mut self) {
+        let Some(profile) = self.current_profile_from_fields() else {
+            return;
+        };
+        self.status("Fetching models…");
+        let weak = self.weak.clone();
+        std::thread::spawn(move || {
+            let result = crate::proxy::fetch_provider_models(&profile);
+            let _ = weak.upgrade_in_event_loop(move |ui| match result {
+                Ok(models) => {
+                    let count = models.len();
+                    ui.set_available_models(ModelRc::new(VecModel::from_iter(
+                        models.iter().map(|model| shared(model)).collect::<Vec<_>>(),
+                    )));
+                    ui.set_status_message(shared(&format!(
+                        "Fetched {count} models. Pick one to fill Model."
+                    )));
+                }
+                Err(err) => {
+                    ui.set_status_message(shared(&format!("Failed to fetch models: {err}")));
+                }
+            });
+        });
     }
 
     pub(in crate::ui::settings_panel) fn save_profile(&mut self, activate_profile: bool) {
@@ -205,6 +234,12 @@ fn set_profile_fields(ui: &SettingsWindow, profile: &LlmProfile) {
     ui.set_haiku_model(shared(&profile.haiku_model));
     ui.set_extra_env(shared(&profile.extra_env));
     ui.set_openai_extra_body(shared(&profile.openai_extra_body));
+    ui.set_model_1m(profile.model_1m);
+    ui.set_opus_1m(profile.opus_1m);
+    ui.set_sonnet_1m(profile.sonnet_1m);
+    ui.set_haiku_1m(profile.haiku_1m);
+    // Drop any model list fetched for the previously shown profile.
+    ui.set_available_models(ModelRc::new(VecModel::<slint::SharedString>::default()));
 }
 
 pub(super) fn set_profile_usage_fields(
