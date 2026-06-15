@@ -13,6 +13,26 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::ui::slint_views::{PromptWindow, SettingsWindow};
 use crate::util::wide;
 
+/// Extract the native Win32 `HWND` backing a Slint window, or null if it is
+/// not yet realized. Used to give native dialogs a proper owner window.
+pub(crate) fn slint_window_hwnd(window: &slint::Window) -> HWND {
+    use slint::winit_030::WinitWindowAccessor;
+    use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    window
+        .with_winit_window(|winit_window| {
+            winit_window
+                .window_handle()
+                .ok()
+                .and_then(|handle| match handle.as_raw() {
+                    RawWindowHandle::Win32(h) => Some(h.hwnd.get() as HWND),
+                    _ => None,
+                })
+                .unwrap_or(std::ptr::null_mut())
+        })
+        .unwrap_or(std::ptr::null_mut())
+}
+
 pub(crate) fn apply_slint_window_icons(window: &slint::Window) {
     use slint::winit_030::WinitWindowAccessor;
     use slint::winit_030::winit::dpi::PhysicalSize;

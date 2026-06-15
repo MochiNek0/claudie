@@ -853,7 +853,7 @@ slint::slint! {
 
                 Text { x: 0px; y: 128px; text: "GIF folder"; color: Theme.ink-faint; font-size: 12px; }
                 Rectangle {
-                    x: 0px; y: 148px; width: 372px; height: 32px;
+                    x: 0px; y: 148px; width: 316px; height: 32px;
                     background: Theme.sunken;
                     border-radius: 6px;
                     border-width: 1px;
@@ -867,8 +867,8 @@ slint::slint! {
                         font-size: 12px;
                     }
                 }
-                ActionButton { x: 384px; y: 148px; width: 92px; height: 32px; text: "Browse…"; kind: "primary"; clicked => { root.browse_gif_dir(); } }
-                ActionButton { x: 484px; y: 148px; width: 100px; height: 32px; text: "Use default"; clicked => { root.clear_gif_dir(); } }
+                ActionButton { x: 328px; y: 148px; width: 116px; height: 32px; text: "Browse…"; kind: "primary"; clicked => { root.browse_gif_dir(); } }
+                ActionButton { x: 456px; y: 148px; width: 128px; height: 32px; text: "Use default"; clicked => { root.clear_gif_dir(); } }
 
                 Rectangle {
                     x: 0px; y: 192px; width: 584px; height: 132px;

@@ -4,6 +4,8 @@ use crate::settings::{
 };
 use crate::ui::folder_dialog::pick_folder;
 use crate::ui::gif_animation::reload_animation_store;
+use crate::ui::window_icon::slint_window_hwnd;
+use slint::ComponentHandle;
 
 use super::{SettingsController, clamp_i32, shared, snap_sleep_after, sync_app_settings};
 
@@ -63,7 +65,11 @@ impl SettingsController {
     }
 
     pub(in crate::ui::settings_panel) fn browse_gif_dir(&mut self) {
-        if let Some(path) = pick_folder("Choose a GIF folder for the pet") {
+        let owner = self
+            .ui()
+            .map(|ui| slint_window_hwnd(ui.window()))
+            .unwrap_or(std::ptr::null_mut());
+        if let Some(path) = pick_folder("Choose a GIF folder for the pet", owner) {
             self.settings.gif_dir = path.to_string_lossy().to_string();
             self.refresh_basic_fields();
         }
