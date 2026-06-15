@@ -798,6 +798,7 @@ fn desired_timer_interval(state: &AppState) -> u32 {
             state.mood,
             PetMood::Happy
                 | PetMood::Error
+                | PetMood::Deny
                 | PetMood::Pomodoro
                 | PetMood::Wave
                 | PetMood::Stretch

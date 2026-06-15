@@ -37,6 +37,7 @@ pub(crate) enum PetMood {
     Search,
     Happy,
     Error,
+    Deny,
     Sleeping,
     Subagent,
     Pomodoro,
@@ -64,6 +65,7 @@ impl PetMood {
             Self::Search => "search",
             Self::Happy => "happy",
             Self::Error => "error",
+            Self::Deny => "deny",
             Self::Sleeping => "sleeping",
             Self::Subagent => "subagent",
             Self::Pomodoro => "pomodoro",
@@ -85,7 +87,7 @@ impl PetMood {
 
     pub(crate) fn priority(self) -> u8 {
         match self {
-            Self::Error => 90,
+            Self::Error | Self::Deny => 90,
             Self::Building | Self::Typing => 80,
             Self::Search => 70,
             Self::Subagent => 65,
@@ -267,6 +269,7 @@ pub(crate) enum ClaudeSessionStatus {
     WaitingChoice,
     Compacting,
     Error,
+    Denied,
     Done,
     Ended,
 }
@@ -281,6 +284,7 @@ impl ClaudeSessionStatus {
             Self::WaitingChoice => "Choice",
             Self::Compacting => "Compacting",
             Self::Error => "Error",
+            Self::Denied => "Denied",
             Self::Done => "Done",
             Self::Ended => "Ended",
         }
@@ -293,6 +297,7 @@ impl ClaudeSessionStatus {
             Self::Tool => PetMood::Thinking,
             Self::WaitingPermission | Self::WaitingChoice => PetMood::Thinking,
             Self::Error => PetMood::Error,
+            Self::Denied => PetMood::Deny,
         }
     }
 
@@ -308,6 +313,7 @@ impl ClaudeSessionStatus {
                 | Self::WaitingChoice
                 | Self::Compacting
                 | Self::Error
+                | Self::Denied
         );
         interrupts_visual.then_some(ActivityProjection {
             mood: self.mood(),
@@ -422,8 +428,8 @@ impl AppState {
     pub(crate) fn set_mood(&mut self, mood: PetMood) {
         let now = Instant::now();
         self.last_activity = now;
-        self.set_resting_activity_at(mood, matches!(mood, PetMood::Error), now);
-        if matches!(mood, PetMood::Error) {
+        self.set_resting_activity_at(mood, matches!(mood, PetMood::Error | PetMood::Deny), now);
+        if matches!(mood, PetMood::Error | PetMood::Deny) {
             self.force_visual_mood(mood);
             return;
         }
@@ -1103,7 +1109,7 @@ impl AppState {
         if target.mood == self.mood {
             return true;
         }
-        if matches!(target.mood, PetMood::Error) {
+        if matches!(target.mood, PetMood::Error | PetMood::Deny) {
             return true;
         }
         if target.interrupts_visual {
@@ -1501,8 +1507,10 @@ impl AppState {
                 self.default_resting_mood()
             };
             self.set_resting_mood(target, false);
-        } else if matches!(self.resting_mood, PetMood::Happy | PetMood::Error)
-            && idle_for > Duration::from_secs(7)
+        } else if matches!(
+            self.resting_mood,
+            PetMood::Happy | PetMood::Error | PetMood::Deny
+        ) && idle_for > Duration::from_secs(7)
         {
             self.set_resting_mood(PetMood::Idle, false);
         }

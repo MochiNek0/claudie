@@ -282,15 +282,15 @@ fn handle_permission_request(
             && !deny_falls_back_to_terminal(&permission.tool_name);
         if state.pending_permissions.is_empty() && state.pending_choices.is_empty() {
             let mood = match decision {
-                Some(PermissionDecision::Deny) if deny_interrupts => PetMood::Error,
+                Some(PermissionDecision::Deny) if deny_interrupts => PetMood::Deny,
                 Some(PermissionDecision::Ignore) => state.activity_mood().unwrap_or(PetMood::Idle),
                 _ => state.activity_mood().unwrap_or(PetMood::Happy),
             };
-            state.set_resting_mood(mood, matches!(mood, PetMood::Error));
+            state.set_resting_mood(mood, matches!(mood, PetMood::Error | PetMood::Deny));
         }
         let (status, detail) = match decision {
             Some(PermissionDecision::Deny) if deny_interrupts => {
-                (ClaudeSessionStatus::Error, "Permission denied".to_string())
+                (ClaudeSessionStatus::Denied, "Permission denied".to_string())
             }
             Some(PermissionDecision::Ignore) | None => {
                 (ClaudeSessionStatus::Done, "Permission closed".to_string())

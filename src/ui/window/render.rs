@@ -202,7 +202,7 @@ fn draw_session_switcher(hdc: HDC, state: &RenderState, x: i32, y: i32, w: i32, 
 
 fn session_accent_color(item: &SessionSwitcherItem, index: usize) -> u32 {
     match item.status {
-        ClaudeSessionStatus::Error => rgb(232, 93, 87),
+        ClaudeSessionStatus::Error | ClaudeSessionStatus::Denied => rgb(232, 93, 87),
         ClaudeSessionStatus::WaitingPermission | ClaudeSessionStatus::WaitingChoice => {
             rgb(145, 95, 231)
         }
@@ -221,7 +221,7 @@ fn session_status_symbol(status: ClaudeSessionStatus) -> &'static str {
         ClaudeSessionStatus::Tool => ">",
         ClaudeSessionStatus::Streaming | ClaudeSessionStatus::Compacting => "*",
         ClaudeSessionStatus::WaitingPermission | ClaudeSessionStatus::WaitingChoice => "!",
-        ClaudeSessionStatus::Error => "x",
+        ClaudeSessionStatus::Error | ClaudeSessionStatus::Denied => "x",
         ClaudeSessionStatus::Idle | ClaudeSessionStatus::Done => "-",
         ClaudeSessionStatus::Ended => ".",
     }
@@ -245,6 +245,13 @@ fn session_status_text(item: &SessionSwitcherItem) -> String {
         ClaudeSessionStatus::Error => {
             if detail.is_empty() {
                 "error".to_string()
+            } else {
+                detail.to_string()
+            }
+        }
+        ClaudeSessionStatus::Denied => {
+            if detail.is_empty() {
+                "denied".to_string()
             } else {
                 detail.to_string()
             }
@@ -443,6 +450,7 @@ fn draw_pet_fallback(hdc: HDC, mood: PetMood, x: i32, y: i32, w: i32, h: i32) {
     let body = match mood {
         PetMood::Search => rgb(245, 174, 64),
         PetMood::Error => rgb(222, 86, 80),
+        PetMood::Deny => rgb(222, 86, 80),
         PetMood::Happy => rgb(72, 173, 121),
         PetMood::Building => rgb(84, 130, 200),
         PetMood::Typing => rgb(92, 178, 191),
@@ -476,7 +484,7 @@ fn draw_pet_fallback(hdc: HDC, mood: PetMood, x: i32, y: i32, w: i32, h: i32) {
             line(hdc, px(61), py(68), px(70), py(76), shade);
             line(hdc, px(70), py(76), px(83), py(66), shade);
         }
-        PetMood::Error => {
+        PetMood::Error | PetMood::Deny => {
             line(hdc, px(57), py(68), px(83), py(68), shade);
         }
         PetMood::Search => {

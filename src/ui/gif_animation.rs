@@ -26,6 +26,7 @@ const MOODS: &[PetMood] = &[
     PetMood::Search,
     PetMood::Happy,
     PetMood::Error,
+    PetMood::Deny,
     PetMood::Sleeping,
     PetMood::Subagent,
     PetMood::Pomodoro,

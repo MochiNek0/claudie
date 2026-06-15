@@ -1,4 +1,4 @@
-use slint::{ModelRc, VecModel};
+use slint::{ComponentHandle, ModelRc, VecModel};
 
 use crate::settings::{
     LlmProfile, apply_llm_profile_to_claude, current_claude_llm_profile, default_profile_id,
@@ -115,19 +115,24 @@ impl SettingsController {
         let weak = self.weak.clone();
         std::thread::spawn(move || {
             let result = crate::proxy::fetch_provider_models(&profile);
-            let _ = weak.upgrade_in_event_loop(move |ui| match result {
-                Ok(models) => {
-                    let count = models.len();
-                    ui.set_available_models(ModelRc::new(VecModel::from_iter(
-                        models.iter().map(|model| shared(model)).collect::<Vec<_>>(),
-                    )));
-                    ui.set_status_message(shared(&format!(
-                        "Fetched {count} models. Pick one to fill Model."
-                    )));
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                match result {
+                    Ok(models) => {
+                        let count = models.len();
+                        ui.set_available_models(ModelRc::new(VecModel::from_iter(
+                            models.iter().map(|model| shared(model)).collect::<Vec<_>>(),
+                        )));
+                        ui.set_status_message(shared(&format!(
+                            "Fetched {count} models. Pick one to fill Model."
+                        )));
+                    }
+                    Err(err) => {
+                        ui.set_status_message(shared(&format!("Failed to fetch models: {err}")));
+                    }
                 }
-                Err(err) => {
-                    ui.set_status_message(shared(&format!("Failed to fetch models: {err}")));
-                }
+                // Arrives outside any UI callback, so request a repaint
+                // explicitly under the software renderer.
+                ui.window().request_redraw();
             });
         });
     }

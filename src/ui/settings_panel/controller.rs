@@ -5,7 +5,7 @@ mod stats;
 
 use std::time::Duration;
 
-use slint::{SharedString, Timer, TimerMode};
+use slint::{ComponentHandle, SharedString, Timer, TimerMode};
 
 use crate::app::{AppState, QuotaStats};
 use crate::globals::APP_STATE;
@@ -63,6 +63,10 @@ impl SettingsController {
                     } else {
                         stats::set_stats_status(&ui);
                     }
+                    // The software renderer only repaints on explicit request or
+                    // window events; force a redraw so timer-driven text stays
+                    // fresh even when the window receives no input.
+                    ui.window().request_redraw();
                 }
             });
     }

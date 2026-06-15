@@ -54,110 +54,116 @@ pub(crate) fn close_settings_panel() {
 }
 
 fn wire_callbacks(window: &SettingsWindow, controller: Rc<RefCell<SettingsController>>) {
-    window.on_previous_profile({
+    // The software renderer only repaints on an explicit request or a window
+    // event, and Slint's "property changed -> auto redraw" path is unreliable
+    // here. Every callback below mutates UI properties, so wrap each one to
+    // request a redraw after it runs; otherwise edits (e.g. switching the LLM
+    // profile) update state but never repaint the form.
+    let weak = window.as_weak();
+    window.on_previous_profile(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             controller.borrow_mut().previous_profile();
         }
-    });
-    window.on_next_profile({
+    }));
+    window.on_next_profile(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             controller.borrow_mut().next_profile();
         }
-    });
-    window.on_pet_scale_changed({
+    }));
+    window.on_pet_scale_changed(redraw_after_arg(&weak, {
         let controller = controller.clone();
         move |value| {
             controller.borrow_mut().update_pet_scale_live(value);
         }
-    });
-    window.on_sleep_after_changed({
+    }));
+    window.on_sleep_after_changed(redraw_after_arg(&weak, {
         let controller = controller.clone();
         move |value| {
             controller.borrow_mut().update_sleep_after_live(value);
         }
-    });
-    window.on_select_profile({
+    }));
+    window.on_select_profile(redraw_after_arg(&weak, {
         let controller = controller.clone();
         move |index| {
             controller.borrow_mut().select_profile(index);
         }
-    });
-    window.on_new_profile({
+    }));
+    window.on_new_profile(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             controller.borrow_mut().new_profile();
         }
-    });
-    window.on_save_profile({
+    }));
+    window.on_save_profile(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             controller.borrow_mut().save_profile(false);
         }
-    });
-    window.on_use_profile({
+    }));
+    window.on_use_profile(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             controller.borrow_mut().save_profile(true);
         }
-    });
-    window.on_import_profile({
+    }));
+    window.on_import_profile(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             controller.borrow_mut().import_current_profile();
         }
-    });
-    window.on_delete_profile({
+    }));
+    window.on_delete_profile(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             controller.borrow_mut().delete_profile();
         }
-    });
-    window.on_fetch_models({
+    }));
+    window.on_fetch_models(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             controller.borrow_mut().fetch_models();
         }
-    });
-    window.on_browse_gif_dir({
+    }));
+    window.on_browse_gif_dir(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             controller.borrow_mut().browse_gif_dir();
         }
-    });
-    window.on_clear_gif_dir({
+    }));
+    window.on_clear_gif_dir(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             controller.borrow_mut().clear_gif_dir();
         }
-    });
-    window.on_save_basic({
+    }));
+    window.on_save_basic(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             controller.borrow_mut().save_basic_settings();
         }
-    });
-    window.on_reset_basic({
+    }));
+    window.on_reset_basic(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             controller.borrow_mut().reset_basic_fields();
         }
-    });
-    window.on_save_pomodoro({
+    }));
+    window.on_save_pomodoro(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             controller.borrow_mut().save_pomodoro_settings();
         }
-    });
-    window.on_start_pomodoro({
+    }));
+    window.on_start_pomodoro(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             mutate_app_state(|state| state.start_pomodoro());
             controller.borrow_mut().refresh_pomodoro_tab();
         }
-    });
-    window.on_pause_resume_pomodoro({
+    }));
+    window.on_pause_resume_pomodoro(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             mutate_app_state(|state| {
@@ -169,21 +175,21 @@ fn wire_callbacks(window: &SettingsWindow, controller: Rc<RefCell<SettingsContro
             });
             controller.borrow_mut().refresh_pomodoro_tab();
         }
-    });
-    window.on_skip_pomodoro({
+    }));
+    window.on_skip_pomodoro(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             mutate_app_state(|state| state.skip_pomodoro());
             controller.borrow_mut().refresh_pomodoro_tab();
         }
-    });
-    window.on_stop_pomodoro({
+    }));
+    window.on_stop_pomodoro(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
             mutate_app_state(|state| state.stop_pomodoro());
             controller.borrow_mut().refresh_pomodoro_tab();
         }
-    });
+    }));
 
     window.window().on_close_requested(|| {
         // Drop the stored window so the renderer context is released; a
@@ -191,4 +197,33 @@ fn wire_callbacks(window: &SettingsWindow, controller: Rc<RefCell<SettingsContro
         close_settings_panel();
         slint::CloseRequestResponse::HideWindow
     });
+}
+
+/// Wrap a zero-argument callback so the window repaints after it runs. See the
+/// note in `wire_callbacks` for why this is needed with the software renderer.
+fn redraw_after(
+    weak: &slint::Weak<SettingsWindow>,
+    action: impl Fn() + 'static,
+) -> impl Fn() + 'static {
+    let weak = weak.clone();
+    move || {
+        action();
+        if let Some(ui) = weak.upgrade() {
+            ui.window().request_redraw();
+        }
+    }
+}
+
+/// Same as [`redraw_after`] for callbacks that take a single argument.
+fn redraw_after_arg<A>(
+    weak: &slint::Weak<SettingsWindow>,
+    action: impl Fn(A) + 'static,
+) -> impl Fn(A) + 'static {
+    let weak = weak.clone();
+    move |arg| {
+        action(arg);
+        if let Some(ui) = weak.upgrade() {
+            ui.window().request_redraw();
+        }
+    }
 }
