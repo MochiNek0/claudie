@@ -249,40 +249,45 @@ fn line_indent(raw_line: &str) -> u8 {
 pub(crate) fn estimate_wrapped_lines(text: &str, font_px: f32, avail_px: f32, mono: bool) -> u32 {
     let px_per_unit = font_px * 1.06;
     let avail = (avail_px.max(font_px) / px_per_unit).max(1.0);
-    let space_w = char_width_units(' ', mono);
     text.split('\n')
-        .map(|line| wrap_line_count(line, avail, space_w, mono))
+        .map(|line| wrap_line_count(line, avail, mono))
         .sum()
 }
 
-// Greedy word-wrap simulation matching Slint's `wrap: word-wrap`: break at
-// whitespace, and break a word that is wider than the line at the character
-// level. Widths are in `char_width_units`; `avail` is the line width in those
-// units. A plain chars/avail estimate ignores word boundaries and undercounts
-// when a wrap leaves a short first line (e.g. a command that breaks after a
-// space then carries one long no-space token), which clips the fixed-height
-// code rows in the prompt popup.
-fn wrap_line_count(line: &str, avail: f32, space_w: f32, mono: bool) -> u32 {
+// Greedy line-wrap simulation matching Slint's `wrap: word-wrap`. Slint's text
+// layout breaks at Unicode line-break opportunities (the `unicode-linebreak`
+// crate it depends on), not just whitespace, so a long path such as
+// `…\vibe-portal\node_modules\…` splits into atomic fragments at each `/` and
+// `-`. Those fragments leave the line ragged and occupy more rows than packing
+// the whole token tightly would. Mirroring the same break points here keeps the
+// fixed-height code rows in the prompt popup from clipping such commands. A
+// fragment still wider than the line force-breaks at the character level, which
+// matches Slint's break-anywhere fallback for word-wrap. Widths are in
+// `char_width_units`; `avail` is the line width in those units.
+fn wrap_line_count(line: &str, avail: f32, mono: bool) -> u32 {
     let mut count = 1u32;
     let mut cur = 0.0f32; // width used on the current line, in units
-    for word in line.split_whitespace() {
-        let w: f32 = word.chars().map(|c| char_width_units(c, mono)).sum();
-        // Move to a fresh line when the word plus its leading space does not
-        // fit and the current line already has content.
-        if cur > 0.0 && cur + space_w + w > avail {
+    let mut last = 0usize;
+    for (idx, _) in unicode_linebreak::linebreaks(line) {
+        let fragment = &line[last..idx];
+        last = idx;
+        let w: f32 = fragment.chars().map(|c| char_width_units(c, mono)).sum();
+        // Move the fragment to a fresh line when it does not fit and the
+        // current line already has content. (A fragment carries its own
+        // leading/trailing whitespace, so no separate space width is added.)
+        if cur > 0.0 && cur + w > avail {
             count += 1;
             cur = 0.0;
         }
-        let start = if cur > 0.0 { cur + space_w } else { 0.0 };
-        if start + w <= avail {
-            cur = start + w;
-        } else {
-            // Overlong word: fill the rest of this line, then spill across
-            // full lines at the character level.
-            let overflow = start + w - avail;
+        if cur == 0.0 && w > avail {
+            // Fragment wider than a full line: fill this line, then spill
+            // across full lines at the character level.
+            let overflow = w - avail;
             let extra = (overflow / avail).ceil() as u32;
             count += extra;
             cur = overflow - (extra as f32 - 1.0) * avail;
+        } else {
+            cur += w;
         }
     }
     count
@@ -529,5 +534,18 @@ mod tests {
             (units * 12.0 * 1.06 / 510.0).ceil() as u32
         };
         assert!(estimate_wrapped_lines(cmd, 12.0, 510.0, true) > packed);
+    }
+
+    #[test]
+    fn estimate_wrapped_lines_counts_break_opportunities_in_paths() {
+        // A real Bash command whose Windows paths break at every `\…\vibe-` `-`
+        // and `/`: Slint's layout wraps it to five rows, but a whitespace-only
+        // estimate packs the quoted paths as single tokens and reports four,
+        // clipping the last row in the prompt popup's fixed-height code box.
+        let cmd = "cd \"C:\\Users\\EDY\\Desktop\\vibe-portal\\web\" && node \
+            \"C:\\Users\\EDY\\Desktop\\vibe-portal\\node_modules\\.pnpm\\typescript@5.6.2\
+            \\node_modules\\typescript\\bin\\tsc\" --noEmit -p tsconfig.json 2>&1 \
+            | grep -iE \"sundt|error TS\" | head -30";
+        assert!(estimate_wrapped_lines(cmd, 12.0, 510.0, true) >= 5);
     }
 }
