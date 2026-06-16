@@ -1609,6 +1609,7 @@ impl AppState {
                     .saturating_add(self.quota.cache_creation_tokens)
                     .saturating_add(self.quota.cache_read_tokens),
             );
+        let model = self.quota.last_model.clone();
         if category_delta > 0 {
             self.stats.record(|day| {
                 day.input_tokens = day.input_tokens.saturating_add(input_delta);
@@ -1618,11 +1619,13 @@ impl AppState {
                     .saturating_add(cache_creation_delta);
                 day.cache_read_tokens = day.cache_read_tokens.saturating_add(cache_read_delta);
                 day.token_delta = day.token_delta.saturating_add(category_delta);
+                day.add_model_tokens(&model, category_delta);
             });
         } else if total > self.stats_last_total_tokens {
             let total_delta = total - self.stats_last_total_tokens;
             self.stats.record(|day| {
                 day.token_delta = day.token_delta.saturating_add(total_delta);
+                day.add_model_tokens(&model, total_delta);
             });
         }
         self.stats_last_total_tokens = total;

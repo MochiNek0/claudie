@@ -1,14 +1,19 @@
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use slint::{ModelRc, VecModel};
 
 use crate::app::stats::{DailyStats, DailyStatsDb, load_daily_stats, sum_days};
 use crate::time_util::{date_key_minus_days, parse_date_key};
-use crate::ui::slint_views::{SettingsWindow, StatHighlight, StatTrendBar};
+use crate::ui::slint_views::{ModelTokenLine, SettingsWindow, StatHighlight, StatTrendBar};
 
 use super::{SettingsController, shared};
 
 const TREND_DAYS: usize = 14;
+/// Days shown in the per-model token line chart.
+const MODEL_CHART_DAYS: usize = 7;
+/// Models drawn as their own line; the rest collapse into an "Other" line.
+const MODEL_CHART_LINES: usize = 5;
 
 impl SettingsController {
     pub(super) fn refresh_stats_tab(&self) {
@@ -32,6 +37,133 @@ pub(super) fn set_stats_status(ui: &SettingsWindow) {
     set_highlights(ui, &recent, active7);
     set_recent_bars(ui, &recent);
     set_recent_token_bars(ui, &recent);
+    set_model_token_chart(ui, &window);
+}
+
+/// Per-model token line chart: one polyline per model over the last
+/// `MODEL_CHART_DAYS` days, with low-volume models folded into an "Other" line.
+fn set_model_token_chart(ui: &SettingsWindow, window: &[DailyStats]) {
+    let start = window.len().saturating_sub(MODEL_CHART_DAYS);
+    let days = &window[start..];
+
+    // Day-of-month labels along the x-axis.
+    let labels: Vec<slint::SharedString> = days
+        .iter()
+        .map(|day| shared(&day_label(&day.date)))
+        .collect();
+    ui.set_stats_model_days(ModelRc::from(Rc::new(VecModel::from(labels))));
+
+    // Rank models by their total tokens across the window.
+    let mut totals: HashMap<&str, u64> = HashMap::new();
+    for day in days {
+        for entry in &day.models {
+            *totals.entry(entry.model.as_str()).or_insert(0) += entry.tokens;
+        }
+    }
+    let mut ranked: Vec<(&str, u64)> = totals.into_iter().filter(|(_, t)| *t > 0).collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+
+    if ranked.is_empty() {
+        ui.set_stats_model_lines(ModelRc::from(
+            Rc::new(VecModel::<ModelTokenLine>::default()),
+        ));
+        ui.set_stats_model_caption(shared("tokens/day · no model data yet"));
+        return;
+    }
+
+    let named = &ranked[..ranked.len().min(MODEL_CHART_LINES)];
+    let has_other = ranked.len() > MODEL_CHART_LINES;
+
+    // Per-day series for each drawn line (named models + an "Other" bucket).
+    let mut series: Vec<(String, u64, Vec<u64>)> = Vec::new();
+    for (model, total) in named {
+        let daily = days
+            .iter()
+            .map(|day| model_tokens(day, model))
+            .collect::<Vec<u64>>();
+        series.push((short_model_name(model), *total, daily));
+    }
+    if has_other {
+        let named_set: Vec<&str> = named.iter().map(|(m, _)| *m).collect();
+        let daily = days
+            .iter()
+            .map(|day| {
+                day.models
+                    .iter()
+                    .filter(|e| !named_set.contains(&e.model.as_str()))
+                    .map(|e| e.tokens)
+                    .sum()
+            })
+            .collect::<Vec<u64>>();
+        let total: u64 = daily.iter().sum();
+        series.push(("Other".to_string(), total, daily));
+    }
+
+    let peak = series
+        .iter()
+        .flat_map(|(_, _, daily)| daily.iter().copied())
+        .max()
+        .unwrap_or(0);
+
+    let lines: Vec<ModelTokenLine> = series
+        .iter()
+        .enumerate()
+        .map(|(index, (name, total, daily))| ModelTokenLine {
+            name: shared(name),
+            value: shared(&compact_number(*total)),
+            commands: shared(&polyline_commands(daily, peak)),
+            color_index: index as i32,
+        })
+        .collect();
+    ui.set_stats_model_lines(ModelRc::from(Rc::new(VecModel::from(lines))));
+    ui.set_stats_model_caption(shared(&format!(
+        "tokens/day · peak {} · {} models",
+        compact_number(peak),
+        ranked.len()
+    )));
+}
+
+fn model_tokens(day: &DailyStats, model: &str) -> u64 {
+    day.models
+        .iter()
+        .find(|e| e.model == model)
+        .map(|e| e.tokens)
+        .unwrap_or(0)
+}
+
+/// Build an SVG polyline (`M`/`L`) in a 600x100 viewbox. The 6:1 width:height
+/// matches the plot element (552x92) so Slint's aspect-preserving Path mapping
+/// does not squish the line horizontally. Points sit at column centers so they
+/// align with the x-axis labels; y is inverted with a small top/bottom margin
+/// so the peak and the baseline stay inside the plot.
+fn polyline_commands(daily: &[u64], peak: u64) -> String {
+    let n = daily.len();
+    if n == 0 {
+        return String::new();
+    }
+    let mut cmd = String::with_capacity(n * 16);
+    for (i, value) in daily.iter().enumerate() {
+        let x = ((i as f32 + 0.5) / n as f32) * 600.0;
+        let frac = if peak == 0 {
+            0.0
+        } else {
+            *value as f32 / peak as f32
+        };
+        let y = 97.0 - frac * 94.0;
+        cmd.push_str(if i == 0 { "M " } else { " L " });
+        cmd.push_str(&format!("{:.2} {:.2}", x, y));
+    }
+    cmd
+}
+
+/// Drop the provider prefix and `[1m]` suffix so the legend stays readable.
+fn short_model_name(model: &str) -> String {
+    let trimmed = model.strip_suffix("[1m]").unwrap_or(model);
+    trimmed
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or(trimmed)
+        .to_string()
 }
 
 /// Build the last `days` calendar days ending today (oldest first), filling

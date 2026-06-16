@@ -650,6 +650,16 @@ slint::slint! {
         value: string,
     }
 
+    // One model's 7-day token line: `commands` is an SVG polyline in a
+    // 600x100 viewbox (6:1 to match the plot element), `value` the compact
+    // 7-day total for the legend.
+    struct ModelTokenLine {
+        name: string,
+        value: string,
+        commands: string,
+        color_index: int,
+    }
+
     // Compact headline metric card used by the Stats tab.
     component StatKpiCard inherits Rectangle {
         in property <string> label;
@@ -796,8 +806,21 @@ slint::slint! {
         in property <float> stats_recent_output_bar;
         in property <float> stats_recent_cache_write_bar;
         in property <float> stats_recent_cache_read_bar;
+        in property <[ModelTokenLine]> stats_model_lines;
+        in property <[string]> stats_model_days;
+        in property <string> stats_model_caption;
 
         in property <string> status_message;
+
+        // Palette for the per-model token lines, indexed by line order.
+        pure function model-color(i: int) -> brush {
+            i == 0 ? Theme.chart-blue
+                : i == 1 ? Theme.chart-teal
+                : i == 2 ? Theme.chart-amber
+                : i == 3 ? Theme.chart-purple
+                : i == 4 ? Theme.chart-olive
+                : Theme.accent
+        }
 
         callback pet_scale_changed(float);
         callback sleep_after_changed(float);
@@ -874,7 +897,7 @@ slint::slint! {
             width: root.width - 192px;
             height: root.height - 56px;
             viewport-width: root.content_width;
-            viewport-height: root.active_tab == 0 ? 512px : (root.active_tab == 1 ? 456px : (root.active_tab == 2 ? 824px : 600px));
+            viewport-height: root.active_tab == 0 ? 512px : (root.active_tab == 1 ? 456px : (root.active_tab == 2 ? 824px : 812px));
 
             if active_tab == 0: Rectangle {
                 width: root.content_width;
@@ -1056,7 +1079,7 @@ slint::slint! {
 
             if active_tab == 3: Rectangle {
                 width: root.content_width;
-                height: 600px;
+                height: 812px;
                 background: transparent;
 
                 Text { x: 0px; y: 0px; text: "Session ledger"; font-size: 17px; font-weight: 700; color: Theme.ink; }
@@ -1125,6 +1148,45 @@ slint::slint! {
                 StatBarRow { x: 324px; y: 464px; width: 236px; height: 20px; label: "Output"; value: root.stats_recent_output_value; bar: root.stats_recent_output_bar; accent: Theme.chart-blue; }
                 StatBarRow { x: 324px; y: 488px; width: 236px; height: 20px; label: "Cache W"; value: root.stats_recent_cache_write_value; bar: root.stats_recent_cache_write_bar; accent: Theme.chart-amber; }
                 StatBarRow { x: 324px; y: 512px; width: 236px; height: 20px; label: "Cache R"; value: root.stats_recent_cache_read_value; bar: root.stats_recent_cache_read_bar; accent: Theme.chart-purple; }
+
+                // Per-model token usage across the last 7 days, one line each.
+                Rectangle { x: 0px; y: 606px; width: 584px; height: 196px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.card-border;
+                    Text { x: 16px; y: 14px; text: "Tokens by model · 7 days"; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                    Text { x: 280px; y: 16px; width: 288px; text: root.stats_model_caption; horizontal-alignment: right; overflow: elide; color: Theme.ink-muted; font-size: 11px; }
+
+                    // Plot area; lines are SVG polylines in a 0..100 viewbox.
+                    Rectangle { x: 16px; y: 40px; width: 552px; height: 92px; background: transparent; clip: true;
+                        for line in root.stats_model_lines: Path {
+                            x: 0px; y: 0px; width: parent.width; height: parent.height;
+                            viewbox-width: 600; viewbox-height: 100;
+                            commands: line.commands;
+                            stroke: root.model-color(line.color_index);
+                            stroke-width: 1.5px;
+                        }
+                    }
+
+                    // X-axis day-of-month labels, aligned under each plotted point.
+                    for label[i] in root.stats_model_days: Text {
+                        x: 16px + i * (552px / 7);
+                        y: 136px;
+                        width: 552px / 7;
+                        text: label;
+                        horizontal-alignment: center;
+                        color: Theme.ink-faint;
+                        font-size: 9px;
+                    }
+
+                    // Legend: colored dot, model id, 7-day total.
+                    for line[i] in root.stats_model_lines: Rectangle {
+                        x: 16px + i * 94px;
+                        y: 158px;
+                        width: 88px;
+                        height: 30px;
+                        Rectangle { x: 0px; y: 5px; width: 8px; height: 8px; border-radius: 4px; background: root.model-color(line.color_index); }
+                        Text { x: 13px; y: 0px; width: 75px; text: line.name; overflow: elide; color: Theme.ink-secondary; font-size: 10px; }
+                        Text { x: 13px; y: 14px; width: 75px; text: line.value; overflow: elide; color: Theme.ink; font-size: 11px; font-weight: 600; }
+                    }
+                }
             }
         }
 

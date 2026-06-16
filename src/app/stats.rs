@@ -35,6 +35,15 @@ pub(crate) struct DailyStats {
     pub(crate) output_tokens: u64,
     pub(crate) cache_creation_tokens: u64,
     pub(crate) cache_read_tokens: u64,
+    /// Total tokens attributed per model id seen on this day.
+    pub(crate) models: Vec<ModelTokens>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ModelTokens {
+    pub(crate) model: String,
+    pub(crate) tokens: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +153,29 @@ impl DailyStats {
         self.cache_read_tokens = self
             .cache_read_tokens
             .saturating_add(other.cache_read_tokens);
+        for entry in &other.models {
+            self.add_model_tokens(&entry.model, entry.tokens);
+        }
+    }
+
+    /// Attribute `tokens` to `model` within this day, creating the bucket on
+    /// first sight. Empty model ids are bucketed under "unknown".
+    pub(crate) fn add_model_tokens(&mut self, model: &str, tokens: u64) {
+        if tokens == 0 {
+            return;
+        }
+        let name = match model.trim() {
+            "" => "unknown",
+            other => other,
+        };
+        if let Some(entry) = self.models.iter_mut().find(|entry| entry.model == name) {
+            entry.tokens = entry.tokens.saturating_add(tokens);
+        } else {
+            self.models.push(ModelTokens {
+                model: name.to_string(),
+                tokens,
+            });
+        }
     }
 }
 
