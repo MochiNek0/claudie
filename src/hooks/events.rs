@@ -30,6 +30,7 @@ enum HookActivity {
     FinishTool(PetMood),
     FinishToolBatch,
     Error,
+    Shrug,
     PermissionDenied,
     StartSubagent,
     FinishSubagent,
@@ -974,7 +975,10 @@ fn hook_activity(event: &str, tool_name: &str, payload: &Value) -> Option<HookAc
         "PostToolUse" => Some(HookActivity::FinishTool(tool_mood)),
         "PostToolBatch" => Some(HookActivity::FinishToolBatch),
         "PermissionDenied" => Some(HookActivity::PermissionDenied),
-        "PostToolUseFailure" | "StopFailure" => Some(HookActivity::Error),
+        // A single tool failing is a recoverable hiccup: shrug it off. A
+        // turn-ending failure is a real error.
+        "PostToolUseFailure" => Some(HookActivity::Shrug),
+        "StopFailure" => Some(HookActivity::Error),
         "SubagentStart" | "TaskCreated" => Some(HookActivity::StartSubagent),
         "SubagentStop" | "TaskCompleted" => Some(HookActivity::FinishSubagent),
         "PreCompact" => Some(HookActivity::Thinking),
@@ -1028,6 +1032,14 @@ fn apply_hook_activity_for_session(
             state.finish_session_work(session_id);
             state.last_error = summarize_payload(payload);
             state.set_resting_mood(PetMood::Error, true);
+        }
+        HookActivity::Shrug => {
+            // Release the failed tool's working span so the (low-priority)
+            // shrug actually surfaces; interrupts_visual=true forces the switch
+            // away from the just-cleared working mood. No last_error: this is a
+            // recoverable hiccup, not a turn-ending error.
+            state.finish_session_work(session_id);
+            state.set_resting_mood(PetMood::Shrug, true);
         }
         HookActivity::PermissionDenied => {
             state.finish_session_work(session_id);
@@ -2077,6 +2089,43 @@ mod tests {
         assert_eq!(state.mood, PetMood::Error);
         state.set_resting_mood(PetMood::Happy, false);
         assert_eq!(state.mood, PetMood::Typing);
+    }
+
+    #[test]
+    fn tool_failure_shrugs_off_and_is_overridden_by_next_tool() {
+        let mut state = AppState::new();
+        let payload = json!({
+            "session_id": "s1",
+            "tool_name": "Write",
+            "tool_use_id": "write-1",
+        });
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PreToolUse", "Write", &payload).unwrap(),
+            &payload,
+        );
+        assert_eq!(state.mood, PetMood::Typing);
+
+        // A single tool failing is a recoverable hiccup: shrug, not Error.
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PostToolUseFailure", "Write", &payload).unwrap(),
+            &payload,
+        );
+        assert_eq!(state.mood, PetMood::Shrug);
+
+        // The next tool's working mood immediately overrides the low-priority shrug.
+        let next = json!({
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_use_id": "bash-1",
+        });
+        apply_hook_activity(
+            &mut state,
+            hook_activity("PreToolUse", "Bash", &next).unwrap(),
+            &next,
+        );
+        assert_eq!(state.mood, PetMood::Building);
     }
 
     #[test]

@@ -27,6 +27,7 @@ const MOODS: &[PetMood] = &[
     PetMood::Happy,
     PetMood::Error,
     PetMood::Deny,
+    PetMood::Shrug,
     PetMood::Sleeping,
     PetMood::Subagent,
     PetMood::Pomodoro,
@@ -438,6 +439,10 @@ impl GifAnimation {
     fn visible_bounds(&self, mood: PetMood) -> Option<GifVisibleBounds> {
         self.clips.get(&mood).map(|clip| clip.visible_bounds)
     }
+
+    fn clip_total_ms(&self, mood: PetMood) -> Option<u32> {
+        self.clips.get(&mood).map(|clip| clip.total_ms)
+    }
 }
 
 fn fit_into(src_w: u32, src_h: u32, max_w: i32, max_h: i32) -> (i32, i32) {
@@ -528,6 +533,10 @@ impl AnimationStore {
 
     pub(crate) fn visible_bounds(&self, mood: PetMood) -> Option<GifVisibleBounds> {
         self.animation.visible_bounds(mood)
+    }
+
+    pub(crate) fn clip_total_ms(&self, mood: PetMood) -> Option<u32> {
+        self.animation.clip_total_ms(mood)
     }
 }
 

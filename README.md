@@ -41,7 +41,8 @@
 | `PreToolUse` | 开始执行工具；写入类 → typing，shell 类 → building，读取/搜索类 → search |
 | `PostToolUse` | 工具完成 |
 | `PostToolBatch` | 一批工具完成，并刷新配额快照 |
-| `PostToolUseFailure` / `StopFailure` | 错误状态 |
+| `PostToolUseFailure` | 耸肩 shrug（可恢复的小失败，独立 mood，低优先级，很快被下个工具覆盖） |
+| `StopFailure` | 错误状态 |
 | `PermissionDenied` | 拒绝状态（独立 mood） |
 | `PermissionRequest` | 等待用户在宠物 UI 中 Allow / Always / Deny |
 | `SubagentStart` / `TaskCreated` | 子任务进行中 |

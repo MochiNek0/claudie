@@ -533,6 +533,7 @@ pub(crate) fn mood_gif_filename(mood: PetMood) -> &'static str {
         PetMood::Happy => "happy.gif",
         PetMood::Error => "error.gif",
         PetMood::Deny => "deny.gif",
+        PetMood::Shrug => "shrug.gif",
         PetMood::Sleeping => "sleeping.gif",
         PetMood::Subagent => "subagent.gif",
         PetMood::Pomodoro => "pomodoro.gif",

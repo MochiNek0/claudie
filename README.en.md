@@ -41,7 +41,8 @@ Inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/cla
 | `PreToolUse` | Start tool activity; write tools → typing, shell tools → building, read/search tools → search |
 | `PostToolUse` | Finish tool activity |
 | `PostToolBatch` | Batch complete, refresh quota snapshot |
-| `PostToolUseFailure` / `StopFailure` | Error state |
+| `PostToolUseFailure` | Shrug (recoverable hiccup; separate low-priority mood, quickly overridden by the next tool) |
+| `StopFailure` | Error state |
 | `PermissionDenied` | Denied state (separate mood) |
 | `PermissionRequest` | Wait for Allow / Always / Deny in the pet UI |
 | `SubagentStart` / `TaskCreated` | Subagent working |

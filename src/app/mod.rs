@@ -38,6 +38,7 @@ pub(crate) enum PetMood {
     Happy,
     Error,
     Deny,
+    Shrug,
     Sleeping,
     Subagent,
     Pomodoro,
@@ -66,6 +67,7 @@ impl PetMood {
             Self::Happy => "happy",
             Self::Error => "error",
             Self::Deny => "deny",
+            Self::Shrug => "shrug",
             Self::Sleeping => "sleeping",
             Self::Subagent => "subagent",
             Self::Pomodoro => "pomodoro",
@@ -92,6 +94,9 @@ impl PetMood {
             Self::Search => 70,
             Self::Subagent => 65,
             Self::Thinking => 60,
+            // Transient "oops, recovered" reaction: low enough that the next
+            // tool's working mood immediately overrides it.
+            Self::Shrug => 50,
             Self::Pomodoro => 45,
             Self::Fishing | Self::FishingReel => 47,
             Self::FishingCaught | Self::FishingMissed => 46,
@@ -1498,7 +1503,7 @@ impl AppState {
         {
             self.set_resting_mood(PetMood::Sleeping, false);
         } else if matches!(self.resting_mood, PetMood::Wave | PetMood::Stretch)
-            && idle_for > Duration::from_secs(3)
+            && idle_for > self.interaction_decay_after(self.resting_mood)
         {
             let target = if !self.pending_permissions.is_empty() || !self.pending_choices.is_empty()
             {
@@ -1513,8 +1518,25 @@ impl AppState {
         ) && idle_for > Duration::from_secs(7)
         {
             self.set_resting_mood(PetMood::Idle, false);
+        } else if matches!(self.resting_mood, PetMood::Shrug) && idle_for > Duration::from_secs(3) {
+            self.set_resting_mood(PetMood::Idle, false);
         }
         self.refresh_visual_mood();
+    }
+
+    /// How long a one-shot interaction mood (`Wave`/`Stretch`) stays before
+    /// decaying. `Stretch` lingers long enough to finish one full loop of its
+    /// GIF (its motion has a clear begin/end); `Wave` stays the brief 3s
+    /// acknowledgement even though its clip loops much longer.
+    fn interaction_decay_after(&self, mood: PetMood) -> Duration {
+        let floor = Duration::from_secs(3);
+        if mood != PetMood::Stretch {
+            return floor;
+        }
+        match renderer_clip_total_ms(mood) {
+            Some(total_ms) => floor.max(Duration::from_millis(total_ms as u64)),
+            None => floor,
+        }
     }
 
     fn has_active_work(&self) -> bool {
@@ -1823,9 +1845,12 @@ fn session_status_for_event(
         "PreCompact" => Some((ClaudeSessionStatus::Compacting, "Compacting".to_string())),
         "PostCompact" => Some((ClaudeSessionStatus::Done, "Compacted".to_string())),
         "PermissionDenied" => Some((ClaudeSessionStatus::Done, "Permission denied".to_string())),
-        "PostToolUseFailure" | "StopFailure" => {
-            Some((ClaudeSessionStatus::Error, "Hook failure".to_string()))
-        }
+        // A single tool failing is a recoverable hiccup (pet shrugs, turn
+        // continues), so it must NOT set the sticky Error session status — that
+        // projection would override the low-priority Shrug mood. Leave the prior
+        // status untouched and let the next event update it. A turn-ending
+        // failure (StopFailure) is a real error.
+        "StopFailure" => Some((ClaudeSessionStatus::Error, "Hook failure".to_string())),
         "Stop" => Some((ClaudeSessionStatus::Done, "Ready".to_string())),
         "SessionEnd" => Some((ClaudeSessionStatus::Ended, "Session ended".to_string())),
         "Notification" => Some((ClaudeSessionStatus::Done, "Notification".to_string())),
@@ -1886,6 +1911,16 @@ fn request_renderer_mood(mood: PetMood) -> bool {
             .request_mood(mood),
         None => true,
     }
+}
+
+/// Full play length of the GIF bound to `mood`, if the renderer is loaded.
+/// Used to let one-shot interaction moods finish a full loop before decaying.
+fn renderer_clip_total_ms(mood: PetMood) -> Option<u32> {
+    PET_RENDERER
+        .get()?
+        .lock()
+        .expect("pet renderer poisoned")
+        .clip_total_ms(mood)
 }
 
 #[cfg(test)]
