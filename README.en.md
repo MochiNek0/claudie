@@ -41,7 +41,8 @@ Inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/cla
 | `PreToolUse` | Start tool activity; write tools → typing, shell tools → building, read/search tools → search |
 | `PostToolUse` | Finish tool activity |
 | `PostToolBatch` | Batch complete, refresh quota snapshot |
-| `PostToolUseFailure` / `StopFailure` / `PermissionDenied` | Error state |
+| `PostToolUseFailure` / `StopFailure` | Error state |
+| `PermissionDenied` | Denied state (separate mood) |
 | `PermissionRequest` | Wait for Allow / Always / Deny in the pet UI |
 | `SubagentStart` / `TaskCreated` | Subagent working |
 | `SubagentStop` / `TaskCompleted` | Subagent done |
@@ -85,7 +86,7 @@ Configure a profile in **Settings → LLM Profiles**:
 |-------|-------------|
 | `Base URL` | OpenAI-compatible endpoint, e.g. `https://example.com/v1/chat/completions` or `https://example.com/v1`. |
 | `API key` | Upstream service key; if empty, the proxy uses `Auth token` as the upstream key. |
-| `Model` | A model supported by that service. |
+| `Model` | A model supported by that service. Each model row has a `1M` toggle: when on, claudie appends a `[1m]` suffix to the model id written to Claude Code, and the proxy strips it before forwarding upstream. The `Fetch models` button at the top of the Models section probes the upstream OpenAI `/v1/models` (handling `/anthropic` and `/v{N}` path variants) and populates a dropdown for each model field. |
 | `OpenAI body` | Optional extra request fields — JSON object or one `key=value` / `key: value` per line, e.g. `{"reasoning_effort":"xhigh"}`. Merged into the upstream request, but cannot override claudie-managed `messages` / `stream`. |
 | `Extra env` | One `KEY=VALUE` proxy switch or Claude Code env var per line. |
 
@@ -153,7 +154,7 @@ All under `%USERPROFILE%\.claudie\` (except the last two, under `.claude\`):
 
 ## Pet Assets
 
-Bundled GIFs live in `assets/claudie/`, one file per mood: `idle` `thinking` `typing` `building` `search` `happy` `error` `sleeping` `subagent` `pomodoro` `wave` `stretch` `fishing` `reel` `caught` `missed`. The Settings panel can adjust the GIF directory and the file name for each mood; keep the mapping consistent when replacing art.
+Bundled GIFs live in `assets/claudie/`, one file per mood: `idle` `thinking` `typing` `building` `search` `happy` `error` `deny` `sleeping` `subagent` `pomodoro` `wave` `stretch` `fishing` `reel` `caught` `missed`. The Settings panel can adjust the GIF directory and the file name for each mood; keep the mapping consistent when replacing art.
 
 ## Packaging
 
