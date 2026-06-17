@@ -104,6 +104,7 @@ impl SettingsController {
             opus_1m: ui.get_opus_1m(),
             sonnet_1m: ui.get_sonnet_1m(),
             haiku_1m: ui.get_haiku_1m(),
+            hide_attribution: ui.get_hide_attribution(),
         })
     }
 
@@ -135,6 +136,37 @@ impl SettingsController {
                 ui.window().request_redraw();
             });
         });
+    }
+
+    pub(in crate::ui::settings_panel) fn toggle_env_tool_search(&mut self, enabled: bool) {
+        self.set_env_flag("ENABLE_TOOL_SEARCH", "true", enabled);
+    }
+
+    pub(in crate::ui::settings_panel) fn toggle_env_no_autoupdate(&mut self, enabled: bool) {
+        self.set_env_flag("DISABLE_AUTOUPDATER", "1", enabled);
+    }
+
+    pub(in crate::ui::settings_panel) fn toggle_env_max_thinking(&mut self, enabled: bool) {
+        self.set_env_flag("CLAUDE_CODE_EFFORT_LEVEL", "max", enabled);
+    }
+
+    /// Add or remove a `KEY=VALUE` line in the Extra env text box, then resync
+    /// the quick-toggle pills with the new text.
+    fn set_env_flag(&self, key: &str, value: &str, enabled: bool) {
+        let Some(ui) = self.ui() else {
+            return;
+        };
+        let current = ui.get_extra_env().to_string();
+        let updated = extra_env_with_flag(&current, key, enabled.then_some(value));
+        ui.set_extra_env(shared(&updated));
+        set_env_flag_checks(&ui, &updated);
+    }
+
+    /// Re-derive the quick-toggle pills after the user edits Extra env by hand.
+    pub(in crate::ui::settings_panel) fn sync_env_flag_checks(&self, extra_env: &str) {
+        if let Some(ui) = self.ui() {
+            set_env_flag_checks(&ui, extra_env);
+        }
     }
 
     pub(in crate::ui::settings_panel) fn save_profile(&mut self, activate_profile: bool) {
@@ -243,8 +275,48 @@ fn set_profile_fields(ui: &SettingsWindow, profile: &LlmProfile) {
     ui.set_opus_1m(profile.opus_1m);
     ui.set_sonnet_1m(profile.sonnet_1m);
     ui.set_haiku_1m(profile.haiku_1m);
+    ui.set_hide_attribution(profile.hide_attribution);
+    set_env_flag_checks(ui, &profile.extra_env);
     // Drop any model list fetched for the previously shown profile.
     ui.set_available_models(ModelRc::new(VecModel::<slint::SharedString>::default()));
+}
+
+/// First value for `key` in a newline-delimited `KEY=VALUE` Extra env block,
+/// matching the trimming that `parse_extra_env` applies on save.
+fn extra_env_value(extra_env: &str, key: &str) -> Option<String> {
+    extra_env.lines().find_map(|line| {
+        let (candidate, value) = line.split_once('=')?;
+        candidate
+            .trim()
+            .eq_ignore_ascii_case(key)
+            .then(|| value.trim().to_string())
+    })
+}
+
+/// Return `extra_env` with any existing line for `key` removed, then a fresh
+/// `key=value` line appended when `value` is `Some`.
+fn extra_env_with_flag(extra_env: &str, key: &str, value: Option<&str>) -> String {
+    let mut lines: Vec<String> = extra_env
+        .lines()
+        .filter(|line| {
+            let candidate = line.split('=').next().unwrap_or("").trim();
+            !candidate.eq_ignore_ascii_case(key)
+        })
+        .map(|line| line.to_string())
+        .collect();
+    if let Some(value) = value {
+        lines.push(format!("{key}={value}"));
+    }
+    lines.join("\n")
+}
+
+/// A pill is checked only when its exact enabled value is present, so deleting
+/// or changing the line in Extra env unchecks it.
+fn set_env_flag_checks(ui: &SettingsWindow, extra_env: &str) {
+    let on = |key: &str, value: &str| extra_env_value(extra_env, key).as_deref() == Some(value);
+    ui.set_env_tool_search(on("ENABLE_TOOL_SEARCH", "true"));
+    ui.set_env_no_autoupdate(on("DISABLE_AUTOUPDATER", "1"));
+    ui.set_env_max_thinking(on("CLAUDE_CODE_EFFORT_LEVEL", "max"));
 }
 
 pub(super) fn set_profile_usage_fields(

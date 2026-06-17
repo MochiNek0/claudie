@@ -249,6 +249,34 @@ slint::slint! {
         }
     }
 
+    // A TogglePill with a caption, used for the LLM tab's quick env switches.
+    // `checked` is driven from Rust (derived from the Extra env text), so
+    // editing Extra env directly keeps the pill in sync.
+    component EnvToggle inherits Rectangle {
+        in property <string> text;
+        in-out property <bool> checked: false;
+        callback toggled(bool);
+
+        height: 24px;
+        background: transparent;
+
+        TogglePill {
+            x: 0px; y: 0px; width: 46px; height: 24px;
+            checked <=> root.checked;
+            toggled(on) => { root.toggled(on); }
+        }
+        Text {
+            x: 54px; y: 0px;
+            width: root.width - 54px;
+            height: 24px;
+            vertical-alignment: center;
+            text: root.text;
+            overflow: elide;
+            font-size: 12px;
+            color: Theme.ink;
+        }
+    }
+
     component SettingsTabButton inherits Rectangle {
         in property <string> text;
         in property <image> icon_source;
@@ -760,6 +788,14 @@ slint::slint! {
         in-out property <string> sonnet_model;
         in-out property <string> haiku_model;
         in-out property <string> extra_env;
+        // Quick env switches; their checked state is derived in Rust from the
+        // Extra env text so removing a line unchecks the matching pill.
+        in-out property <bool> env_tool_search: false;
+        in-out property <bool> env_no_autoupdate: false;
+        in-out property <bool> env_max_thinking: false;
+        // Unlike the env switches above, this maps to Claude Code's top-level
+        // `attribution` field, so it is a plain persisted flag applied on Save.
+        in-out property <bool> hide_attribution: false;
         in-out property <string> openai_extra_body;
         in-out property <bool> model_1m: false;
         in-out property <bool> opus_1m: false;
@@ -833,6 +869,10 @@ slint::slint! {
         callback import_profile();
         callback delete_profile();
         callback fetch_models();
+        callback toggle_env_tool_search(bool);
+        callback toggle_env_no_autoupdate(bool);
+        callback toggle_env_max_thinking(bool);
+        callback extra_env_edited(string);
         callback save_basic();
         callback reset_basic();
         callback save_pomodoro();
@@ -897,7 +937,7 @@ slint::slint! {
             width: root.width - 192px;
             height: root.height - 56px;
             viewport-width: root.content_width;
-            viewport-height: root.active_tab == 0 ? 512px : (root.active_tab == 1 ? 456px : (root.active_tab == 2 ? 824px : 812px));
+            viewport-height: root.active_tab == 0 ? 512px : (root.active_tab == 1 ? 456px : (root.active_tab == 2 ? 936px : 812px));
 
             if active_tab == 0: Rectangle {
                 width: root.content_width;
@@ -1025,7 +1065,7 @@ slint::slint! {
 
             if active_tab == 2: Rectangle {
                 width: root.content_width;
-                height: 824px;
+                height: 936px;
                 background: transparent;
 
                 Text { x: 0px; y: 0px; text: "Provider profiles"; font-size: 17px; font-weight: 700; color: Theme.ink; }
@@ -1060,21 +1100,27 @@ slint::slint! {
                 ModelField { x: 0px; y: 492px; width: 584px; label: "Sonnet"; value <=> root.sonnet_model; one-m <=> root.sonnet_1m; options: root.available_models; }
                 ModelField { x: 0px; y: 548px; width: 584px; label: "Haiku"; value <=> root.haiku_model; one-m <=> root.haiku_1m; options: root.available_models; }
 
-                Text { x: 0px; y: 612px; text: "Extra env"; color: Theme.ink-faint; font-size: 12px; }
-                MonoTextEdit { x: 0px; y: 632px; width: 284px; height: 72px; text <=> root.extra_env; }
-                Text { x: 300px; y: 612px; text: "OpenAI body"; color: Theme.ink-faint; font-size: 12px; }
-                MonoTextEdit { x: 300px; y: 632px; width: 284px; height: 72px; text <=> root.openai_extra_body; }
+                Text { x: 0px; y: 612px; text: "Quick switches"; color: Theme.ink-faint; font-size: 12px; }
+                EnvToggle { x: 0px; y: 632px; width: 184px; text: "Tool Search"; checked <=> root.env_tool_search; toggled(on) => { root.toggle_env_tool_search(on); } }
+                EnvToggle { x: 200px; y: 632px; width: 184px; text: "No auto-update"; checked <=> root.env_no_autoupdate; toggled(on) => { root.toggle_env_no_autoupdate(on); } }
+                EnvToggle { x: 400px; y: 632px; width: 184px; text: "Max thinking"; checked <=> root.env_max_thinking; toggled(on) => { root.toggle_env_max_thinking(on); } }
+                EnvToggle { x: 0px; y: 664px; width: 400px; text: "Hide git attribution (commit/PR signature)"; checked <=> root.hide_attribution; }
 
-                Rectangle { x: 0px; y: 724px; width: 432px; height: 96px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
-                Text { x: 14px; y: 732px; width: 404px; text: root.profile_usage_title; overflow: elide; color: Theme.ink; font-size: 13px; font-weight: 600; }
-                Text { x: 14px; y: 752px; width: 404px; text: root.profile_usage_summary; overflow: elide; color: Theme.ink-secondary; font-size: 11px; }
-                StatBarRow { x: 14px; y: 774px; width: 240px; height: 18px; label: "5h"; value: root.profile_usage_five_hour_value; bar: root.profile_usage_five_hour_bar; accent: root.profile_usage_five_hour_bar >= 90 ? Theme.danger : (root.profile_usage_five_hour_bar >= 70 ? Theme.chart-amber : Theme.accent); }
-                Text { x: 262px; y: 774px; width: 156px; height: 18px; text: root.profile_usage_five_hour_reset; overflow: elide; vertical-alignment: center; color: Theme.ink-secondary; font-size: 11px; }
-                StatBarRow { x: 14px; y: 796px; width: 240px; height: 18px; label: "7d"; value: root.profile_usage_seven_day_value; bar: root.profile_usage_seven_day_bar; accent: root.profile_usage_seven_day_bar >= 90 ? Theme.danger : (root.profile_usage_seven_day_bar >= 70 ? Theme.chart-amber : Theme.chart-purple); }
-                Text { x: 262px; y: 796px; width: 156px; height: 18px; text: root.profile_usage_seven_day_reset; overflow: elide; vertical-alignment: center; color: Theme.ink-secondary; font-size: 11px; }
+                Text { x: 0px; y: 716px; text: "Extra env"; color: Theme.ink-faint; font-size: 12px; }
+                MonoTextEdit { x: 0px; y: 736px; width: 284px; height: 72px; text <=> root.extra_env; edited(t) => { root.extra_env_edited(t); } }
+                Text { x: 300px; y: 716px; text: "OpenAI body"; color: Theme.ink-faint; font-size: 12px; }
+                MonoTextEdit { x: 300px; y: 736px; width: 284px; height: 72px; text <=> root.openai_extra_body; }
 
-                ActionButton { x: 448px; y: 724px; width: 64px; height: 32px; text: "Save"; clicked => { root.save_profile(); } }
-                ActionButton { x: 520px; y: 724px; width: 64px; height: 32px; text: "Use"; kind: "primary"; clicked => { root.use_profile(); } }
+                Rectangle { x: 0px; y: 828px; width: 432px; height: 96px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
+                Text { x: 14px; y: 836px; width: 404px; text: root.profile_usage_title; overflow: elide; color: Theme.ink; font-size: 13px; font-weight: 600; }
+                Text { x: 14px; y: 856px; width: 404px; text: root.profile_usage_summary; overflow: elide; color: Theme.ink-secondary; font-size: 11px; }
+                StatBarRow { x: 14px; y: 878px; width: 240px; height: 18px; label: "5h"; value: root.profile_usage_five_hour_value; bar: root.profile_usage_five_hour_bar; accent: root.profile_usage_five_hour_bar >= 90 ? Theme.danger : (root.profile_usage_five_hour_bar >= 70 ? Theme.chart-amber : Theme.accent); }
+                Text { x: 262px; y: 878px; width: 156px; height: 18px; text: root.profile_usage_five_hour_reset; overflow: elide; vertical-alignment: center; color: Theme.ink-secondary; font-size: 11px; }
+                StatBarRow { x: 14px; y: 900px; width: 240px; height: 18px; label: "7d"; value: root.profile_usage_seven_day_value; bar: root.profile_usage_seven_day_bar; accent: root.profile_usage_seven_day_bar >= 90 ? Theme.danger : (root.profile_usage_seven_day_bar >= 70 ? Theme.chart-amber : Theme.chart-purple); }
+                Text { x: 262px; y: 900px; width: 156px; height: 18px; text: root.profile_usage_seven_day_reset; overflow: elide; vertical-alignment: center; color: Theme.ink-secondary; font-size: 11px; }
+
+                ActionButton { x: 448px; y: 828px; width: 64px; height: 32px; text: "Save"; clicked => { root.save_profile(); } }
+                ActionButton { x: 520px; y: 828px; width: 64px; height: 32px; text: "Use"; kind: "primary"; clicked => { root.use_profile(); } }
             }
 
             if active_tab == 3: Rectangle {

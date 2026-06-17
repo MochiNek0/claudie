@@ -72,6 +72,10 @@ pub(crate) struct LlmProfile {
     pub(crate) opus_1m: bool,
     pub(crate) sonnet_1m: bool,
     pub(crate) haiku_1m: bool,
+    /// Hide Claude Code's git attribution. When set, claudie writes an empty
+    /// `attribution.commit`/`attribution.pr` to Claude Code's settings so
+    /// commits and PRs drop the "Co-Authored-By"/"Generated with" signatures.
+    pub(crate) hide_attribution: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -445,6 +449,8 @@ pub(crate) fn apply_llm_profile_to_claude(profile: &LlmProfile) -> Result<(), St
         env.insert(key, Value::String(value));
     }
 
+    apply_managed_attribution(root, profile.hide_attribution);
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
@@ -459,6 +465,28 @@ pub(crate) fn apply_llm_profile_to_claude(profile: &LlmProfile) -> Result<(), St
             serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?
         ),
     )
+}
+
+/// The exact `attribution` object claudie writes to hide git signatures. Only
+/// this shape is treated as claudie-managed, so turning the toggle off never
+/// clobbers a user's own custom attribution.
+fn managed_attribution_value() -> Value {
+    let mut map = Map::new();
+    map.insert("commit".to_string(), Value::String(String::new()));
+    map.insert("pr".to_string(), Value::String(String::new()));
+    Value::Object(map)
+}
+
+fn attribution_is_hidden(root: &Map<String, Value>) -> bool {
+    root.get("attribution") == Some(&managed_attribution_value())
+}
+
+fn apply_managed_attribution(root: &mut Map<String, Value>, hide: bool) {
+    if hide {
+        root.insert("attribution".to_string(), managed_attribution_value());
+    } else if attribution_is_hidden(root) {
+        root.remove("attribution");
+    }
 }
 
 pub(crate) fn current_claude_llm_profile() -> Option<LlmProfile> {
@@ -496,6 +524,10 @@ pub(crate) fn current_claude_llm_profile() -> Option<LlmProfile> {
     let name = env
         .map(|env| provider_name_from_env(env, &model))
         .unwrap_or_else(|| provider_name_from_model(&model));
+    let hide_attribution = value
+        .as_object()
+        .map(attribution_is_hidden)
+        .unwrap_or(false);
     Some(LlmProfile {
         id: default_profile_id(&name),
         name,
@@ -518,6 +550,7 @@ pub(crate) fn current_claude_llm_profile() -> Option<LlmProfile> {
         opus_1m,
         sonnet_1m,
         haiku_1m,
+        hide_attribution,
     })
 }
 
@@ -1284,6 +1317,36 @@ mod tests {
             "{\n  \"hasCompletedOnboarding\": true,\n  \"projects\": {}\n}\n"
         );
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn hide_attribution_writes_empty_commit_and_pr() {
+        let mut root = Map::new();
+        apply_managed_attribution(&mut root, true);
+
+        let attribution = root.get("attribution").and_then(Value::as_object).unwrap();
+        assert_eq!(attribution.get("commit").and_then(Value::as_str), Some(""));
+        assert_eq!(attribution.get("pr").and_then(Value::as_str), Some(""));
+        assert!(attribution_is_hidden(&root));
+    }
+
+    #[test]
+    fn unhiding_removes_only_the_managed_attribution() {
+        let mut root = Map::new();
+        apply_managed_attribution(&mut root, true);
+        apply_managed_attribution(&mut root, false);
+        assert!(!root.contains_key("attribution"));
+    }
+
+    #[test]
+    fn unhiding_preserves_a_users_custom_attribution() {
+        let mut root = Map::new();
+        let custom = serde_json::json!({ "commit": "Built by me", "pr": "" });
+        root.insert("attribution".to_string(), custom.clone());
+
+        apply_managed_attribution(&mut root, false);
+        assert_eq!(root.get("attribution"), Some(&custom));
+        assert!(!attribution_is_hidden(&root));
     }
 
     fn test_claude_json_path(name: &str) -> PathBuf {

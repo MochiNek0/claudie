@@ -35,6 +35,15 @@ use ui::{init_animation_store, run_window};
 use util::parse_port;
 
 fn main() {
+    // Slint's software renderer defaults to partial (dirty-region) rendering,
+    // which on some Windows setups leaves the settings/prompt windows blank
+    // until a hover event dirties a region. Force full-window redraws so the
+    // panels always paint completely.
+    // SAFETY: runs before any threads are spawned or Slint is initialized.
+    unsafe {
+        env::set_var("SLINT_FULL_RENDERING", "1");
+    }
+
     let args: Vec<String> = env::args().collect();
     let port = parse_port(&args).unwrap_or(DEFAULT_PORT);
     let quiet = args.iter().any(|arg| arg == "--quiet");

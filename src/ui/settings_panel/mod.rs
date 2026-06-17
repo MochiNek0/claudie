@@ -126,6 +126,30 @@ fn wire_callbacks(window: &SettingsWindow, controller: Rc<RefCell<SettingsContro
             controller.borrow_mut().fetch_models();
         }
     }));
+    window.on_toggle_env_tool_search(redraw_after_arg(&weak, {
+        let controller = controller.clone();
+        move |enabled| {
+            controller.borrow_mut().toggle_env_tool_search(enabled);
+        }
+    }));
+    window.on_toggle_env_no_autoupdate(redraw_after_arg(&weak, {
+        let controller = controller.clone();
+        move |enabled| {
+            controller.borrow_mut().toggle_env_no_autoupdate(enabled);
+        }
+    }));
+    window.on_toggle_env_max_thinking(redraw_after_arg(&weak, {
+        let controller = controller.clone();
+        move |enabled| {
+            controller.borrow_mut().toggle_env_max_thinking(enabled);
+        }
+    }));
+    window.on_extra_env_edited(redraw_after_arg(&weak, {
+        let controller = controller.clone();
+        move |text: slint::SharedString| {
+            controller.borrow().sync_env_flag_checks(&text);
+        }
+    }));
     window.on_browse_gif_dir(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
