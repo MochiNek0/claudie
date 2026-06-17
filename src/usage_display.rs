@@ -13,13 +13,14 @@ pub(crate) struct UsageLine {
 
 impl UsageLine {
     pub(crate) fn reset_caption(&self) -> String {
+        let s = crate::i18n::strings();
         let reset = self.reset.trim();
         if reset.is_empty() {
             String::new()
         } else if reset == "due" {
-            "reset due".to_string()
+            s.usage_reset_due.to_string()
         } else {
-            format!("resets {reset}")
+            s.usage_resets_fmt.replace("{}", reset)
         }
     }
 }
@@ -39,10 +40,11 @@ pub(crate) fn provider_usage_display(
     active_profile_id: &str,
     quota: &QuotaStats,
 ) -> ProviderUsageDisplay {
+    let s = crate::i18n::strings();
     let title = if profile_name.trim().is_empty() {
-        "Provider usage".to_string()
+        s.usage_provider_usage.to_string()
     } else {
-        format!("{} usage", profile_name.trim())
+        s.usage_title_fmt.replace("{}", profile_name.trim())
     };
     let five_hour = usage_line(&quota.official_five_hour);
     let seven_day = usage_line(&quota.official_seven_day);
@@ -52,13 +54,13 @@ pub(crate) fn provider_usage_display(
         let mut parts: Vec<String> = Vec::new();
         let plan = quota.official_plan.trim();
         if !plan.is_empty() {
-            parts.push(format!("{plan} plan"));
+            parts.push(s.usage_plan_fmt.replace("{}", plan));
         }
         if let Some(updated) = quota.official_usage_updated_at_unix_ms.map(elapsed_text) {
-            parts.push(format!("updated {updated}"));
+            parts.push(s.usage_updated_fmt.replace("{}", &updated));
         }
         if parts.is_empty() {
-            "5h/7d usage limits".to_string()
+            s.usage_5h7d_limits.to_string()
         } else {
             parts.join(" · ")
         }
@@ -66,9 +68,9 @@ pub(crate) fn provider_usage_display(
     {
         shorten(quota.official_usage_error.trim(), 93)
     } else if profile_id != active_profile_id {
-        "No cached usage for this provider yet.".to_string()
+        s.usage_no_cached.to_string()
     } else {
-        "This provider has not reported 5h/7d limits.".to_string()
+        s.usage_no_limits.to_string()
     };
 
     ProviderUsageDisplay {
@@ -95,10 +97,13 @@ fn usage_line(window: &OfficialUsageWindow) -> UsageLine {
 }
 
 fn reset_text(window: &OfficialUsageWindow) -> String {
+    // "due" stays an internal sentinel that reset_caption maps to localized
+    // text; only the relative "in {dur}" phrase is localized here.
+    let in_fmt = crate::i18n::strings().usage_in_fmt;
     if let Some(reset_at) = window.reset_at_unix_ms {
         let now = now_unix_ms();
         if reset_at > now {
-            return format!("in {}", duration_text(reset_at - now));
+            return in_fmt.replace("{}", &duration_text(reset_at - now));
         }
         return "due".to_string();
     }
@@ -108,7 +113,7 @@ fn reset_text(window: &OfficialUsageWindow) -> String {
     } else if let Some(reset_at) = date_text_unix_ms(label) {
         let now = now_unix_ms();
         if reset_at > now {
-            format!("in {}", duration_text(reset_at - now))
+            in_fmt.replace("{}", &duration_text(reset_at - now))
         } else {
             "due".to_string()
         }
@@ -118,11 +123,13 @@ fn reset_text(window: &OfficialUsageWindow) -> String {
 }
 
 fn elapsed_text(timestamp: u64) -> String {
+    let s = crate::i18n::strings();
     let now = now_unix_ms();
     if timestamp >= now {
-        return "just now".to_string();
+        return s.usage_just_now.to_string();
     }
-    format!("{} ago", duration_text(now - timestamp))
+    s.usage_ago_fmt
+        .replace("{}", &duration_text(now - timestamp))
 }
 
 fn duration_text(ms: u64) -> String {

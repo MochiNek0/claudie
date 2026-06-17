@@ -39,13 +39,14 @@ impl SettingsController {
 
     pub(in crate::ui::settings_panel) fn save_pomodoro_settings(&mut self) {
         self.collect_pomodoro_fields();
+        let s = crate::i18n::strings();
         if let Err(err) = save_user_settings(&self.settings) {
-            self.status(&format!("Failed to save pomodoro settings: {err}"));
+            self.status(&s.status_save_pomodoro_fail_fmt.replace("{}", &err));
             return;
         }
         sync_app_settings(&self.settings);
         self.refresh_pomodoro_tab();
-        self.status("Saved pomodoro settings.");
+        self.status(s.status_saved_pomodoro);
     }
 
     pub(in crate::ui::settings_panel) fn refresh_pomodoro_tab(&self) {
@@ -56,31 +57,35 @@ impl SettingsController {
 }
 
 pub(super) fn set_pomodoro_status(ui: &SettingsWindow) {
+    let s = crate::i18n::strings();
     let Some(state) = APP_STATE.get() else {
-        ui.set_pomodoro_status(shared("Pomodoro data is not ready."));
+        ui.set_pomodoro_status(shared(s.pomo_not_ready));
         return;
     };
     let state = state.lock().expect("state poisoned");
     let mode = match state.pomodoro.mode {
-        PomodoroMode::Focus => "Focus",
-        PomodoroMode::ShortBreak => "Short break",
-        PomodoroMode::LongBreak => "Long break",
+        PomodoroMode::Focus => s.pomo_focus,
+        PomodoroMode::ShortBreak => s.pomo_short_break,
+        PomodoroMode::LongBreak => s.pomo_long_break,
     };
     let status = match state.pomodoro.status {
-        PomodoroStatus::Stopped => "Stopped",
-        PomodoroStatus::Running => "Running",
-        PomodoroStatus::Paused => "Paused",
+        PomodoroStatus::Stopped => s.pomo_status_stopped,
+        PomodoroStatus::Running => s.pomo_status_running,
+        PomodoroStatus::Paused => s.pomo_status_paused,
     };
+    let completed = s
+        .pomo_completed_fmt
+        .replace("{}", &state.pomodoro.completed_focus_count.to_string());
     ui.set_pomodoro_status(shared(&format!(
-        "{}    {}    {}\nCompleted focus sessions: {}",
+        "{}    {}    {}\n{}",
         mode,
         status,
         format_remaining(state.pomodoro.remaining(&state.settings.pomodoro)),
-        state.pomodoro.completed_focus_count
+        completed
     )));
     ui.set_pause_resume_label(shared(if state.pomodoro.status == PomodoroStatus::Paused {
-        "Resume"
+        s.pomo_resume
     } else {
-        "Pause"
+        s.pomo_pause
     }));
 }

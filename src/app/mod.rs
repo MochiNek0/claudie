@@ -57,6 +57,30 @@ impl Default for PetMood {
 }
 
 impl PetMood {
+    /// Every mood variant, in declaration order. Keep in sync with the enum so
+    /// exhaustive consumers (GIF filename map, settings GIF list) can be checked
+    /// for completeness.
+    pub(crate) const ALL: [PetMood; 18] = [
+        Self::Idle,
+        Self::Thinking,
+        Self::Typing,
+        Self::Building,
+        Self::Search,
+        Self::Happy,
+        Self::Error,
+        Self::Deny,
+        Self::Shrug,
+        Self::Sleeping,
+        Self::Subagent,
+        Self::Pomodoro,
+        Self::Wave,
+        Self::Stretch,
+        Self::Fishing,
+        Self::FishingReel,
+        Self::FishingCaught,
+        Self::FishingMissed,
+    ];
+
     pub(crate) fn key(self) -> &'static str {
         match self {
             Self::Idle => "idle",

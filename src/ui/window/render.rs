@@ -163,7 +163,11 @@ fn draw_session_switcher(hdc: HDC, state: &RenderState, x: i32, y: i32, w: i32, 
         let name_x = x + 22;
         let text_y = row_y + 5;
         let name = item.display_name.trim();
-        let name = if name.is_empty() { "Session" } else { name };
+        let name = if name.is_empty() {
+            crate::i18n::strings().session_default_name
+        } else {
+            name
+        };
         let fitted_name = fit_text_to_width(hdc, name, (count_x - name_x - 8).max(1));
         text(hdc, name_x, text_y, &fitted_name, accent);
 
@@ -229,34 +233,35 @@ fn session_status_symbol(status: ClaudeSessionStatus) -> &'static str {
 
 fn session_status_text(item: &SessionSwitcherItem) -> String {
     let detail = item.detail.trim();
+    let s = crate::i18n::strings();
     match item.status {
-        ClaudeSessionStatus::Idle | ClaudeSessionStatus::Done => "ready".to_string(),
-        ClaudeSessionStatus::Streaming => "thinking".to_string(),
+        ClaudeSessionStatus::Idle | ClaudeSessionStatus::Done => s.session_ready.to_string(),
+        ClaudeSessionStatus::Streaming => s.session_thinking.to_string(),
         ClaudeSessionStatus::Tool => {
             if detail.is_empty() {
-                "tool".to_string()
+                s.session_tool.to_string()
             } else {
                 detail.to_string()
             }
         }
-        ClaudeSessionStatus::WaitingPermission => "permission".to_string(),
-        ClaudeSessionStatus::WaitingChoice => "choice".to_string(),
+        ClaudeSessionStatus::WaitingPermission => s.session_permission.to_string(),
+        ClaudeSessionStatus::WaitingChoice => s.session_choice.to_string(),
         ClaudeSessionStatus::Compacting => item.status.label().to_ascii_lowercase(),
         ClaudeSessionStatus::Error => {
             if detail.is_empty() {
-                "error".to_string()
+                s.session_error.to_string()
             } else {
                 detail.to_string()
             }
         }
         ClaudeSessionStatus::Denied => {
             if detail.is_empty() {
-                "denied".to_string()
+                s.session_denied.to_string()
             } else {
                 detail.to_string()
             }
         }
-        ClaudeSessionStatus::Ended => "ended".to_string(),
+        ClaudeSessionStatus::Ended => s.session_ended.to_string(),
     }
 }
 
@@ -280,27 +285,35 @@ fn draw_fishing_hud(hdc: HDC, state: &RenderState, x: i32, y: i32, hud_w: i32, h
         theme::HAIRLINE,
     );
 
+    let s = crate::i18n::strings();
     match state.fishing.phase {
         FishingPhase::Waiting => {
             draw_bobber_icon(hdc, x + 18, y + 20, water);
-            text_fit(hdc, x + 46, y + 10, (hud_w - 58).max(1), "CASTING", accent);
+            text_fit(
+                hdc,
+                x + 46,
+                y + 10,
+                (hud_w - 58).max(1),
+                s.fishing_casting,
+                accent,
+            );
             text_fit(
                 hdc,
                 x + 46,
                 y + 30,
                 (hud_w - 58).max(1),
-                "Waiting for a bite",
+                s.fishing_waiting_bite,
                 theme::INK_MUTED,
             );
         }
         FishingPhase::Reeling => {
-            text_fit(hdc, x + 16, y + 7, 70, "FISH ON!", accent);
+            text_fit(hdc, x + 16, y + 7, 70, s.fishing_fish_on, accent);
             text_fit(
                 hdc,
                 x + 88,
                 y + 7,
                 (hud_w - 100).max(1),
-                "TAP TO REEL",
+                s.fishing_tap_reel,
                 theme::INK_MUTED,
             );
             draw_fishing_meter(hdc, &state.fishing, x + 16, y + 28, (hud_w - 32).max(1));
@@ -314,18 +327,32 @@ fn draw_fishing_hud(hdc: HDC, state: &RenderState, x: i32, y: i32, hud_w: i32, h
         }
         FishingPhase::Caught => {
             draw_fish_icon(hdc, x + 18, y + 22, caught);
-            text_fit(hdc, x + 54, y + 11, (hud_w - 66).max(1), "CAUGHT!", accent);
+            text_fit(
+                hdc,
+                x + 54,
+                y + 11,
+                (hud_w - 66).max(1),
+                s.fishing_caught,
+                accent,
+            );
             draw_catch_progress(hdc, x + 54, y + 34, (hud_w - 68).max(1), 1.0);
         }
         FishingPhase::Missed => {
             draw_fish_icon(hdc, x + 18, y + 22, missed);
-            text_fit(hdc, x + 54, y + 11, (hud_w - 66).max(1), "ESCAPED", accent);
+            text_fit(
+                hdc,
+                x + 54,
+                y + 11,
+                (hud_w - 66).max(1),
+                s.fishing_escaped,
+                accent,
+            );
             text_fit(
                 hdc,
                 x + 54,
                 y + 32,
                 (hud_w - 66).max(1),
-                "The line went slack",
+                s.fishing_line_slack,
                 theme::INK_MUTED,
             );
         }

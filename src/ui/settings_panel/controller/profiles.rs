@@ -47,10 +47,11 @@ impl SettingsController {
             // Deselect the picker so the live-usage timer does not repaint the
             // previously selected profile's usage onto the blank form.
             ui.set_selected_profile_index(-1);
+            let s = crate::i18n::strings();
             set_profile_fields(&ui, &LlmProfile::default());
             set_empty_profile_usage_fields(&ui);
-            ui.set_profile_position(shared("New profile"));
-            ui.set_status_message(shared("Editing a new profile."));
+            ui.set_profile_position(shared(s.status_new_profile));
+            ui.set_status_message(shared(s.status_editing_new));
         }
     }
 
@@ -82,7 +83,7 @@ impl SettingsController {
         } else {
             set_profile_fields(&ui, &LlmProfile::default());
             set_empty_profile_usage_fields(&ui);
-            ui.set_profile_position(shared("New profile"));
+            ui.set_profile_position(shared(crate::i18n::strings().status_new_profile));
         }
     }
 
@@ -112,23 +113,26 @@ impl SettingsController {
         let Some(profile) = self.current_profile_from_fields() else {
             return;
         };
-        self.status("Fetching models…");
+        self.status(crate::i18n::strings().status_fetching_models);
         let weak = self.weak.clone();
         std::thread::spawn(move || {
             let result = crate::proxy::fetch_provider_models(&profile);
             let _ = weak.upgrade_in_event_loop(move |ui| {
+                let s = crate::i18n::strings();
                 match result {
                     Ok(models) => {
                         let count = models.len();
                         ui.set_available_models(ModelRc::new(VecModel::from_iter(
                             models.iter().map(|model| shared(model)).collect::<Vec<_>>(),
                         )));
-                        ui.set_status_message(shared(&format!(
-                            "Fetched {count} models. Pick one to fill Model."
-                        )));
+                        ui.set_status_message(shared(
+                            &s.status_fetched_fmt.replace("{}", &count.to_string()),
+                        ));
                     }
                     Err(err) => {
-                        ui.set_status_message(shared(&format!("Failed to fetch models: {err}")));
+                        ui.set_status_message(shared(
+                            &s.status_fetch_fail_fmt.replace("{}", &err.to_string()),
+                        ));
                     }
                 }
                 // Arrives outside any UI callback, so request a repaint
@@ -186,32 +190,37 @@ impl SettingsController {
             .iter()
             .position(|candidate| candidate.id == profile.id)
             .unwrap_or(0);
+        let s = crate::i18n::strings();
         if let Err(err) = save_llm_profile_db(&self.llm_db) {
-            self.status(&format!("Failed to save profile: {err}"));
+            self.status(&s.status_save_profile_fail_fmt.replace("{}", &err));
             return;
         }
         sync_app_llm_profiles(&self.llm_db);
         if activate_profile {
             if let Err(err) = ensure_claude_onboarding_complete() {
-                self.status(&format!(
-                    "Saved profile, but Claude onboarding failed: {err}"
-                ));
+                self.status(&s.status_onboard_fail_fmt.replace("{}", &err));
                 return;
             }
             if let Err(err) = apply_llm_profile_to_claude(&profile) {
-                self.status(&format!("Saved profile, but failed to apply it: {err}"));
+                self.status(&s.status_apply_fail_fmt.replace("{}", &err));
                 return;
             }
-            self.status(&format!("Using {}.", profile_label_for_message(&profile)));
+            self.status(
+                &s.status_using_fmt
+                    .replace("{}", &profile_label_for_message(&profile)),
+            );
         } else {
-            self.status(&format!("Saved {}.", profile_label_for_message(&profile)));
+            self.status(
+                &s.status_saved_fmt
+                    .replace("{}", &profile_label_for_message(&profile)),
+            );
         }
         self.refresh_profile_fields();
     }
 
     pub(in crate::ui::settings_panel) fn import_current_profile(&mut self) {
         let Some(profile) = current_claude_llm_profile() else {
-            self.status("No Claude Code LLM env values were found to import.");
+            self.status(crate::i18n::strings().status_no_import);
             return;
         };
         self.llm_db.upsert_profile(profile.clone());
@@ -223,39 +232,48 @@ impl SettingsController {
             .position(|candidate| candidate.id == profile.id)
             .unwrap_or(0);
         if let Err(err) = save_llm_profile_db(&self.llm_db) {
-            self.status(&format!("Failed to save imported profile: {err}"));
+            self.status(
+                &crate::i18n::strings()
+                    .status_import_save_fail_fmt
+                    .replace("{}", &err),
+            );
             return;
         }
         sync_app_llm_profiles(&self.llm_db);
         self.refresh_profile_fields();
-        self.status(&format!(
-            "Imported {}.",
-            profile_label_for_message(&profile)
-        ));
+        self.status(
+            &crate::i18n::strings()
+                .status_imported_fmt
+                .replace("{}", &profile_label_for_message(&profile)),
+        );
     }
 
     pub(in crate::ui::settings_panel) fn delete_profile(&mut self) {
         let Some(profile) = self.current_profile_from_fields() else {
             return;
         };
+        let s = crate::i18n::strings();
         if profile.is_official() {
-            self.status("The official profile cannot be deleted.");
+            self.status(s.status_official_no_delete);
             return;
         }
         let Some(removed) = self.llm_db.remove_profile(&profile.id) else {
-            self.status("Profile was not found.");
+            self.status(s.status_profile_not_found);
             return;
         };
         self.profile_index = self
             .profile_index
             .min(self.llm_db.profiles.len().saturating_sub(1));
         if let Err(err) = save_llm_profile_db(&self.llm_db) {
-            self.status(&format!("Failed to delete profile: {err}"));
+            self.status(&s.status_delete_fail_fmt.replace("{}", &err));
             return;
         }
         sync_app_llm_profiles(&self.llm_db);
         self.refresh_profile_fields();
-        self.status(&format!("Deleted {}.", profile_label_for_message(&removed)));
+        self.status(
+            &s.status_deleted_fmt
+                .replace("{}", &profile_label_for_message(&removed)),
+        );
     }
 }
 
@@ -343,8 +361,9 @@ pub(super) fn set_profile_usage_fields(
 }
 
 fn set_empty_profile_usage_fields(ui: &SettingsWindow) {
-    ui.set_profile_usage_title(shared("Provider usage"));
-    ui.set_profile_usage_summary(shared("Save or select a provider profile."));
+    let s = crate::i18n::strings();
+    ui.set_profile_usage_title(shared(s.usage_provider_usage));
+    ui.set_profile_usage_summary(shared(s.usage_save_or_select));
     ui.set_profile_usage_five_hour_value(shared("--"));
     ui.set_profile_usage_seven_day_value(shared("--"));
     ui.set_profile_usage_five_hour_reset(shared(""));

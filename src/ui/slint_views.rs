@@ -49,6 +49,104 @@ slint::slint! {
         out property <duration> fast: 120ms;
     }
 
+    // Localized UI text. English defaults live here; Rust pushes the active
+    // language's strings via the generated `set_*` accessors when each window
+    // is created (see crate::i18n and the apply_* helpers in the UI modules).
+    export global I18n {
+        // Settings: chrome / tabs
+        in property <string> settings-title: "claudie Settings";
+        in property <string> settings-subtitle: "Settings";
+        in property <string> tab-basic: "Basic";
+        in property <string> tab-pomodoro: "Pomodoro";
+        in property <string> tab-llm: "LLM Profiles";
+        in property <string> tab-stats: "Stats";
+        in property <string> btn-save: "Save";
+        in property <string> btn-reset: "Reset";
+        // Settings: Basic
+        in property <string> basic-header: "Pet renderer";
+        in property <string> basic-sub: "Tune the desktop pet size and point it at a folder of GIFs.";
+        in property <string> basic-pet-size: "Pet size";
+        in property <string> basic-sleep-after: "Sleep after";
+        in property <string> basic-gif-folder: "GIF folder";
+        in property <string> btn-browse: "Browse…";
+        in property <string> btn-use-default: "Use default";
+        in property <string> basic-language: "Language";
+        in property <string> basic-session-switcher: "Session switcher";
+        in property <string> basic-session-switcher-desc: "Show the compact focus panel when more than one Claude Code session is active.";
+        // Settings: Pomodoro
+        in property <string> pomo-header: "Pomodoro";
+        in property <string> pomo-sub: "Set focus and break lengths, then control the active timer.";
+        in property <string> pomo-current-cycle: "Current cycle";
+        in property <string> pomo-tune: "Tune the rhythm below, then use the controls without leaving this panel.";
+        in property <string> pomo-durations: "Durations";
+        in property <string> pomo-focus: "Focus";
+        in property <string> pomo-focus-hint: "Deep work";
+        in property <string> pomo-short-break: "Short break";
+        in property <string> pomo-short-hint: "Quick reset";
+        in property <string> pomo-long-break: "Long break";
+        in property <string> pomo-long-hint: "Full recharge";
+        in property <string> pomo-start: "Start";
+        in property <string> pomo-skip: "Skip";
+        in property <string> pomo-stop: "Stop";
+        // Settings: LLM Profiles
+        in property <string> llm-header: "Provider profiles";
+        in property <string> llm-sub: "Keep Claude Code provider settings tidy without leaving the pet.";
+        in property <string> llm-profile: "Profile";
+        in property <string> btn-new: "New";
+        in property <string> btn-import-current: "Import Current";
+        in property <string> btn-delete: "Delete";
+        in property <string> field-profile-id: "Profile ID";
+        in property <string> field-name: "Name";
+        in property <string> field-base-url: "Base URL";
+        in property <string> field-api-key: "API key";
+        in property <string> field-auth-token: "Auth token (proxy)";
+        in property <string> llm-models: "Models";
+        in property <string> llm-models-hint: "Toggle 1M per model to request a 1M context window. Fetch, then pick an id.";
+        in property <string> btn-fetch-models: "Fetch models";
+        in property <string> field-default-model: "Default model";
+        in property <string> field-opus: "Opus";
+        in property <string> field-sonnet: "Sonnet";
+        in property <string> field-haiku: "Haiku";
+        in property <string> llm-quick-switches: "Quick switches";
+        in property <string> env-tool-search: "Tool Search";
+        in property <string> env-no-autoupdate: "No auto-update";
+        in property <string> env-max-thinking: "Max thinking";
+        in property <string> env-hide-attribution: "Hide git attribution (commit/PR signature)";
+        in property <string> llm-extra-env: "Extra env";
+        in property <string> llm-openai-body: "OpenAI body";
+        in property <string> btn-use: "Use";
+        // Settings: Stats
+        in property <string> stats-header: "Session ledger";
+        in property <string> stats-sub: "A quiet local record of Claude Code activity observed by claudie.";
+        in property <string> stats-kpi-prompts: "Prompts";
+        in property <string> stats-kpi-tokens: "Tokens";
+        in property <string> stats-kpi-cache: "Cache hit";
+        in property <string> stats-kpi-tools: "Tool calls";
+        in property <string> stats-activity: "Activity";
+        in property <string> stats-tool-mix: "Tool mix · 7 days";
+        in property <string> stats-tokens-7d: "Tokens · 7 days";
+        in property <string> stats-tokens-by-model: "Tokens by model · 7 days";
+        in property <string> stat-write: "Write";
+        in property <string> stat-bash: "Bash";
+        in property <string> stat-search: "Search";
+        in property <string> stat-agent: "Agent";
+        in property <string> stat-perm: "Perm";
+        in property <string> stat-choice: "Choice";
+        in property <string> stat-input: "Input";
+        in property <string> stat-output: "Output";
+        in property <string> stat-cache-w: "Cache W";
+        in property <string> stat-cache-r: "Cache R";
+        // Prompt window
+        in property <string> prompt-hint: "Use Ctrl+Shift+Y for Allow and Ctrl+Shift+N for Deny.";
+        in property <string> prompt-deny: "Deny";
+        in property <string> prompt-cancel: "Cancel";
+        in property <string> prompt-always: "Always";
+        in property <string> prompt-allow: "Allow";
+        in property <string> prompt-submit: "Submit";
+        in property <string> prompt-other-placeholder: "Type your answer...";
+        in property <string> prompt-request-title: "claudie request";
+    }
+
     component ActionButton inherits Rectangle {
         in property <string> text;
         in property <bool> enabled: true;
@@ -745,7 +843,7 @@ slint::slint! {
         min-height: 300px;
         preferred-height: 600px;
         max-height: 600px;
-        title: "claudie Settings";
+        title: I18n.settings-title;
         icon: @image-url("../../assets/icon.ico");
         background: Theme.window-bg;
         // Bundled Maple Mono CN (registered in ensure_embedded_fonts) covers
@@ -760,6 +858,9 @@ slint::slint! {
         in-out property <float> pet_scale: 80;
         in-out property <float> sleep_after: 75;
         in-out property <bool> show_session_switcher: true;
+        // Language picker: labels supplied by Rust, index 0 = English, 1 = 中文.
+        in property <[string]> language_model;
+        in-out property <int> language_index: 0;
         // Custom GIF folder (absolute path); empty means the bundled GIFs.
         in-out property <string> gif_dir;
         // Human-readable label for gif_dir ("Bundled GIFs" when empty).
@@ -875,6 +976,7 @@ slint::slint! {
         callback extra_env_edited(string);
         callback save_basic();
         callback reset_basic();
+        callback language_changed(int);
         callback save_pomodoro();
         callback start_pomodoro();
         callback pause_resume_pomodoro();
@@ -918,16 +1020,16 @@ slint::slint! {
             x: 28px;
             y: 54px;
             width: 120px;
-            text: "Settings";
+            text: I18n.settings-subtitle;
             font-size: 12px;
             font-weight: 600;
             color: Theme.ink-muted;
         }
 
-        SettingsTabButton { x: 24px; y: 84px; width: 128px; height: 36px; text: "Basic"; icon_source: @image-url("../../assets/lucide/sliders-horizontal.svg"); active: root.active_tab == 0; clicked => { root.active_tab = 0; } }
-        SettingsTabButton { x: 24px; y: 128px; width: 128px; height: 36px; text: "Pomodoro"; icon_source: @image-url("../../assets/lucide/timer.svg"); active: root.active_tab == 1; clicked => { root.active_tab = 1; } }
-        SettingsTabButton { x: 24px; y: 172px; width: 128px; height: 36px; text: "LLM Profiles"; icon_source: @image-url("../../assets/lucide/bot.svg"); active: root.active_tab == 2; clicked => { root.active_tab = 2; } }
-        SettingsTabButton { x: 24px; y: 216px; width: 128px; height: 36px; text: "Stats"; icon_source: @image-url("../../assets/lucide/chart-no-axes-column.svg"); active: root.active_tab == 3; clicked => { root.active_tab = 3; } }
+        SettingsTabButton { x: 24px; y: 84px; width: 128px; height: 36px; text: I18n.tab-basic; icon_source: @image-url("../../assets/lucide/sliders-horizontal.svg"); active: root.active_tab == 0; clicked => { root.active_tab = 0; } }
+        SettingsTabButton { x: 24px; y: 128px; width: 128px; height: 36px; text: I18n.tab-pomodoro; icon_source: @image-url("../../assets/lucide/timer.svg"); active: root.active_tab == 1; clicked => { root.active_tab = 1; } }
+        SettingsTabButton { x: 24px; y: 172px; width: 128px; height: 36px; text: I18n.tab-llm; icon_source: @image-url("../../assets/lucide/bot.svg"); active: root.active_tab == 2; clicked => { root.active_tab = 2; } }
+        SettingsTabButton { x: 24px; y: 216px; width: 128px; height: 36px; text: I18n.tab-stats; icon_source: @image-url("../../assets/lucide/chart-no-axes-column.svg"); active: root.active_tab == 3; clicked => { root.active_tab = 3; } }
 
         Rectangle { x: 168px; y: 16px; width: 1px; height: root.height - 32px; background: Theme.hairline; }
 
@@ -944,10 +1046,10 @@ slint::slint! {
                 height: 512px;
                 background: transparent;
 
-                Text { x: 0px; y: 0px; text: "Pet renderer"; font-size: 17px; font-weight: 700; color: Theme.ink; }
-                Text { x: 0px; y: 28px; width: 576px; text: "Tune the desktop pet size and point it at a folder of GIFs."; font-size: 13px; color: Theme.ink-faint; }
+                Text { x: 0px; y: 0px; text: I18n.basic-header; font-size: 17px; font-weight: 700; color: Theme.ink; }
+                Text { x: 0px; y: 28px; width: 576px; text: I18n.basic-sub; font-size: 13px; color: Theme.ink-faint; }
 
-                Text { x: 0px; y: 64px; text: "Pet size"; color: Theme.ink-faint; font-size: 12px; }
+                Text { x: 0px; y: 64px; text: I18n.basic-pet-size; color: Theme.ink-faint; font-size: 12px; }
                 PointerSlider {
                     x: 0px; y: 84px; width: 220px; height: 32px;
                     minimum: 50; maximum: 150; step: 1;
@@ -955,7 +1057,7 @@ slint::slint! {
                     changed(value) => { root.pet_scale_changed(value); }
                 }
                 Text { x: 232px; y: 90px; width: 52px; text: Math.round(root.pet_scale) + "%"; color: Theme.ink; font-size: 13px; }
-                Text { x: 300px; y: 64px; text: "Sleep after"; color: Theme.ink-faint; font-size: 12px; }
+                Text { x: 300px; y: 64px; text: I18n.basic-sleep-after; color: Theme.ink-faint; font-size: 12px; }
                 PointerSlider {
                     x: 300px; y: 84px; width: 220px; height: 32px;
                     minimum: 15; maximum: 1800; step: 15;
@@ -964,7 +1066,7 @@ slint::slint! {
                 }
                 Text { x: 532px; y: 90px; width: 52px; text: Math.round(root.sleep_after) + "s"; color: Theme.ink; font-size: 13px; }
 
-                Text { x: 0px; y: 128px; text: "GIF folder"; color: Theme.ink-faint; font-size: 12px; }
+                Text { x: 0px; y: 128px; text: I18n.basic-gif-folder; color: Theme.ink-faint; font-size: 12px; }
                 Rectangle {
                     x: 0px; y: 148px; width: 316px; height: 32px;
                     background: Theme.sunken;
@@ -980,8 +1082,8 @@ slint::slint! {
                         font-size: 12px;
                     }
                 }
-                ActionButton { x: 328px; y: 148px; width: 116px; height: 32px; text: "Browse…"; kind: "primary"; clicked => { root.browse_gif_dir(); } }
-                ActionButton { x: 456px; y: 148px; width: 128px; height: 32px; text: "Use default"; clicked => { root.clear_gif_dir(); } }
+                ActionButton { x: 328px; y: 148px; width: 116px; height: 32px; text: I18n.btn-browse; kind: "primary"; clicked => { root.browse_gif_dir(); } }
+                ActionButton { x: 456px; y: 148px; width: 128px; height: 32px; text: I18n.btn-use-default; clicked => { root.clear_gif_dir(); } }
 
                 Rectangle {
                     x: 0px; y: 192px; width: 584px; height: 132px;
@@ -999,12 +1101,20 @@ slint::slint! {
                     }
                 }
 
-                Text { x: 0px; y: 344px; text: "Session switcher"; color: Theme.ink-faint; font-size: 12px; }
-                Text { x: 0px; y: 366px; width: 504px; height: 48px; text: "Show the compact focus panel when more than one Claude Code session is active."; wrap: word-wrap; color: Theme.ink; font-size: 13px; }
+                Text { x: 0px; y: 344px; text: I18n.basic-session-switcher; color: Theme.ink-faint; font-size: 12px; }
+                Text { x: 0px; y: 366px; width: 504px; height: 48px; text: I18n.basic-session-switcher-desc; wrap: word-wrap; color: Theme.ink; font-size: 13px; }
                 TogglePill { x: 538px; y: 354px; width: 46px; height: 24px; checked <=> root.show_session_switcher; }
 
-                ActionButton { x: 408px; y: 460px; width: 80px; height: 32px; text: "Save"; kind: "primary"; clicked => { root.save_basic(); } }
-                ActionButton { x: 504px; y: 460px; width: 80px; height: 32px; text: "Reset"; clicked => { root.reset_basic(); } }
+                Text { x: 0px; y: 420px; text: I18n.basic-language; color: Theme.ink-faint; font-size: 12px; }
+                PointerComboBox {
+                    x: 0px; y: 440px; width: 200px; height: 32px;
+                    model: root.language_model;
+                    current-index <=> root.language_index;
+                    selected(index) => { root.language_changed(index); }
+                }
+
+                ActionButton { x: 408px; y: 460px; width: 80px; height: 32px; text: I18n.btn-save; kind: "primary"; clicked => { root.save_basic(); } }
+                ActionButton { x: 504px; y: 460px; width: 80px; height: 32px; text: I18n.btn-reset; clicked => { root.reset_basic(); } }
             }
 
             if active_tab == 1: Rectangle {
@@ -1012,8 +1122,8 @@ slint::slint! {
                 height: 456px;
                 background: transparent;
 
-                Text { x: 0px; y: 0px; text: "Pomodoro"; font-size: 17px; font-weight: 700; color: Theme.ink; }
-                Text { x: 0px; y: 28px; width: 576px; text: "Set focus and break lengths, then control the active timer."; font-size: 13px; color: Theme.ink-faint; }
+                Text { x: 0px; y: 0px; text: I18n.pomo-header; font-size: 17px; font-weight: 700; color: Theme.ink; }
+                Text { x: 0px; y: 28px; width: 576px; text: I18n.pomo-sub; font-size: 13px; color: Theme.ink-faint; }
 
                 Rectangle {
                     x: 0px;
@@ -1027,40 +1137,40 @@ slint::slint! {
                 }
                 Rectangle { x: 24px; y: 88px; width: 52px; height: 52px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.accent-tint-border; }
                 Image { x: 38px; y: 102px; width: 24px; height: 24px; source: @image-url("../../assets/lucide/timer.svg"); image-fit: contain; colorize: Theme.accent; }
-                Text { x: 96px; y: 86px; width: 160px; text: "Current cycle"; color: Theme.ink-muted; font-size: 12px; font-weight: 700; }
+                Text { x: 96px; y: 86px; width: 160px; text: I18n.pomo-current-cycle; color: Theme.ink-muted; font-size: 12px; font-weight: 700; }
                 Text { x: 96px; y: 108px; width: 456px; height: 48px; text: root.pomodoro_status; wrap: word-wrap; color: Theme.ink; font-size: 15px; font-weight: 700; }
-                Text { x: 96px; y: 162px; width: 456px; text: "Tune the rhythm below, then use the controls without leaving this panel."; color: Theme.ink-muted; font-size: 12px; overflow: elide; }
+                Text { x: 96px; y: 162px; width: 456px; text: I18n.pomo-tune; color: Theme.ink-muted; font-size: 12px; overflow: elide; }
 
-                Text { x: 0px; y: 216px; text: "Durations"; color: Theme.ink; font-size: 14px; font-weight: 700; }
-                ActionButton { x: 504px; y: 206px; width: 80px; height: 32px; text: "Save"; clicked => { root.save_pomodoro(); } }
+                Text { x: 0px; y: 216px; text: I18n.pomo-durations; color: Theme.ink; font-size: 14px; font-weight: 700; }
+                ActionButton { x: 504px; y: 206px; width: 80px; height: 32px; text: I18n.btn-save; clicked => { root.save_pomodoro(); } }
 
                 PomodoroDurationTile {
                     x: 0px; y: 248px; width: 184px; height: 116px;
-                    title: "Focus";
-                    hint: "Deep work";
+                    title: I18n.pomo-focus;
+                    hint: I18n.pomo-focus-hint;
                     accent: Theme.accent;
                     value <=> root.focus_minutes;
                 }
                 PomodoroDurationTile {
                     x: 200px; y: 248px; width: 184px; height: 116px;
-                    title: "Short break";
-                    hint: "Quick reset";
+                    title: I18n.pomo-short-break;
+                    hint: I18n.pomo-short-hint;
                     accent: Theme.chart-teal;
                     value <=> root.short_break_minutes;
                 }
                 PomodoroDurationTile {
                     x: 400px; y: 248px; width: 184px; height: 116px;
-                    title: "Long break";
-                    hint: "Full recharge";
+                    title: I18n.pomo-long-break;
+                    hint: I18n.pomo-long-hint;
                     accent: Theme.chart-purple;
                     value <=> root.long_break_minutes;
                 }
 
                 Rectangle { x: 0px; y: 392px; width: 584px; height: 48px; background: Theme.sunken-alt; border-radius: 8px; border-width: 1px; border-color: Theme.hairline; }
-                ActionButton { x: 16px; y: 400px; width: 112px; height: 32px; text: "Start"; kind: "primary"; clicked => { root.start_pomodoro(); } }
+                ActionButton { x: 16px; y: 400px; width: 112px; height: 32px; text: I18n.pomo-start; kind: "primary"; clicked => { root.start_pomodoro(); } }
                 ActionButton { x: 144px; y: 400px; width: 112px; height: 32px; text: root.pause_resume_label; clicked => { root.pause_resume_pomodoro(); } }
-                ActionButton { x: 272px; y: 400px; width: 112px; height: 32px; text: "Skip"; clicked => { root.skip_pomodoro(); } }
-                ActionButton { x: 456px; y: 400px; width: 112px; height: 32px; text: "Stop"; kind: "danger"; clicked => { root.stop_pomodoro(); } }
+                ActionButton { x: 272px; y: 400px; width: 112px; height: 32px; text: I18n.pomo-skip; clicked => { root.skip_pomodoro(); } }
+                ActionButton { x: 456px; y: 400px; width: 112px; height: 32px; text: I18n.pomo-stop; kind: "danger"; clicked => { root.stop_pomodoro(); } }
             }
 
             if active_tab == 2: Rectangle {
@@ -1068,10 +1178,10 @@ slint::slint! {
                 height: 936px;
                 background: transparent;
 
-                Text { x: 0px; y: 0px; text: "Provider profiles"; font-size: 17px; font-weight: 700; color: Theme.ink; }
-                Text { x: 0px; y: 28px; width: 576px; text: "Keep Claude Code provider settings tidy without leaving the pet."; font-size: 13px; color: Theme.ink-faint; }
+                Text { x: 0px; y: 0px; text: I18n.llm-header; font-size: 17px; font-weight: 700; color: Theme.ink; }
+                Text { x: 0px; y: 28px; width: 576px; text: I18n.llm-sub; font-size: 13px; color: Theme.ink-faint; }
 
-                Text { x: 0px; y: 72px; text: "Profile"; color: Theme.ink-faint; font-size: 12px; }
+                Text { x: 0px; y: 72px; text: I18n.llm-profile; color: Theme.ink-faint; font-size: 12px; }
                 PointerComboBox {
                     x: 0px; y: 92px; width: 200px; height: 32px;
                     model: root.profile_model;
@@ -1079,36 +1189,36 @@ slint::slint! {
                     selected(index) => { root.select_profile(index); }
                 }
                 Text { x: 208px; y: 98px; width: 88px; text: root.profile_position; overflow: elide; color: Theme.ink-faint; font-size: 12px; }
-                ActionButton { x: 304px; y: 92px; width: 60px; height: 32px; text: "New"; clicked => { root.new_profile(); } }
-                ActionButton { x: 372px; y: 92px; width: 124px; height: 32px; text: "Import Current"; clicked => { root.import_profile(); } }
-                ActionButton { x: 504px; y: 92px; width: 80px; height: 32px; text: "Delete"; kind: "danger"; clicked => { root.delete_profile(); } }
+                ActionButton { x: 304px; y: 92px; width: 60px; height: 32px; text: I18n.btn-new; clicked => { root.new_profile(); } }
+                ActionButton { x: 372px; y: 92px; width: 124px; height: 32px; text: I18n.btn-import-current; clicked => { root.import_profile(); } }
+                ActionButton { x: 504px; y: 92px; width: 80px; height: 32px; text: I18n.btn-delete; kind: "danger"; clicked => { root.delete_profile(); } }
 
-                FieldGroup { x: 0px; y: 136px; width: 284px; label: "Profile ID"; value <=> root.profile_id; }
-                FieldGroup { x: 300px; y: 136px; width: 284px; label: "Name"; value <=> root.profile_name; }
+                FieldGroup { x: 0px; y: 136px; width: 284px; label: I18n.field-profile-id; value <=> root.profile_id; }
+                FieldGroup { x: 300px; y: 136px; width: 284px; label: I18n.field-name; value <=> root.profile_name; }
 
-                FieldGroup { x: 0px; y: 200px; width: 284px; label: "Base URL"; value <=> root.base_url; }
-                FieldGroup { x: 300px; y: 200px; width: 284px; label: "API key"; input-type: InputType.password; value <=> root.api_key; }
+                FieldGroup { x: 0px; y: 200px; width: 284px; label: I18n.field-base-url; value <=> root.base_url; }
+                FieldGroup { x: 300px; y: 200px; width: 284px; label: I18n.field-api-key; input-type: InputType.password; value <=> root.api_key; }
 
-                FieldGroup { x: 0px; y: 264px; width: 284px; label: "Auth token (proxy)"; input-type: InputType.password; value <=> root.auth_token; }
+                FieldGroup { x: 0px; y: 264px; width: 284px; label: I18n.field-auth-token; input-type: InputType.password; value <=> root.auth_token; }
 
-                Text { x: 0px; y: 332px; text: "Models"; font-size: 14px; font-weight: 700; color: Theme.ink; }
-                Text { x: 0px; y: 354px; width: 420px; height: 16px; vertical-alignment: center; text: "Toggle 1M per model to request a 1M context window. Fetch, then pick an id."; overflow: elide; color: Theme.ink-faint; font-size: 11px; }
-                ActionButton { x: 448px; y: 330px; width: 136px; height: 32px; text: "Fetch models"; kind: "primary"; clicked => { root.fetch_models(); } }
+                Text { x: 0px; y: 332px; text: I18n.llm-models; font-size: 14px; font-weight: 700; color: Theme.ink; }
+                Text { x: 0px; y: 354px; width: 420px; height: 16px; vertical-alignment: center; text: I18n.llm-models-hint; overflow: elide; color: Theme.ink-faint; font-size: 11px; }
+                ActionButton { x: 448px; y: 330px; width: 136px; height: 32px; text: I18n.btn-fetch-models; kind: "primary"; clicked => { root.fetch_models(); } }
 
-                ModelField { x: 0px; y: 380px; width: 584px; label: "Default model"; value <=> root.model; one-m <=> root.model_1m; options: root.available_models; }
-                ModelField { x: 0px; y: 436px; width: 584px; label: "Opus"; value <=> root.opus_model; one-m <=> root.opus_1m; options: root.available_models; }
-                ModelField { x: 0px; y: 492px; width: 584px; label: "Sonnet"; value <=> root.sonnet_model; one-m <=> root.sonnet_1m; options: root.available_models; }
-                ModelField { x: 0px; y: 548px; width: 584px; label: "Haiku"; value <=> root.haiku_model; one-m <=> root.haiku_1m; options: root.available_models; }
+                ModelField { x: 0px; y: 380px; width: 584px; label: I18n.field-default-model; value <=> root.model; one-m <=> root.model_1m; options: root.available_models; }
+                ModelField { x: 0px; y: 436px; width: 584px; label: I18n.field-opus; value <=> root.opus_model; one-m <=> root.opus_1m; options: root.available_models; }
+                ModelField { x: 0px; y: 492px; width: 584px; label: I18n.field-sonnet; value <=> root.sonnet_model; one-m <=> root.sonnet_1m; options: root.available_models; }
+                ModelField { x: 0px; y: 548px; width: 584px; label: I18n.field-haiku; value <=> root.haiku_model; one-m <=> root.haiku_1m; options: root.available_models; }
 
-                Text { x: 0px; y: 612px; text: "Quick switches"; color: Theme.ink-faint; font-size: 12px; }
-                EnvToggle { x: 0px; y: 632px; width: 184px; text: "Tool Search"; checked <=> root.env_tool_search; toggled(on) => { root.toggle_env_tool_search(on); } }
-                EnvToggle { x: 200px; y: 632px; width: 184px; text: "No auto-update"; checked <=> root.env_no_autoupdate; toggled(on) => { root.toggle_env_no_autoupdate(on); } }
-                EnvToggle { x: 400px; y: 632px; width: 184px; text: "Max thinking"; checked <=> root.env_max_thinking; toggled(on) => { root.toggle_env_max_thinking(on); } }
-                EnvToggle { x: 0px; y: 664px; width: 400px; text: "Hide git attribution (commit/PR signature)"; checked <=> root.hide_attribution; }
+                Text { x: 0px; y: 612px; text: I18n.llm-quick-switches; color: Theme.ink-faint; font-size: 12px; }
+                EnvToggle { x: 0px; y: 632px; width: 184px; text: I18n.env-tool-search; checked <=> root.env_tool_search; toggled(on) => { root.toggle_env_tool_search(on); } }
+                EnvToggle { x: 200px; y: 632px; width: 184px; text: I18n.env-no-autoupdate; checked <=> root.env_no_autoupdate; toggled(on) => { root.toggle_env_no_autoupdate(on); } }
+                EnvToggle { x: 400px; y: 632px; width: 184px; text: I18n.env-max-thinking; checked <=> root.env_max_thinking; toggled(on) => { root.toggle_env_max_thinking(on); } }
+                EnvToggle { x: 0px; y: 664px; width: 400px; text: I18n.env-hide-attribution; checked <=> root.hide_attribution; }
 
-                Text { x: 0px; y: 716px; text: "Extra env"; color: Theme.ink-faint; font-size: 12px; }
+                Text { x: 0px; y: 716px; text: I18n.llm-extra-env; color: Theme.ink-faint; font-size: 12px; }
                 MonoTextEdit { x: 0px; y: 736px; width: 284px; height: 72px; text <=> root.extra_env; edited(t) => { root.extra_env_edited(t); } }
-                Text { x: 300px; y: 716px; text: "OpenAI body"; color: Theme.ink-faint; font-size: 12px; }
+                Text { x: 300px; y: 716px; text: I18n.llm-openai-body; color: Theme.ink-faint; font-size: 12px; }
                 MonoTextEdit { x: 300px; y: 736px; width: 284px; height: 72px; text <=> root.openai_extra_body; }
 
                 Rectangle { x: 0px; y: 828px; width: 432px; height: 96px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
@@ -1119,8 +1229,8 @@ slint::slint! {
                 StatBarRow { x: 14px; y: 900px; width: 240px; height: 18px; label: "7d"; value: root.profile_usage_seven_day_value; bar: root.profile_usage_seven_day_bar; accent: root.profile_usage_seven_day_bar >= 90 ? Theme.danger : (root.profile_usage_seven_day_bar >= 70 ? Theme.chart-amber : Theme.chart-purple); }
                 Text { x: 262px; y: 900px; width: 156px; height: 18px; text: root.profile_usage_seven_day_reset; overflow: elide; vertical-alignment: center; color: Theme.ink-secondary; font-size: 11px; }
 
-                ActionButton { x: 448px; y: 828px; width: 64px; height: 32px; text: "Save"; clicked => { root.save_profile(); } }
-                ActionButton { x: 520px; y: 828px; width: 64px; height: 32px; text: "Use"; kind: "primary"; clicked => { root.use_profile(); } }
+                ActionButton { x: 448px; y: 828px; width: 64px; height: 32px; text: I18n.btn-save; clicked => { root.save_profile(); } }
+                ActionButton { x: 520px; y: 828px; width: 64px; height: 32px; text: I18n.btn-use; kind: "primary"; clicked => { root.use_profile(); } }
             }
 
             if active_tab == 3: Rectangle {
@@ -1128,18 +1238,18 @@ slint::slint! {
                 height: 812px;
                 background: transparent;
 
-                Text { x: 0px; y: 0px; text: "Session ledger"; font-size: 17px; font-weight: 700; color: Theme.ink; }
-                Text { x: 0px; y: 28px; width: 576px; text: "A quiet local record of Claude Code activity observed by claudie."; font-size: 13px; color: Theme.ink-faint; }
+                Text { x: 0px; y: 0px; text: I18n.stats-header; font-size: 17px; font-weight: 700; color: Theme.ink; }
+                Text { x: 0px; y: 28px; width: 576px; text: I18n.stats-sub; font-size: 13px; color: Theme.ink-faint; }
 
                 // Headline metrics — today, with a 7-day comparison beneath.
-                StatKpiCard { x: 0px; y: 60px; width: 137px; height: 74px; label: "Prompts"; value: root.stats_kpi_prompts; sub: root.stats_kpi_prompts_sub; accent: Theme.accent; }
-                StatKpiCard { x: 149px; y: 60px; width: 137px; height: 74px; label: "Tokens"; value: root.stats_kpi_tokens; sub: root.stats_kpi_tokens_sub; accent: Theme.chart-blue; }
-                StatKpiCard { x: 298px; y: 60px; width: 137px; height: 74px; label: "Cache hit"; value: root.stats_kpi_cache; sub: root.stats_kpi_cache_sub; accent: Theme.chart-teal; }
-                StatKpiCard { x: 447px; y: 60px; width: 137px; height: 74px; label: "Tool calls"; value: root.stats_kpi_tools; sub: root.stats_kpi_tools_sub; accent: Theme.chart-purple; }
+                StatKpiCard { x: 0px; y: 60px; width: 137px; height: 74px; label: I18n.stats-kpi-prompts; value: root.stats_kpi_prompts; sub: root.stats_kpi_prompts_sub; accent: Theme.accent; }
+                StatKpiCard { x: 149px; y: 60px; width: 137px; height: 74px; label: I18n.stats-kpi-tokens; value: root.stats_kpi_tokens; sub: root.stats_kpi_tokens_sub; accent: Theme.chart-blue; }
+                StatKpiCard { x: 298px; y: 60px; width: 137px; height: 74px; label: I18n.stats-kpi-cache; value: root.stats_kpi_cache; sub: root.stats_kpi_cache_sub; accent: Theme.chart-teal; }
+                StatKpiCard { x: 447px; y: 60px; width: 137px; height: 74px; label: I18n.stats-kpi-tools; value: root.stats_kpi_tools; sub: root.stats_kpi_tools_sub; accent: Theme.chart-purple; }
 
                 // Activity trend — prompts per day across the last 14 days.
                 Rectangle { x: 0px; y: 148px; width: 584px; height: 154px; background: Theme.sunken; border-radius: 8px; border-width: 1px; border-color: Theme.card-border;
-                    Text { x: 14px; y: 14px; text: "Activity"; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                    Text { x: 14px; y: 14px; text: I18n.stats-activity; color: Theme.ink; font-size: 14px; font-weight: 600; }
                     Text { x: 200px; y: 16px; width: 370px; text: root.stats_trend_caption; horizontal-alignment: right; overflow: elide; color: Theme.ink-muted; font-size: 11px; }
                     for bar[i] in root.stats_trend: Rectangle {
                         x: 14px + i * 39px;
@@ -1180,24 +1290,24 @@ slint::slint! {
 
                 // Detailed 7-day distribution.
                 Rectangle { x: 0px; y: 390px; width: 284px; height: 200px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
-                Text { x: 24px; y: 410px; width: 236px; text: "Tool mix · 7 days"; color: Theme.ink; font-size: 14px; font-weight: 600; }
-                StatBarRow { x: 24px; y: 440px; width: 236px; height: 20px; label: "Write"; value: root.stats_recent_write_value; bar: root.stats_recent_write_bar; accent: Theme.chart-teal; }
-                StatBarRow { x: 24px; y: 464px; width: 236px; height: 20px; label: "Bash"; value: root.stats_recent_bash_value; bar: root.stats_recent_bash_bar; accent: Theme.chart-blue; }
-                StatBarRow { x: 24px; y: 488px; width: 236px; height: 20px; label: "Search"; value: root.stats_recent_search_value; bar: root.stats_recent_search_bar; accent: Theme.chart-amber; }
-                StatBarRow { x: 24px; y: 512px; width: 236px; height: 20px; label: "Agent"; value: root.stats_recent_subagent_value; bar: root.stats_recent_subagent_bar; accent: Theme.chart-purple; }
-                StatBarRow { x: 24px; y: 536px; width: 236px; height: 20px; label: "Perm"; value: root.stats_recent_permission_value; bar: root.stats_recent_permission_bar; accent: Theme.accent; }
-                StatBarRow { x: 24px; y: 560px; width: 236px; height: 20px; label: "Choice"; value: root.stats_recent_choice_value; bar: root.stats_recent_choice_bar; accent: Theme.chart-olive; }
+                Text { x: 24px; y: 410px; width: 236px; text: I18n.stats-tool-mix; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                StatBarRow { x: 24px; y: 440px; width: 236px; height: 20px; label: I18n.stat-write; value: root.stats_recent_write_value; bar: root.stats_recent_write_bar; accent: Theme.chart-teal; }
+                StatBarRow { x: 24px; y: 464px; width: 236px; height: 20px; label: I18n.stat-bash; value: root.stats_recent_bash_value; bar: root.stats_recent_bash_bar; accent: Theme.chart-blue; }
+                StatBarRow { x: 24px; y: 488px; width: 236px; height: 20px; label: I18n.stat-search; value: root.stats_recent_search_value; bar: root.stats_recent_search_bar; accent: Theme.chart-amber; }
+                StatBarRow { x: 24px; y: 512px; width: 236px; height: 20px; label: I18n.stat-agent; value: root.stats_recent_subagent_value; bar: root.stats_recent_subagent_bar; accent: Theme.chart-purple; }
+                StatBarRow { x: 24px; y: 536px; width: 236px; height: 20px; label: I18n.stat-perm; value: root.stats_recent_permission_value; bar: root.stats_recent_permission_bar; accent: Theme.accent; }
+                StatBarRow { x: 24px; y: 560px; width: 236px; height: 20px; label: I18n.stat-choice; value: root.stats_recent_choice_value; bar: root.stats_recent_choice_bar; accent: Theme.chart-olive; }
 
                 Rectangle { x: 300px; y: 390px; width: 284px; height: 200px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.card-border; }
-                Text { x: 324px; y: 410px; width: 236px; text: "Tokens · 7 days"; color: Theme.ink; font-size: 14px; font-weight: 600; }
-                StatBarRow { x: 324px; y: 440px; width: 236px; height: 20px; label: "Input"; value: root.stats_recent_input_value; bar: root.stats_recent_input_bar; accent: Theme.chart-teal; }
-                StatBarRow { x: 324px; y: 464px; width: 236px; height: 20px; label: "Output"; value: root.stats_recent_output_value; bar: root.stats_recent_output_bar; accent: Theme.chart-blue; }
-                StatBarRow { x: 324px; y: 488px; width: 236px; height: 20px; label: "Cache W"; value: root.stats_recent_cache_write_value; bar: root.stats_recent_cache_write_bar; accent: Theme.chart-amber; }
-                StatBarRow { x: 324px; y: 512px; width: 236px; height: 20px; label: "Cache R"; value: root.stats_recent_cache_read_value; bar: root.stats_recent_cache_read_bar; accent: Theme.chart-purple; }
+                Text { x: 324px; y: 410px; width: 236px; text: I18n.stats-tokens-7d; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                StatBarRow { x: 324px; y: 440px; width: 236px; height: 20px; label: I18n.stat-input; value: root.stats_recent_input_value; bar: root.stats_recent_input_bar; accent: Theme.chart-teal; }
+                StatBarRow { x: 324px; y: 464px; width: 236px; height: 20px; label: I18n.stat-output; value: root.stats_recent_output_value; bar: root.stats_recent_output_bar; accent: Theme.chart-blue; }
+                StatBarRow { x: 324px; y: 488px; width: 236px; height: 20px; label: I18n.stat-cache-w; value: root.stats_recent_cache_write_value; bar: root.stats_recent_cache_write_bar; accent: Theme.chart-amber; }
+                StatBarRow { x: 324px; y: 512px; width: 236px; height: 20px; label: I18n.stat-cache-r; value: root.stats_recent_cache_read_value; bar: root.stats_recent_cache_read_bar; accent: Theme.chart-purple; }
 
                 // Per-model token usage across the last 7 days, one line each.
                 Rectangle { x: 0px; y: 606px; width: 584px; height: 196px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.card-border;
-                    Text { x: 16px; y: 14px; text: "Tokens by model · 7 days"; color: Theme.ink; font-size: 14px; font-weight: 600; }
+                    Text { x: 16px; y: 14px; text: I18n.stats-tokens-by-model; color: Theme.ink; font-size: 14px; font-weight: 600; }
                     Text { x: 280px; y: 16px; width: 288px; text: root.stats_model_caption; horizontal-alignment: right; overflow: elide; color: Theme.ink-muted; font-size: 11px; }
 
                     // Plot area; lines are SVG polylines in a 0..100 viewbox.
@@ -1460,7 +1570,7 @@ slint::slint! {
             width: parent.width - 52px;
             height: 30px;
             text: data.other_text;
-            placeholder-text: "Type your answer...";
+            placeholder-text: I18n.prompt-other-placeholder;
             edited(text) => { root.other_text_changed(text); }
         }
     }
@@ -1472,7 +1582,7 @@ slint::slint! {
         max-width: 640px;
         preferred-height: 640px;
         min-height: 496px;
-        title: "claudie request";
+        title: I18n.prompt-request-title;
         icon: @image-url("../../assets/icon.ico");
         background: Theme.window-bg;
         default-font-family: "Maple Mono CN";
@@ -1611,7 +1721,7 @@ slint::slint! {
 
             if !is_choice: Text {
                 height: 16px;
-                text: "Use Ctrl+Shift+Y for Allow and Ctrl+Shift+N for Deny.";
+                text: I18n.prompt-hint;
                 font-size: 12px;
                 color: Theme.ink-faint;
             }
@@ -1629,15 +1739,15 @@ slint::slint! {
                 height: 40px;
                 spacing: 12px;
 
-                if !is_choice: ActionButton { width: 96px; kind: "danger"; text: "Deny"; clicked => { root.deny(); } }
-                if is_choice: ActionButton { width: 96px; kind: "danger"; text: "Cancel"; clicked => { root.cancel_choice(); } }
+                if !is_choice: ActionButton { width: 96px; kind: "danger"; text: I18n.prompt-deny; clicked => { root.deny(); } }
+                if is_choice: ActionButton { width: 96px; kind: "danger"; text: I18n.prompt-cancel; clicked => { root.cancel_choice(); } }
 
                 Rectangle { horizontal-stretch: 1; }
 
-                if !is_choice: ActionButton { width: 104px; text: "Always"; clicked => { root.allow_always(); } }
-                if !is_choice: ActionButton { width: 96px; kind: "primary"; text: "Allow"; clicked => { root.allow_once(); } }
+                if !is_choice: ActionButton { width: 104px; text: I18n.prompt-always; clicked => { root.allow_always(); } }
+                if !is_choice: ActionButton { width: 96px; kind: "primary"; text: I18n.prompt-allow; clicked => { root.allow_once(); } }
 
-                if is_choice: ActionButton { width: 104px; kind: "primary"; text: "Submit"; enabled: root.submit_enabled; clicked => { root.submit_choice(); } }
+                if is_choice: ActionButton { width: 104px; kind: "primary"; text: I18n.prompt-submit; enabled: root.submit_enabled; clicked => { root.submit_choice(); } }
             }
         }
     }

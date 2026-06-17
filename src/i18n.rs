@@ -1,0 +1,673 @@
+//! Lightweight, dependency-free internationalization.
+//!
+//! Two languages are supported (English and Simplified Chinese). All
+//! user-facing text is held in a [`Strings`] table with one constructor per
+//! language. The current language is a process-wide value set once at UI
+//! startup (and again whenever the user switches it in Settings); Rust call
+//! sites read it through [`strings`]. The Slint windows cannot read a Rust
+//! global, so their markup binds to an `I18n` global whose properties are
+//! pushed from Rust at window-creation time (see the `apply_*` helpers in the
+//! UI modules).
+
+use std::sync::atomic::{AtomicU8, Ordering};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Lang {
+    En,
+    Zh,
+}
+
+impl Default for Lang {
+    fn default() -> Self {
+        detect_system_lang()
+    }
+}
+
+/// Pick a default language from the Windows UI language the first time settings
+/// are created. Chinese (primary language id `0x04`) maps to [`Lang::Zh`];
+/// everything else falls back to English.
+pub(crate) fn detect_system_lang() -> Lang {
+    // SAFETY: GetUserDefaultUILanguage takes no arguments and only reads a
+    // process-global value; it is always safe to call.
+    let langid = unsafe { windows_sys::Win32::Globalization::GetUserDefaultUILanguage() };
+    if (langid & 0x3ff) == 0x04 {
+        Lang::Zh
+    } else {
+        Lang::En
+    }
+}
+
+// 0 = En, 1 = Zh. Defaults to English so unit tests (which never touch the UI
+// startup path) observe stable English strings regardless of the test host's
+// system locale.
+static CURRENT: AtomicU8 = AtomicU8::new(0);
+
+pub(crate) fn set_current(lang: Lang) {
+    CURRENT.store(matches!(lang, Lang::Zh) as u8, Ordering::Relaxed);
+}
+
+pub(crate) fn current() -> Lang {
+    if CURRENT.load(Ordering::Relaxed) == 1 {
+        Lang::Zh
+    } else {
+        Lang::En
+    }
+}
+
+/// The active language's string table.
+pub(crate) fn strings() -> &'static Strings {
+    match current() {
+        Lang::En => &EN,
+        Lang::Zh => &ZH,
+    }
+}
+
+static EN: Strings = Strings::en();
+static ZH: Strings = Strings::zh();
+
+/// Every user-facing string in one table. Fields whose name ends in `_fmt`
+/// carry a `{}` placeholder filled with `.replace("{}", value)` at the call
+/// site (keeping the template a plain `&'static str` and letting each
+/// language place the variable where it reads naturally).
+pub(crate) struct Strings {
+    // --- Settings window: chrome / tabs ---
+    pub settings_title: &'static str,
+    pub settings_subtitle: &'static str,
+    pub tab_basic: &'static str,
+    pub tab_pomodoro: &'static str,
+    pub tab_llm: &'static str,
+    pub tab_stats: &'static str,
+    pub btn_save: &'static str,
+    pub btn_reset: &'static str,
+
+    // --- Settings: Basic tab ---
+    pub basic_header: &'static str,
+    pub basic_sub: &'static str,
+    pub basic_pet_size: &'static str,
+    pub basic_sleep_after: &'static str,
+    pub basic_gif_folder: &'static str,
+    pub btn_browse: &'static str,
+    pub btn_use_default: &'static str,
+    pub basic_language: &'static str,
+    pub basic_session_switcher: &'static str,
+    pub basic_session_switcher_desc: &'static str,
+
+    // --- Settings: Pomodoro tab ---
+    pub pomo_header: &'static str,
+    pub pomo_sub: &'static str,
+    pub pomo_current_cycle: &'static str,
+    pub pomo_tune: &'static str,
+    pub pomo_durations: &'static str,
+    pub pomo_focus: &'static str,
+    pub pomo_focus_hint: &'static str,
+    pub pomo_short_break: &'static str,
+    pub pomo_short_hint: &'static str,
+    pub pomo_long_break: &'static str,
+    pub pomo_long_hint: &'static str,
+    pub pomo_start: &'static str,
+    pub pomo_skip: &'static str,
+    pub pomo_stop: &'static str,
+
+    // --- Settings: LLM Profiles tab ---
+    pub llm_header: &'static str,
+    pub llm_sub: &'static str,
+    pub llm_profile: &'static str,
+    pub btn_new: &'static str,
+    pub btn_import_current: &'static str,
+    pub btn_delete: &'static str,
+    pub field_profile_id: &'static str,
+    pub field_name: &'static str,
+    pub field_base_url: &'static str,
+    pub field_api_key: &'static str,
+    pub field_auth_token: &'static str,
+    pub llm_models: &'static str,
+    pub llm_models_hint: &'static str,
+    pub btn_fetch_models: &'static str,
+    pub field_default_model: &'static str,
+    pub field_opus: &'static str,
+    pub field_sonnet: &'static str,
+    pub field_haiku: &'static str,
+    pub llm_quick_switches: &'static str,
+    pub env_tool_search: &'static str,
+    pub env_no_autoupdate: &'static str,
+    pub env_max_thinking: &'static str,
+    pub env_hide_attribution: &'static str,
+    pub llm_extra_env: &'static str,
+    pub llm_openai_body: &'static str,
+    pub btn_use: &'static str,
+
+    // --- Settings: Stats tab ---
+    pub stats_header: &'static str,
+    pub stats_sub: &'static str,
+    pub stats_kpi_prompts: &'static str,
+    pub stats_kpi_tokens: &'static str,
+    pub stats_kpi_cache: &'static str,
+    pub stats_kpi_tools: &'static str,
+    pub stats_activity: &'static str,
+    pub stats_tool_mix: &'static str,
+    pub stats_tokens_7d: &'static str,
+    pub stats_tokens_by_model: &'static str,
+    pub stat_write: &'static str,
+    pub stat_bash: &'static str,
+    pub stat_search: &'static str,
+    pub stat_agent: &'static str,
+    pub stat_perm: &'static str,
+    pub stat_choice: &'static str,
+    pub stat_input: &'static str,
+    pub stat_output: &'static str,
+    pub stat_cache_w: &'static str,
+    pub stat_cache_r: &'static str,
+
+    // --- Prompt window ---
+    pub prompt_hint: &'static str,
+    pub prompt_deny: &'static str,
+    pub prompt_cancel: &'static str,
+    pub prompt_always: &'static str,
+    pub prompt_allow: &'static str,
+    pub prompt_submit: &'static str,
+    pub prompt_other_placeholder: &'static str,
+    pub prompt_request_title: &'static str,
+
+    // --- Context / tray menu ---
+    pub menu_settings: &'static str,
+    pub menu_start_pomodoro: &'static str,
+    pub menu_resume_pomodoro: &'static str,
+    pub menu_pause_pomodoro: &'static str,
+    pub menu_skip_pomodoro: &'static str,
+    pub menu_stop_pomodoro: &'static str,
+    pub menu_start_fishing: &'static str,
+    pub menu_stop_fishing: &'static str,
+    pub menu_exit: &'static str,
+    pub menu_llm_profile: &'static str,
+
+    // --- Permission / choice popup (Rust-built) ---
+    pub permission_title: &'static str,
+    pub permission_subtitle_fmt: &'static str,
+    pub choice_subtitle: &'static str,
+    pub hint_answer_all: &'static str,
+    pub hint_fill_other: &'static str,
+    pub meta_session_unknown: &'static str,
+    pub meta_session_prefix: &'static str,
+    pub other_label: &'static str,
+    pub other_desc: &'static str,
+
+    // --- Session switcher / fishing HUD ---
+    pub session_default_name: &'static str,
+    pub session_ready: &'static str,
+    pub session_thinking: &'static str,
+    pub session_tool: &'static str,
+    pub session_permission: &'static str,
+    pub session_choice: &'static str,
+    pub session_error: &'static str,
+    pub session_denied: &'static str,
+    pub session_ended: &'static str,
+    pub fishing_casting: &'static str,
+    pub fishing_waiting_bite: &'static str,
+    pub fishing_fish_on: &'static str,
+    pub fishing_tap_reel: &'static str,
+    pub fishing_caught: &'static str,
+    pub fishing_escaped: &'static str,
+    pub fishing_line_slack: &'static str,
+
+    // --- Usage display ---
+    pub usage_provider_usage: &'static str,
+    pub usage_title_fmt: &'static str,
+    pub usage_plan_fmt: &'static str,
+    pub usage_updated_fmt: &'static str,
+    pub usage_5h7d_limits: &'static str,
+    pub usage_no_cached: &'static str,
+    pub usage_no_limits: &'static str,
+    pub usage_save_or_select: &'static str,
+    pub usage_reset_due: &'static str,
+    pub usage_resets_fmt: &'static str,
+    pub usage_in_fmt: &'static str,
+    pub usage_just_now: &'static str,
+    pub usage_ago_fmt: &'static str,
+
+    // --- Status messages: Basic ---
+    pub gif_bundled: &'static str,
+    pub gif_name_hint_fmt: &'static str,
+    pub gif_using_bundled_fmt: &'static str,
+    pub gif_all_found_fmt: &'static str,
+    pub gif_using_default_fmt: &'static str,
+    pub folder_dialog_title: &'static str,
+    pub status_save_basic_fail_fmt: &'static str,
+    pub status_saved_pet: &'static str,
+    pub status_saved_reload_fail_fmt: &'static str,
+    pub status_reset_basic: &'static str,
+
+    // --- Status messages: Pomodoro ---
+    pub pomo_not_ready: &'static str,
+    pub status_save_pomodoro_fail_fmt: &'static str,
+    pub status_saved_pomodoro: &'static str,
+    pub pomo_status_stopped: &'static str,
+    pub pomo_status_running: &'static str,
+    pub pomo_status_paused: &'static str,
+    pub pomo_completed_fmt: &'static str,
+    pub pomo_resume: &'static str,
+    pub pomo_pause: &'static str,
+
+    // --- Status messages: LLM Profiles ---
+    pub status_editing_new: &'static str,
+    pub status_new_profile: &'static str,
+    pub status_fetching_models: &'static str,
+    pub status_fetched_fmt: &'static str,
+    pub status_fetch_fail_fmt: &'static str,
+    pub status_save_profile_fail_fmt: &'static str,
+    pub status_onboard_fail_fmt: &'static str,
+    pub status_apply_fail_fmt: &'static str,
+    pub status_using_fmt: &'static str,
+    pub status_saved_fmt: &'static str,
+    pub status_no_import: &'static str,
+    pub status_import_save_fail_fmt: &'static str,
+    pub status_imported_fmt: &'static str,
+    pub status_official_no_delete: &'static str,
+    pub status_profile_not_found: &'static str,
+    pub status_delete_fail_fmt: &'static str,
+    pub status_deleted_fmt: &'static str,
+
+    // --- Stats captions ---
+    pub stats_kpi_sub_fmt: &'static str,
+    pub stats_trend_caption_fmt: &'static str,
+    pub stats_no_model_data: &'static str,
+    pub stats_model_caption_fmt: &'static str,
+    pub highlight_active_days: &'static str,
+    pub highlight_avg_per_prompt: &'static str,
+    pub highlight_top_tool: &'static str,
+    pub highlight_focus_done: &'static str,
+}
+
+impl Strings {
+    const fn en() -> Self {
+        Self {
+            settings_title: "claudie Settings",
+            settings_subtitle: "Settings",
+            tab_basic: "Basic",
+            tab_pomodoro: "Pomodoro",
+            tab_llm: "LLM Profiles",
+            tab_stats: "Stats",
+            btn_save: "Save",
+            btn_reset: "Reset",
+
+            basic_header: "Pet renderer",
+            basic_sub: "Tune the desktop pet size and point it at a folder of GIFs.",
+            basic_pet_size: "Pet size",
+            basic_sleep_after: "Sleep after",
+            basic_gif_folder: "GIF folder",
+            btn_browse: "Browse…",
+            btn_use_default: "Use default",
+            basic_language: "Language",
+            basic_session_switcher: "Session switcher",
+            basic_session_switcher_desc: "Show the compact focus panel when more than one Claude Code session is active.",
+
+            pomo_header: "Pomodoro",
+            pomo_sub: "Set focus and break lengths, then control the active timer.",
+            pomo_current_cycle: "Current cycle",
+            pomo_tune: "Tune the rhythm below, then use the controls without leaving this panel.",
+            pomo_durations: "Durations",
+            pomo_focus: "Focus",
+            pomo_focus_hint: "Deep work",
+            pomo_short_break: "Short break",
+            pomo_short_hint: "Quick reset",
+            pomo_long_break: "Long break",
+            pomo_long_hint: "Full recharge",
+            pomo_start: "Start",
+            pomo_skip: "Skip",
+            pomo_stop: "Stop",
+
+            llm_header: "Provider profiles",
+            llm_sub: "Keep Claude Code provider settings tidy without leaving the pet.",
+            llm_profile: "Profile",
+            btn_new: "New",
+            btn_import_current: "Import Current",
+            btn_delete: "Delete",
+            field_profile_id: "Profile ID",
+            field_name: "Name",
+            field_base_url: "Base URL",
+            field_api_key: "API key",
+            field_auth_token: "Auth token (proxy)",
+            llm_models: "Models",
+            llm_models_hint: "Toggle 1M per model to request a 1M context window. Fetch, then pick an id.",
+            btn_fetch_models: "Fetch models",
+            field_default_model: "Default model",
+            field_opus: "Opus",
+            field_sonnet: "Sonnet",
+            field_haiku: "Haiku",
+            llm_quick_switches: "Quick switches",
+            env_tool_search: "Tool Search",
+            env_no_autoupdate: "No auto-update",
+            env_max_thinking: "Max thinking",
+            env_hide_attribution: "Hide git attribution (commit/PR signature)",
+            llm_extra_env: "Extra env",
+            llm_openai_body: "OpenAI body",
+            btn_use: "Use",
+
+            stats_header: "Session ledger",
+            stats_sub: "A quiet local record of Claude Code activity observed by claudie.",
+            stats_kpi_prompts: "Prompts",
+            stats_kpi_tokens: "Tokens",
+            stats_kpi_cache: "Cache hit",
+            stats_kpi_tools: "Tool calls",
+            stats_activity: "Activity",
+            stats_tool_mix: "Tool mix · 7 days",
+            stats_tokens_7d: "Tokens · 7 days",
+            stats_tokens_by_model: "Tokens by model · 7 days",
+            stat_write: "Write",
+            stat_bash: "Bash",
+            stat_search: "Search",
+            stat_agent: "Agent",
+            stat_perm: "Perm",
+            stat_choice: "Choice",
+            stat_input: "Input",
+            stat_output: "Output",
+            stat_cache_w: "Cache W",
+            stat_cache_r: "Cache R",
+
+            prompt_hint: "Use Ctrl+Shift+Y for Allow and Ctrl+Shift+N for Deny.",
+            prompt_deny: "Deny",
+            prompt_cancel: "Cancel",
+            prompt_always: "Always",
+            prompt_allow: "Allow",
+            prompt_submit: "Submit",
+            prompt_other_placeholder: "Type your answer...",
+            prompt_request_title: "claudie request",
+
+            menu_settings: "Settings...",
+            menu_start_pomodoro: "Start Pomodoro",
+            menu_resume_pomodoro: "Resume Pomodoro",
+            menu_pause_pomodoro: "Pause Pomodoro",
+            menu_skip_pomodoro: "Skip Pomodoro",
+            menu_stop_pomodoro: "Stop Pomodoro",
+            menu_start_fishing: "Start Fishing",
+            menu_stop_fishing: "Stop Fishing",
+            menu_exit: "Exit",
+            menu_llm_profile: "LLM Profile",
+
+            permission_title: "Permission request",
+            permission_subtitle_fmt: "{} wants access",
+            choice_subtitle: "Claude Code is asking for input.",
+            hint_answer_all: "Please answer every question before submitting.",
+            hint_fill_other: "Please fill in the 'Other' answer before submitting.",
+            meta_session_unknown: "session unknown",
+            meta_session_prefix: "session ",
+            other_label: "Other...",
+            other_desc: "Type a custom answer.",
+
+            session_default_name: "Session",
+            session_ready: "ready",
+            session_thinking: "thinking",
+            session_tool: "tool",
+            session_permission: "permission",
+            session_choice: "choice",
+            session_error: "error",
+            session_denied: "denied",
+            session_ended: "ended",
+            fishing_casting: "CASTING",
+            fishing_waiting_bite: "Waiting for a bite",
+            fishing_fish_on: "FISH ON!",
+            fishing_tap_reel: "TAP TO REEL",
+            fishing_caught: "CAUGHT!",
+            fishing_escaped: "ESCAPED",
+            fishing_line_slack: "The line went slack",
+
+            usage_provider_usage: "Provider usage",
+            usage_title_fmt: "{} usage",
+            usage_plan_fmt: "{} plan",
+            usage_updated_fmt: "updated {}",
+            usage_5h7d_limits: "5h/7d usage limits",
+            usage_no_cached: "No cached usage for this provider yet.",
+            usage_no_limits: "This provider has not reported 5h/7d limits.",
+            usage_save_or_select: "Save or select a provider profile.",
+            usage_reset_due: "reset due",
+            usage_resets_fmt: "resets {}",
+            usage_in_fmt: "in {}",
+            usage_just_now: "just now",
+            usage_ago_fmt: "{} ago",
+
+            gif_bundled: "Bundled GIFs",
+            gif_name_hint_fmt: "Name files: {}. Any missing file uses the bundled default.",
+            gif_using_bundled_fmt: "Using bundled GIFs. {}",
+            gif_all_found_fmt: "All {} GIFs found in this folder. {}",
+            gif_using_default_fmt: "Using the bundled default for: {}. {}",
+            folder_dialog_title: "Choose a GIF folder for the pet",
+            status_save_basic_fail_fmt: "Failed to save basic settings: {}",
+            status_saved_pet: "Saved pet settings.",
+            status_saved_reload_fail_fmt: "Saved, but failed to reload pet renderer: {}",
+            status_reset_basic: "Reset pet fields to defaults.",
+
+            pomo_not_ready: "Pomodoro data is not ready.",
+            status_save_pomodoro_fail_fmt: "Failed to save pomodoro settings: {}",
+            status_saved_pomodoro: "Saved pomodoro settings.",
+            pomo_status_stopped: "Stopped",
+            pomo_status_running: "Running",
+            pomo_status_paused: "Paused",
+            pomo_completed_fmt: "Completed focus sessions: {}",
+            pomo_resume: "Resume",
+            pomo_pause: "Pause",
+
+            status_editing_new: "Editing a new profile.",
+            status_new_profile: "New profile",
+            status_fetching_models: "Fetching models…",
+            status_fetched_fmt: "Fetched {} models. Pick one to fill Model.",
+            status_fetch_fail_fmt: "Failed to fetch models: {}",
+            status_save_profile_fail_fmt: "Failed to save profile: {}",
+            status_onboard_fail_fmt: "Saved profile, but Claude onboarding failed: {}",
+            status_apply_fail_fmt: "Saved profile, but failed to apply it: {}",
+            status_using_fmt: "Using {}.",
+            status_saved_fmt: "Saved {}.",
+            status_no_import: "No Claude Code LLM env values were found to import.",
+            status_import_save_fail_fmt: "Failed to save imported profile: {}",
+            status_imported_fmt: "Imported {}.",
+            status_official_no_delete: "The official profile cannot be deleted.",
+            status_profile_not_found: "Profile was not found.",
+            status_delete_fail_fmt: "Failed to delete profile: {}",
+            status_deleted_fmt: "Deleted {}.",
+
+            stats_kpi_sub_fmt: "7d · {}",
+            stats_trend_caption_fmt: "prompts/day · peak {} · {}/7 active",
+            stats_no_model_data: "tokens/day · no model data yet",
+            stats_model_caption_fmt: "tokens/day · peak {} · {} models",
+            highlight_active_days: "Active days",
+            highlight_avg_per_prompt: "Avg / prompt",
+            highlight_top_tool: "Top tool",
+            highlight_focus_done: "Focus done",
+        }
+    }
+
+    const fn zh() -> Self {
+        Self {
+            settings_title: "claudie 设置",
+            settings_subtitle: "设置",
+            tab_basic: "基础",
+            tab_pomodoro: "番茄钟",
+            tab_llm: "模型配置",
+            tab_stats: "统计",
+            btn_save: "保存",
+            btn_reset: "重置",
+
+            basic_header: "宠物渲染",
+            basic_sub: "调整桌面宠物大小，并指向一个存放 GIF 的文件夹。",
+            basic_pet_size: "宠物大小",
+            basic_sleep_after: "休眠时长",
+            basic_gif_folder: "GIF 文件夹",
+            btn_browse: "浏览…",
+            btn_use_default: "使用默认",
+            basic_language: "语言",
+            basic_session_switcher: "会话切换器",
+            basic_session_switcher_desc: "当有多个 Claude Code 会话活动时，显示紧凑的焦点面板。",
+
+            pomo_header: "番茄钟",
+            pomo_sub: "设置专注与休息时长，然后控制当前计时器。",
+            pomo_current_cycle: "当前循环",
+            pomo_tune: "在下方调整节奏，无需离开此面板即可使用控制按钮。",
+            pomo_durations: "时长",
+            pomo_focus: "专注",
+            pomo_focus_hint: "深度工作",
+            pomo_short_break: "短休息",
+            pomo_short_hint: "快速放松",
+            pomo_long_break: "长休息",
+            pomo_long_hint: "充分恢复",
+            pomo_start: "开始",
+            pomo_skip: "跳过",
+            pomo_stop: "停止",
+
+            llm_header: "服务商配置",
+            llm_sub: "无需离开宠物即可整洁地管理 Claude Code 的服务商设置。",
+            llm_profile: "配置",
+            btn_new: "新建",
+            btn_import_current: "导入当前",
+            btn_delete: "删除",
+            field_profile_id: "配置 ID",
+            field_name: "名称",
+            field_base_url: "Base URL",
+            field_api_key: "API 密钥",
+            field_auth_token: "鉴权令牌（代理）",
+            llm_models: "模型",
+            llm_models_hint: "为各模型开启 1M 以请求 1M 上下文窗口。先获取，再选择一个 id。",
+            btn_fetch_models: "获取模型",
+            field_default_model: "默认模型",
+            field_opus: "Opus",
+            field_sonnet: "Sonnet",
+            field_haiku: "Haiku",
+            llm_quick_switches: "快速开关",
+            env_tool_search: "工具搜索",
+            env_no_autoupdate: "禁用自动更新",
+            env_max_thinking: "最大思考",
+            env_hide_attribution: "隐藏 git 署名（提交/PR 签名）",
+            llm_extra_env: "额外环境变量",
+            llm_openai_body: "OpenAI body",
+            btn_use: "使用",
+
+            stats_header: "会话记录",
+            stats_sub: "claudie 在本地静默记录的 Claude Code 活动。",
+            stats_kpi_prompts: "提示",
+            stats_kpi_tokens: "Token",
+            stats_kpi_cache: "缓存命中",
+            stats_kpi_tools: "工具调用",
+            stats_activity: "活动",
+            stats_tool_mix: "工具分布 · 7 天",
+            stats_tokens_7d: "Token · 7 天",
+            stats_tokens_by_model: "按模型 Token · 7 天",
+            stat_write: "写入",
+            stat_bash: "命令",
+            stat_search: "搜索",
+            stat_agent: "子代理",
+            stat_perm: "权限",
+            stat_choice: "选择",
+            stat_input: "输入",
+            stat_output: "输出",
+            stat_cache_w: "缓存写",
+            stat_cache_r: "缓存读",
+
+            prompt_hint: "使用 Ctrl+Shift+Y 允许，Ctrl+Shift+N 拒绝。",
+            prompt_deny: "拒绝",
+            prompt_cancel: "取消",
+            prompt_always: "始终允许",
+            prompt_allow: "允许",
+            prompt_submit: "提交",
+            prompt_other_placeholder: "输入你的回答…",
+            prompt_request_title: "claudie 请求",
+
+            menu_settings: "设置…",
+            menu_start_pomodoro: "开始番茄钟",
+            menu_resume_pomodoro: "继续番茄钟",
+            menu_pause_pomodoro: "暂停番茄钟",
+            menu_skip_pomodoro: "跳过番茄钟",
+            menu_stop_pomodoro: "停止番茄钟",
+            menu_start_fishing: "开始钓鱼",
+            menu_stop_fishing: "停止钓鱼",
+            menu_exit: "退出",
+            menu_llm_profile: "模型配置",
+
+            permission_title: "权限请求",
+            permission_subtitle_fmt: "{} 请求访问",
+            choice_subtitle: "Claude Code 正在请求输入。",
+            hint_answer_all: "请在提交前回答每个问题。",
+            hint_fill_other: "请在提交前填写“其他”回答。",
+            meta_session_unknown: "会话未知",
+            meta_session_prefix: "会话 ",
+            other_label: "其他…",
+            other_desc: "输入自定义回答。",
+
+            session_default_name: "会话",
+            session_ready: "就绪",
+            session_thinking: "思考中",
+            session_tool: "工具",
+            session_permission: "权限",
+            session_choice: "选择",
+            session_error: "错误",
+            session_denied: "已拒绝",
+            session_ended: "已结束",
+            fishing_casting: "抛竿中",
+            fishing_waiting_bite: "等待咬钩",
+            fishing_fish_on: "上钩了！",
+            fishing_tap_reel: "点击收线",
+            fishing_caught: "钓到了！",
+            fishing_escaped: "跑掉了",
+            fishing_line_slack: "鱼线松了",
+
+            usage_provider_usage: "服务商用量",
+            usage_title_fmt: "{} 用量",
+            usage_plan_fmt: "{} 套餐",
+            usage_updated_fmt: "更新于 {}",
+            usage_5h7d_limits: "5 小时 / 7 天用量限额",
+            usage_no_cached: "尚无此服务商的缓存用量。",
+            usage_no_limits: "此服务商未报告 5 小时 / 7 天限额。",
+            usage_save_or_select: "保存或选择一个服务商配置。",
+            usage_reset_due: "已到重置时间",
+            usage_resets_fmt: "{}重置",
+            usage_in_fmt: "{}后",
+            usage_just_now: "刚刚",
+            usage_ago_fmt: "{}前",
+
+            gif_bundled: "内置 GIF",
+            gif_name_hint_fmt: "文件命名：{}。缺失的文件将使用内置默认。",
+            gif_using_bundled_fmt: "正在使用内置 GIF。{}",
+            gif_all_found_fmt: "已在此文件夹找到全部 {} 个 GIF。{}",
+            gif_using_default_fmt: "以下心情使用内置默认：{}。{}",
+            folder_dialog_title: "为宠物选择一个 GIF 文件夹",
+            status_save_basic_fail_fmt: "保存基础设置失败：{}",
+            status_saved_pet: "已保存宠物设置。",
+            status_saved_reload_fail_fmt: "已保存，但重新加载宠物渲染失败：{}",
+            status_reset_basic: "已将宠物字段重置为默认值。",
+
+            pomo_not_ready: "番茄钟数据尚未就绪。",
+            status_save_pomodoro_fail_fmt: "保存番茄钟设置失败：{}",
+            status_saved_pomodoro: "已保存番茄钟设置。",
+            pomo_status_stopped: "已停止",
+            pomo_status_running: "运行中",
+            pomo_status_paused: "已暂停",
+            pomo_completed_fmt: "已完成的专注次数：{}",
+            pomo_resume: "继续",
+            pomo_pause: "暂停",
+
+            status_editing_new: "正在编辑新配置。",
+            status_new_profile: "新配置",
+            status_fetching_models: "正在获取模型…",
+            status_fetched_fmt: "已获取 {} 个模型。选择一个填入模型。",
+            status_fetch_fail_fmt: "获取模型失败：{}",
+            status_save_profile_fail_fmt: "保存配置失败：{}",
+            status_onboard_fail_fmt: "已保存配置，但 Claude 初始化失败：{}",
+            status_apply_fail_fmt: "已保存配置，但应用失败：{}",
+            status_using_fmt: "正在使用 {}。",
+            status_saved_fmt: "已保存 {}。",
+            status_no_import: "未找到可导入的 Claude Code LLM 环境变量。",
+            status_import_save_fail_fmt: "保存导入的配置失败：{}",
+            status_imported_fmt: "已导入 {}。",
+            status_official_no_delete: "无法删除官方配置。",
+            status_profile_not_found: "未找到该配置。",
+            status_delete_fail_fmt: "删除配置失败：{}",
+            status_deleted_fmt: "已删除 {}。",
+
+            stats_kpi_sub_fmt: "7 天 · {}",
+            stats_trend_caption_fmt: "提示/天 · 峰值 {} · {}/7 活跃",
+            stats_no_model_data: "Token/天 · 暂无模型数据",
+            stats_model_caption_fmt: "Token/天 · 峰值 {} · {} 个模型",
+            highlight_active_days: "活跃天数",
+            highlight_avg_per_prompt: "每提示均值",
+            highlight_top_tool: "最常用工具",
+            highlight_focus_done: "完成专注",
+        }
+    }
+}

@@ -7,7 +7,7 @@ use slint::ComponentHandle;
 use windows_sys::Win32::Foundation::HWND;
 
 use crate::app::pomodoro::PomodoroStatus;
-use crate::ui::slint_views::SettingsWindow;
+use crate::ui::slint_views::{I18n, SettingsWindow};
 use crate::ui::window_icon::{apply_slint_window_icons, schedule_settings_window_icon_refresh};
 use crate::ui::window_position::center_window_on_screen;
 use controller::{SettingsController, mutate_app_state};
@@ -33,6 +33,7 @@ fn show_settings_panel_tab_for_parent(parent: HWND, tab: i32) {
             return;
         };
         window.set_active_tab(tab);
+        apply_settings_i18n(&window);
         let controller = Rc::new(RefCell::new(SettingsController::new(window.as_weak())));
         controller.borrow_mut().load_into_ui();
         wire_callbacks(&window, controller);
@@ -174,6 +175,12 @@ fn wire_callbacks(window: &SettingsWindow, controller: Rc<RefCell<SettingsContro
             controller.borrow_mut().reset_basic_fields();
         }
     }));
+    window.on_language_changed(redraw_after_arg(&weak, {
+        let controller = controller.clone();
+        move |index| {
+            controller.borrow_mut().change_language(index);
+        }
+    }));
     window.on_save_pomodoro(redraw_after(&weak, {
         let controller = controller.clone();
         move || {
@@ -221,6 +228,96 @@ fn wire_callbacks(window: &SettingsWindow, controller: Rc<RefCell<SettingsContro
         close_settings_panel();
         slint::CloseRequestResponse::HideWindow
     });
+}
+
+/// Push the active language's text into the window's `I18n` global. Slint
+/// cannot read a Rust global, so every localized markup binding is fed here at
+/// window creation (and again after a live language switch).
+pub(crate) fn apply_settings_i18n(window: &SettingsWindow) {
+    let s = crate::i18n::strings();
+    let g = window.global::<I18n>();
+    g.set_settings_title(s.settings_title.into());
+    g.set_settings_subtitle(s.settings_subtitle.into());
+    g.set_tab_basic(s.tab_basic.into());
+    g.set_tab_pomodoro(s.tab_pomodoro.into());
+    g.set_tab_llm(s.tab_llm.into());
+    g.set_tab_stats(s.tab_stats.into());
+    g.set_btn_save(s.btn_save.into());
+    g.set_btn_reset(s.btn_reset.into());
+
+    g.set_basic_header(s.basic_header.into());
+    g.set_basic_sub(s.basic_sub.into());
+    g.set_basic_pet_size(s.basic_pet_size.into());
+    g.set_basic_sleep_after(s.basic_sleep_after.into());
+    g.set_basic_gif_folder(s.basic_gif_folder.into());
+    g.set_btn_browse(s.btn_browse.into());
+    g.set_btn_use_default(s.btn_use_default.into());
+    g.set_basic_language(s.basic_language.into());
+    g.set_basic_session_switcher(s.basic_session_switcher.into());
+    g.set_basic_session_switcher_desc(s.basic_session_switcher_desc.into());
+
+    g.set_pomo_header(s.pomo_header.into());
+    g.set_pomo_sub(s.pomo_sub.into());
+    g.set_pomo_current_cycle(s.pomo_current_cycle.into());
+    g.set_pomo_tune(s.pomo_tune.into());
+    g.set_pomo_durations(s.pomo_durations.into());
+    g.set_pomo_focus(s.pomo_focus.into());
+    g.set_pomo_focus_hint(s.pomo_focus_hint.into());
+    g.set_pomo_short_break(s.pomo_short_break.into());
+    g.set_pomo_short_hint(s.pomo_short_hint.into());
+    g.set_pomo_long_break(s.pomo_long_break.into());
+    g.set_pomo_long_hint(s.pomo_long_hint.into());
+    g.set_pomo_start(s.pomo_start.into());
+    g.set_pomo_skip(s.pomo_skip.into());
+    g.set_pomo_stop(s.pomo_stop.into());
+
+    g.set_llm_header(s.llm_header.into());
+    g.set_llm_sub(s.llm_sub.into());
+    g.set_llm_profile(s.llm_profile.into());
+    g.set_btn_new(s.btn_new.into());
+    g.set_btn_import_current(s.btn_import_current.into());
+    g.set_btn_delete(s.btn_delete.into());
+    g.set_field_profile_id(s.field_profile_id.into());
+    g.set_field_name(s.field_name.into());
+    g.set_field_base_url(s.field_base_url.into());
+    g.set_field_api_key(s.field_api_key.into());
+    g.set_field_auth_token(s.field_auth_token.into());
+    g.set_llm_models(s.llm_models.into());
+    g.set_llm_models_hint(s.llm_models_hint.into());
+    g.set_btn_fetch_models(s.btn_fetch_models.into());
+    g.set_field_default_model(s.field_default_model.into());
+    g.set_field_opus(s.field_opus.into());
+    g.set_field_sonnet(s.field_sonnet.into());
+    g.set_field_haiku(s.field_haiku.into());
+    g.set_llm_quick_switches(s.llm_quick_switches.into());
+    g.set_env_tool_search(s.env_tool_search.into());
+    g.set_env_no_autoupdate(s.env_no_autoupdate.into());
+    g.set_env_max_thinking(s.env_max_thinking.into());
+    g.set_env_hide_attribution(s.env_hide_attribution.into());
+    g.set_llm_extra_env(s.llm_extra_env.into());
+    g.set_llm_openai_body(s.llm_openai_body.into());
+    g.set_btn_use(s.btn_use.into());
+
+    g.set_stats_header(s.stats_header.into());
+    g.set_stats_sub(s.stats_sub.into());
+    g.set_stats_kpi_prompts(s.stats_kpi_prompts.into());
+    g.set_stats_kpi_tokens(s.stats_kpi_tokens.into());
+    g.set_stats_kpi_cache(s.stats_kpi_cache.into());
+    g.set_stats_kpi_tools(s.stats_kpi_tools.into());
+    g.set_stats_activity(s.stats_activity.into());
+    g.set_stats_tool_mix(s.stats_tool_mix.into());
+    g.set_stats_tokens_7d(s.stats_tokens_7d.into());
+    g.set_stats_tokens_by_model(s.stats_tokens_by_model.into());
+    g.set_stat_write(s.stat_write.into());
+    g.set_stat_bash(s.stat_bash.into());
+    g.set_stat_search(s.stat_search.into());
+    g.set_stat_agent(s.stat_agent.into());
+    g.set_stat_perm(s.stat_perm.into());
+    g.set_stat_choice(s.stat_choice.into());
+    g.set_stat_input(s.stat_input.into());
+    g.set_stat_output(s.stat_output.into());
+    g.set_stat_cache_w(s.stat_cache_w.into());
+    g.set_stat_cache_r(s.stat_cache_r.into());
 }
 
 /// Wrap a zero-argument callback so the window repaints after it runs. See the

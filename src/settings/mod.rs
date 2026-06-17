@@ -31,6 +31,8 @@ pub(crate) struct UserSettings {
     pub(crate) pet_scale_percent: u32,
     #[serde(default = "default_sleep_after_secs")]
     pub(crate) sleep_after_secs: u32,
+    #[serde(default)]
+    pub(crate) language: crate::i18n::Lang,
     pub(crate) pomodoro: PomodoroSettings,
 }
 
@@ -93,6 +95,7 @@ impl Default for UserSettings {
             show_session_switcher: true,
             pet_scale_percent: 80,
             sleep_after_secs: DEFAULT_SLEEP_AFTER_SECS,
+            language: crate::i18n::Lang::default(),
             pomodoro: PomodoroSettings::default(),
         }
     }
@@ -619,6 +622,7 @@ pub(crate) fn mood_rows() -> &'static [(PetMood, &'static str)] {
         (PetMood::Happy, "Happy"),
         (PetMood::Error, "Error"),
         (PetMood::Deny, "Deny"),
+        (PetMood::Shrug, "Shrug"),
         (PetMood::Sleeping, "Sleeping"),
         (PetMood::Subagent, "Subagent"),
         (PetMood::Pomodoro, "Pomodoro"),
@@ -1101,9 +1105,14 @@ mod tests {
 
     #[test]
     fn mood_gif_filenames_cover_every_mood() {
-        for (mood, _) in mood_rows() {
-            assert!(mood_gif_filename(*mood).ends_with(".gif"));
+        // Every mood must appear exactly once in the settings GIF list, so the
+        // Basic panel shows (and validates) a file for each one.
+        for mood in PetMood::ALL {
+            let count = mood_rows().iter().filter(|(m, _)| *m == mood).count();
+            assert_eq!(count, 1, "{mood:?} should appear once in mood_rows");
+            assert!(mood_gif_filename(mood).ends_with(".gif"));
         }
+        assert_eq!(mood_rows().len(), PetMood::ALL.len());
     }
 
     #[test]

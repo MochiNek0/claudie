@@ -19,6 +19,7 @@ unicode-linebreak = "0.1.5"
 ureq = "2.12"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_GdiPlus",

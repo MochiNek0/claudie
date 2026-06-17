@@ -1315,17 +1315,23 @@ unsafe fn show_context_menu(hwnd: HWND) {
             (state.pomodoro.status, state.fishing.is_active())
         })
         .unwrap_or((PomodoroStatus::Stopped, false));
+    let s = crate::i18n::strings();
 
-    append_menu_item(menu, MENU_SETTINGS_ID, "Settings...", theme::INK);
+    append_menu_item(menu, MENU_SETTINGS_ID, s.menu_settings, theme::INK);
     append_llm_profile_menu(menu);
     append_menu_separator(menu);
     if pomodoro_status == PomodoroStatus::Stopped {
-        append_menu_item(menu, MENU_POMODORO_START_ID, "Start Pomodoro", theme::INK);
+        append_menu_item(
+            menu,
+            MENU_POMODORO_START_ID,
+            s.menu_start_pomodoro,
+            theme::INK,
+        );
     } else {
         let pause_resume_label = if pomodoro_status == PomodoroStatus::Paused {
-            "Resume Pomodoro"
+            s.menu_resume_pomodoro
         } else {
-            "Pause Pomodoro"
+            s.menu_pause_pomodoro
         };
         append_menu_item(
             menu,
@@ -1333,17 +1339,32 @@ unsafe fn show_context_menu(hwnd: HWND) {
             pause_resume_label,
             theme::INK,
         );
-        append_menu_item(menu, MENU_POMODORO_SKIP_ID, "Skip Pomodoro", theme::INK);
-        append_menu_item(menu, MENU_POMODORO_STOP_ID, "Stop Pomodoro", theme::INK);
+        append_menu_item(
+            menu,
+            MENU_POMODORO_SKIP_ID,
+            s.menu_skip_pomodoro,
+            theme::INK,
+        );
+        append_menu_item(
+            menu,
+            MENU_POMODORO_STOP_ID,
+            s.menu_stop_pomodoro,
+            theme::INK,
+        );
     }
     append_menu_separator(menu);
     if fishing_active {
-        append_menu_item(menu, MENU_FISHING_STOP_ID, "Stop Fishing", theme::INK);
+        append_menu_item(menu, MENU_FISHING_STOP_ID, s.menu_stop_fishing, theme::INK);
     } else {
-        append_menu_item(menu, MENU_FISHING_START_ID, "Start Fishing", theme::INK);
+        append_menu_item(
+            menu,
+            MENU_FISHING_START_ID,
+            s.menu_start_fishing,
+            theme::INK,
+        );
     }
     append_menu_separator(menu);
-    append_menu_item(menu, MENU_EXIT_ID, "Exit", theme::DANGER);
+    append_menu_item(menu, MENU_EXIT_ID, s.menu_exit, theme::DANGER);
 
     let mut point = POINT { x: 0, y: 0 };
     if GetCursorPos(&mut point) != 0 {
@@ -1434,7 +1455,7 @@ unsafe fn append_llm_profile_menu(menu: HMENU) {
         MF_POPUP,
         profile_menu as usize,
         vec![MenuTextSegment {
-            text: "LLM Profile".to_string(),
+            text: crate::i18n::strings().menu_llm_profile.to_string(),
             color: theme::INK,
         }],
     );

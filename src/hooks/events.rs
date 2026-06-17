@@ -592,9 +592,10 @@ fn parse_ask_user_questions(tool_input: &Value) -> Vec<ChoiceQuestion> {
             if options.is_empty() {
                 return None;
             }
+            let other = crate::i18n::strings();
             options.push(ChoiceOption {
-                label: "Other...".to_string(),
-                description: "Type a custom answer.".to_string(),
+                label: other.other_label.to_string(),
+                description: other.other_desc.to_string(),
                 is_other: true,
             });
             Some(ChoiceQuestion {

@@ -18,26 +18,6 @@ use crate::globals::{APP_STATE, PET_RENDERER};
 use crate::settings::{UserSettings, load_user_settings, resolve_mood_gif};
 use crate::util::wide;
 
-const MOODS: &[PetMood] = &[
-    PetMood::Idle,
-    PetMood::Thinking,
-    PetMood::Typing,
-    PetMood::Building,
-    PetMood::Search,
-    PetMood::Happy,
-    PetMood::Error,
-    PetMood::Deny,
-    PetMood::Shrug,
-    PetMood::Sleeping,
-    PetMood::Subagent,
-    PetMood::Pomodoro,
-    PetMood::Wave,
-    PetMood::Stretch,
-    PetMood::Fishing,
-    PetMood::FishingReel,
-    PetMood::FishingCaught,
-    PetMood::FishingMissed,
-];
 const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026_200A;
 
 #[derive(Clone, Copy, Debug)]
@@ -324,14 +304,14 @@ unsafe impl Send for GifAnimation {}
 impl GifAnimation {
     unsafe fn load(settings: &UserSettings) -> Result<(Self, String), String> {
         let mut clips: HashMap<PetMood, GifClip> = HashMap::new();
-        for mood in MOODS {
+        for mood in PetMood::ALL {
             // Each mood resolves independently: the user's folder if it has the
             // file, otherwise the bundled default. A mood with neither is fatal
             // (the bundled assets are always expected to be present).
-            let path = resolve_mood_gif(settings, *mood)
+            let path = resolve_mood_gif(settings, mood)
                 .ok_or_else(|| format!("missing GIF for {}", mood.key()))?;
             let clip = GifClip::load(&path)?;
-            clips.insert(*mood, clip);
+            clips.insert(mood, clip);
         }
         let summary = format!("loaded {} GIFs", clips.len());
         Ok((

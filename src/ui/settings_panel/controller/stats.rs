@@ -67,7 +67,7 @@ fn set_model_token_chart(ui: &SettingsWindow, window: &[DailyStats]) {
         ui.set_stats_model_lines(ModelRc::from(
             Rc::new(VecModel::<ModelTokenLine>::default()),
         ));
-        ui.set_stats_model_caption(shared("tokens/day · no model data yet"));
+        ui.set_stats_model_caption(shared(crate::i18n::strings().stats_no_model_data));
         return;
     }
 
@@ -116,11 +116,12 @@ fn set_model_token_chart(ui: &SettingsWindow, window: &[DailyStats]) {
         })
         .collect();
     ui.set_stats_model_lines(ModelRc::from(Rc::new(VecModel::from(lines))));
-    ui.set_stats_model_caption(shared(&format!(
-        "tokens/day · peak {} · {} models",
-        compact_number(peak),
-        ranked.len()
-    )));
+    ui.set_stats_model_caption(shared(
+        &crate::i18n::strings()
+            .stats_model_caption_fmt
+            .replacen("{}", &compact_number(peak), 1)
+            .replacen("{}", &ranked.len().to_string(), 1),
+    ));
 }
 
 fn model_tokens(day: &DailyStats, model: &str) -> u64 {
@@ -187,17 +188,19 @@ fn calendar_window(db: &DailyStatsDb, today: &str, days: usize) -> Vec<DailyStat
 }
 
 fn set_kpis(ui: &SettingsWindow, today: &DailyStats, recent: &DailyStats) {
+    let sub = |value: &str| {
+        crate::i18n::strings()
+            .stats_kpi_sub_fmt
+            .replace("{}", value)
+    };
     ui.set_stats_kpi_prompts(shared(&today.prompts.to_string()));
-    ui.set_stats_kpi_prompts_sub(shared(&format!("7d · {}", recent.prompts)));
+    ui.set_stats_kpi_prompts_sub(shared(&sub(&recent.prompts.to_string())));
     ui.set_stats_kpi_tokens(shared(&compact_number(today.token_delta)));
-    ui.set_stats_kpi_tokens_sub(shared(&format!(
-        "7d · {}",
-        compact_number(recent.token_delta)
-    )));
+    ui.set_stats_kpi_tokens_sub(shared(&sub(&compact_number(recent.token_delta))));
     ui.set_stats_kpi_cache(shared(&cache_hit_label(today)));
-    ui.set_stats_kpi_cache_sub(shared(&format!("7d · {}", cache_hit_label(recent))));
+    ui.set_stats_kpi_cache_sub(shared(&sub(&cache_hit_label(recent))));
     ui.set_stats_kpi_tools(shared(&today.tool_uses.to_string()));
-    ui.set_stats_kpi_tools_sub(shared(&format!("7d · {}", recent.tool_uses)));
+    ui.set_stats_kpi_tools_sub(shared(&sub(&recent.tool_uses.to_string())));
 }
 
 fn set_trend(ui: &SettingsWindow, window: &[DailyStats], today: &str, active7: usize) {
@@ -215,10 +218,12 @@ fn set_trend(ui: &SettingsWindow, window: &[DailyStats], today: &str, active7: u
         })
         .collect();
     ui.set_stats_trend(ModelRc::from(Rc::new(VecModel::from(bars))));
-    ui.set_stats_trend_caption(shared(&format!(
-        "prompts/day · peak {} · {}/7 active",
-        peak, active7
-    )));
+    ui.set_stats_trend_caption(shared(
+        &crate::i18n::strings()
+            .stats_trend_caption_fmt
+            .replacen("{}", &peak.to_string(), 1)
+            .replacen("{}", &active7.to_string(), 1),
+    ));
 }
 
 fn set_highlights(ui: &SettingsWindow, recent: &DailyStats, active7: usize) {
@@ -227,11 +232,12 @@ fn set_highlights(ui: &SettingsWindow, recent: &DailyStats, active7: usize) {
     } else {
         "—".to_string()
     };
+    let s = crate::i18n::strings();
     let top_tool = [
-        ("Write", recent.write_tools),
-        ("Bash", recent.bash_tools),
-        ("Search", recent.search_tools),
-        ("Agent", recent.subagent_tools),
+        (s.stat_write, recent.write_tools),
+        (s.stat_bash, recent.bash_tools),
+        (s.stat_search, recent.search_tools),
+        (s.stat_agent, recent.subagent_tools),
     ]
     .into_iter()
     .filter(|(_, value)| *value > 0)
@@ -240,10 +246,10 @@ fn set_highlights(ui: &SettingsWindow, recent: &DailyStats, active7: usize) {
     .unwrap_or_else(|| "—".to_string());
 
     let items = [
-        ("Active days", format!("{} / 7", active7)),
-        ("Avg / prompt", avg),
-        ("Top tool", top_tool),
-        ("Focus done", recent.completed_focus.to_string()),
+        (s.highlight_active_days, format!("{} / 7", active7)),
+        (s.highlight_avg_per_prompt, avg),
+        (s.highlight_top_tool, top_tool),
+        (s.highlight_focus_done, recent.completed_focus.to_string()),
     ];
     let highlights: Vec<StatHighlight> = items
         .into_iter()

@@ -8,6 +8,7 @@ mod app;
 mod config;
 mod globals;
 mod hooks;
+mod i18n;
 mod notifier;
 mod official_usage;
 mod proxy;
@@ -115,6 +116,7 @@ fn main() {
     }
 
     let state = Arc::new(Mutex::new(AppState::new()));
+    i18n::set_current(state.lock().expect("state poisoned").settings.language);
     let _ = APP_STATE.set(state.clone());
 
     run_app(state, port);

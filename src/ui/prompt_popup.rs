@@ -10,7 +10,7 @@ use crate::hooks::{
     decide_current_permission, deny_current_choice, set_current_choice_other_text,
     submit_current_choice, toggle_current_choice_option,
 };
-use crate::ui::slint_views::{ChoiceOptionData, DiffLine, MarkdownBlockData, PromptWindow};
+use crate::ui::slint_views::{ChoiceOptionData, DiffLine, I18n, MarkdownBlockData, PromptWindow};
 use crate::ui::window_icon::{apply_slint_window_icons, schedule_prompt_window_icon_refresh};
 use crate::ui::window_position::center_window_on_screen;
 use crate::util::{MarkdownBlock, MarkdownBlockKind, estimate_wrapped_lines, markdown_blocks};
@@ -79,6 +79,7 @@ fn sync_prompt_popup_impl(parent: HWND, force: bool) {
                 return;
             };
             wire_prompt_callbacks(&window);
+            apply_prompt_i18n(&window);
             *slot = Some(window);
             created = true;
         }
@@ -127,6 +128,20 @@ pub(crate) fn close_prompt_popup() {
     PROMPT_OPTIONS.with(|options| options.borrow_mut().clear());
     PROMPT_SNAPSHOT.with(|last| last.borrow_mut().take());
     PROMPT_KEY.with(|last| last.set(None));
+}
+
+/// Push the active language's text into the prompt window's `I18n` global.
+fn apply_prompt_i18n(window: &PromptWindow) {
+    let s = crate::i18n::strings();
+    let g = window.global::<I18n>();
+    g.set_prompt_other_placeholder(s.prompt_other_placeholder.into());
+    g.set_prompt_request_title(s.prompt_request_title.into());
+    g.set_prompt_hint(s.prompt_hint.into());
+    g.set_prompt_deny(s.prompt_deny.into());
+    g.set_prompt_cancel(s.prompt_cancel.into());
+    g.set_prompt_always(s.prompt_always.into());
+    g.set_prompt_allow(s.prompt_allow.into());
+    g.set_prompt_submit(s.prompt_submit.into());
 }
 
 fn wire_prompt_callbacks(window: &PromptWindow) {
@@ -294,9 +309,12 @@ fn prompt_snapshot() -> Option<PromptSnapshot> {
 }
 
 fn permission_snapshot(permission: &PendingPermission) -> PromptSnapshot {
+    let s = crate::i18n::strings();
     PromptSnapshot {
-        title: "Permission request".to_string(),
-        subtitle: format!("{} wants access", permission.tool_name.trim()),
+        title: s.permission_title.to_string(),
+        subtitle: s
+            .permission_subtitle_fmt
+            .replace("{}", permission.tool_name.trim()),
         detail: detail_blocks(&permission.summary),
         detail_dominant: true,
         meta: prompt_meta(&permission.session_id, &permission.cwd),
@@ -378,7 +396,7 @@ fn choice_snapshot(choice: &PendingChoice) -> PromptSnapshot {
 
     PromptSnapshot {
         title: choice.title.clone(),
-        subtitle: "Claude Code is asking for input.".to_string(),
+        subtitle: crate::i18n::strings().choice_subtitle.to_string(),
         detail,
         detail_dominant: choice.kind == ChoiceKind::ExitPlanMode,
         meta: prompt_meta(&choice.session_id, ""),
@@ -390,13 +408,14 @@ fn choice_snapshot(choice: &PendingChoice) -> PromptSnapshot {
 }
 
 fn submit_hint_for(choice: &PendingChoice) -> String {
+    let s = crate::i18n::strings();
     let mut needs_other_text = false;
     for (qi, question) in choice.questions.iter().enumerate() {
         let Some(selected) = choice.selected.get(qi) else {
-            return "Please answer every question before submitting.".to_string();
+            return s.hint_answer_all.to_string();
         };
         if selected.is_empty() {
-            return "Please answer every question before submitting.".to_string();
+            return s.hint_answer_all.to_string();
         }
         for &oi in selected {
             if question
@@ -414,7 +433,7 @@ fn submit_hint_for(choice: &PendingChoice) -> String {
         }
     }
     if needs_other_text {
-        "Please fill in the 'Other' answer before submitting.".to_string()
+        s.hint_fill_other.to_string()
     } else {
         String::new()
     }
@@ -519,10 +538,15 @@ fn remember_current_snapshot() {
 }
 
 fn prompt_meta(session_id: &str, cwd: &str) -> String {
+    let s = crate::i18n::strings();
     let session = if session_id.trim().is_empty() {
-        "session unknown".to_string()
+        s.meta_session_unknown.to_string()
     } else {
-        format!("session {}", session_id.chars().take(8).collect::<String>())
+        format!(
+            "{}{}",
+            s.meta_session_prefix,
+            session_id.chars().take(8).collect::<String>()
+        )
     };
     if cwd.trim().is_empty() {
         session
