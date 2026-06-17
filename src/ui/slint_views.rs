@@ -1388,13 +1388,6 @@ slint::slint! {
             clicked => { root.toggle(); }
         }
 
-        if !root.is_header && data.selected: Rectangle {
-            x: 0px; y: 0px;
-            width: 3px;
-            height: 100%;
-            background: Theme.accent;
-        }
-
         if root.is_header: Text {
             x: 4px; y: 8px;
             width: parent.width - 8px;
