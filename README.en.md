@@ -23,6 +23,7 @@ Inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/cla
 - **Choice cards** — supports `AskUserQuestion` (with a free-text "Other…" option) and `ExitPlanMode` (plan rendered as Markdown), with options plus Submit / Cancel.
 - **Multi-session switcher** — tracks each session's status and renders a switcher panel beside the pet; scroll to change the focused session, which drives the pet mood and HUD. Hidden automatically when only one session is active.
 - **Hotkeys** — `Ctrl+Shift+Y` allows / submits; `Ctrl+Shift+N` denies / cancels.
+- **i18n** — built-in Chinese and English bilingual UI, auto-detects the system language. Override with `CLAUDIE_LANG=zh` or `CLAUDIE_LANG=en`. All UI text switches in one go.
 - **Pomodoro** — built-in timer with Start / Stop / Pause / Resume / Skip and phase-completion notifications.
 - **Fishing minigame** — click the pet for a "waiting → reeling → caught/missed" sequence; keep tension inside the moving target zone while reeling.
 - **Official usage monitoring** — real-time 5h / 7d usage in the right-click menu and Settings panel via OAuth polling, with Max/Pro/Team plan detection and a reset countdown.
@@ -93,51 +94,17 @@ Configure a profile in **Settings → LLM Profiles**:
 
 After clicking `Use`, if the profile is OpenAI format claudie points Claude Code's `ANTHROPIC_BASE_URL` at the local proxy (the upstream URL/key stay only in the claudie profile). A `Base URL` containing `/chat/completions` enables the proxy automatically; if you enter an upstream root URL, add `CLAUDIE_API_FORMAT=openai` to `Extra env`.
 
-**Proxy capabilities:**
-
-- Streaming and non-streaming OpenAI responses are converted back to Anthropic Messages / SSE events.
-- Anthropic tool use / tool result ↔ OpenAI `tools` / `tool_calls` / `tool` messages.
-- `parallel_tool_calls=true` by default when tools are present and supported (set `false` in `OpenAI body` to disable).
-- DeepSeek R1, QwQ, GLM-Zero and similar reasoning streams map to Anthropic thinking blocks; OpenAI/Azure/OpenRouter reasoning models auto-derive `reasoning_effort` from `thinking.budget_tokens`.
-- Image forwarding is auto-detected from the model name; force with `CLAUDIE_PROXY_FORWARD_IMAGES=always/never`.
-- Recognized mainstream upstreams keep the compat prompt off by default; generic OneAPI/NewAPI-style upstreams get it on (`CLAUDIE_PROXY_COMPAT_PROMPT=0/1`).
-- If an upstream rejects native tool history, the proxy falls back to text transcript mode and caches the capability probe.
-- Upstream 429/529 `Retry-After` is forwarded to Claude Code to trigger native backoff; connection failures/timeouts and other transient errors uniformly return HTTP 529 (matching Anthropic's overload semantics).
+**Proxy capabilities:** Bidirectional conversion between streaming/non-streaming OpenAI ↔ Anthropic Messages / SSE; tool-call mapping; `parallel_tool_calls=true` by default; DeepSeek/QwQ/GLM-Zero reasoning streams mapped to Anthropic thinking blocks, OpenAI/Azure/OpenRouter auto-derive `reasoning_effort`; image forwarding auto-detected; compat prompt off by default for known upstreams; automatic fallback to text transcript when tools are rejected; upstream 429/529 `Retry-After` forwarded, transient errors return HTTP 529.
 
 **Context optimization** (on by default): compresses very long tool results and text; when input exceeds the threshold it keeps recent messages and summarizes older history in chunks using a local extractive summary (no upstream call). The cache stores only chunk summaries and capability probes — never API keys or original request bodies.
 
 <details>
-<summary><code>Extra env</code> tunables (defaults)</summary>
-
-```text
-CLAUDIE_PROXY_OPTIMIZE=1
-CLAUDIE_PROXY_SUMMARY_THRESHOLD=24000
-CLAUDIE_PROXY_KEEP_RECENT_MESSAGES=12
-CLAUDIE_PROXY_KEEP_RECENT_TOKENS=10000
-CLAUDIE_PROXY_TOOL_RESULT_LIMIT=3000
-CLAUDIE_PROXY_TEXT_LIMIT=6000
-CLAUDIE_PROXY_LOCAL_SUMMARY_TOKENS=2000
-CLAUDIE_PROXY_CACHE_MAX_MB=10
-CLAUDIE_PROXY_CHUNK_SUMMARY=1
-CLAUDIE_PROXY_CHUNK_SIZE_MESSAGES=8
-CLAUDIE_PROXY_CHUNK_CACHE_TTL_HOURS=168
-CLAUDIE_PROXY_CHUNK_CACHE_MAX_ENTRIES=200
-CLAUDIE_PROXY_CAPABILITY_CACHE_TTL_HOURS=720
-CLAUDIE_PROXY_CAPABILITY_CACHE_MAX_ENTRIES=200
-CLAUDIE_PROXY_COMPAT_PROMPT=0
-CLAUDIE_PROXY_FORWARD_IMAGES=auto
-```
-
+<summary><code>Extra env</code> tunables (defaults)</summary>CLAUDIE_PROXY_OPTIMIZE=1 / SUMMARY_THRESHOLD=24000 / KEEP_RECENT_MESSAGES=12 / KEEP_RECENT_TOKENS=10000 / TOOL_RESULT_LIMIT=3000 / TEXT_LIMIT=6000 / LOCAL_SUMMARY_TOKENS=2000 / CACHE_MAX_MB=10 / CHUNK_SIZE_MESSAGES=8 / COMPAT_PROMPT=0 / FORWARD_IMAGES=auto
 </details>
 
 ## Stats Panel
 
-Settings → Stats visualizes usage from the local `daily_stats.json` (up to 45 days); all data stays on your machine.
-
-- **Top KPIs** — large number is today, `7d · N` below is the 7-day total. Covers Prompts (turns), Tokens (input + output + cache read/write), Cache hit (cache-read ÷ all context input — higher is cheaper), and Tool calls.
-- **Activity** — 14-day prompt bar chart with today highlighted and idle days kept as empty bars; the caption gives prompts/day, the 14-day peak, and active days in the last 7.
-- **Productivity highlights** (last 7 days) — active days, avg tokens per prompt, top tool category, and completed Pomodoro sessions.
-- **Detail** (last 7 days) — Tool mix (Write/Bash/Search/Agent/Perm/Choice) and Tokens (Input/Output/Cache W/Cache R).
+Settings → Stats visualizes usage from the local `daily_stats.json` (up to 45 days); all data stays on your machine. Top KPIs show today's values in large type, with `7d · N` below for the 7-day total — Prompts, Tokens (input/output/cache r/w), Cache hit, and Tool calls. The Activity chart is a 14-day bar graph; Productivity highlights, Tool mix, and Token distribution are in the Detail section.
 
 ## Local Data
 

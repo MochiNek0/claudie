@@ -23,6 +23,7 @@
 - **选择卡片** — 支持 `AskUserQuestion`（带「Other…」自由输入）和 `ExitPlanMode`（计划以 Markdown 渲染），可在窗口里选项 + Submit / Cancel。
 - **多会话切换** — 跟踪各会话状态，在宠物旁渲染会话切换面板，滚轮切换关注的会话；焦点会话决定宠物 mood 与 HUD。仅单会话时自动隐藏。
 - **快捷键** — `Ctrl+Shift+Y` 允许 / 提交；`Ctrl+Shift+N` 拒绝 / 取消。
+- **国际化** — 内置简体中文与英文双语界面，自动跟随系统语言。`CLAUDIE_LANG=zh` / `CLAUDIE_LANG=en` 可强行指定，所有 UI 文本统一切换。
 - **番茄钟** — 内置 Pomodoro，支持 Start / Stop / Pause / Resume / Skip，阶段结束弹通知。
 - **钓鱼小游戏** — 点击宠物开始「等待 → 提竿 → 收线 → 上钩/脱钩」，收线阶段需在移动目标区维持张力。
 - **官方用量监控** — 右键菜单与设置面板实时显示官方 5 小时 / 7 天用量（OAuth 轮询），识别 Max/Pro/Team 订阅与重置倒计时。
@@ -93,51 +94,17 @@ cargo run --release -- --print-claude-settings
 
 点击 `Use` 后，若 profile 是 OpenAI 格式，claudie 会把 Claude Code 的 `ANTHROPIC_BASE_URL` 指向本地代理（上游 URL/key 只留在 claudie profile 中）。`Base URL` 含 `/chat/completions` 会自动启用代理；若填的是上游根地址，在 `Extra env` 加 `CLAUDIE_API_FORMAT=openai`。
 
-**代理能力**：
-
-- 流式与非流式 OpenAI 响应都转换回 Anthropic Messages / SSE 事件。
-- Anthropic tool use / tool result ↔ OpenAI `tools` / `tool_calls` / `tool` message。
-- 有工具且模型支持时默认 `parallel_tool_calls=true`（可在 `OpenAI body` 设 `false` 关闭）。
-- DeepSeek R1、QwQ、GLM-Zero 等 reasoning 流映射为 Anthropic thinking block；OpenAI/Azure/OpenRouter reasoning 模型自动从 `thinking.budget_tokens` 推导 `reasoning_effort`。
-- 图片转发按模型名自动判断，可用 `CLAUDIE_PROXY_FORWARD_IMAGES=always/never` 强制。
-- 已识别的主流上游默认关闭兼容提示，泛用 OneAPI/NewAPI 类默认开启（`CLAUDIE_PROXY_COMPAT_PROMPT=0/1`）。
-- 上游拒绝原生工具历史时自动降级为文本 transcript 模式并缓存能力探测结果。
-- 上游 429/529 的 `Retry-After` 原样透传给 Claude Code 触发原生退避；连接失败/超时等临时错误统一返回 HTTP 529（对齐 Anthropic 过载语义）。
+**代理能力**：流式与非流式 OpenAI ↔ Anthropic Messages / SSE 互转；工具调用映射；默认支持 `parallel_tool_calls`；DeepSeek/QwQ/GLM-Zero 等 reasoning 流映射为 Anthropic thinking 块，OpenAI/Azure/OpenRouter 自动推导 `reasoning_effort`；图片转发自动识别；主流上游默认关闭兼容提示；上游拒绝工具历史时自动降级为文本 transcript；429/529 的 `Retry-After` 透传，临时错误返回 HTTP 529。
 
 **上下文优化**（默认开启）：压缩超长工具结果和文本；输入超阈值时保留最近消息、对较早对话做本地抽取式分块总结（不调用上游）。缓存只保存分块摘要和能力探测结果，不保存 API key 或原始请求体。
 
 <details>
-<summary><code>Extra env</code> 可调参数（默认值）</summary>
-
-```text
-CLAUDIE_PROXY_OPTIMIZE=1
-CLAUDIE_PROXY_SUMMARY_THRESHOLD=24000
-CLAUDIE_PROXY_KEEP_RECENT_MESSAGES=12
-CLAUDIE_PROXY_KEEP_RECENT_TOKENS=10000
-CLAUDIE_PROXY_TOOL_RESULT_LIMIT=3000
-CLAUDIE_PROXY_TEXT_LIMIT=6000
-CLAUDIE_PROXY_LOCAL_SUMMARY_TOKENS=2000
-CLAUDIE_PROXY_CACHE_MAX_MB=10
-CLAUDIE_PROXY_CHUNK_SUMMARY=1
-CLAUDIE_PROXY_CHUNK_SIZE_MESSAGES=8
-CLAUDIE_PROXY_CHUNK_CACHE_TTL_HOURS=168
-CLAUDIE_PROXY_CHUNK_CACHE_MAX_ENTRIES=200
-CLAUDIE_PROXY_CAPABILITY_CACHE_TTL_HOURS=720
-CLAUDIE_PROXY_CAPABILITY_CACHE_MAX_ENTRIES=200
-CLAUDIE_PROXY_COMPAT_PROMPT=0
-CLAUDIE_PROXY_FORWARD_IMAGES=auto
-```
-
+<summary><code>Extra env</code> 可调参数（默认值）</summary>CLAUDIE_PROXY_OPTIMIZE=1 / SUMMARY_THRESHOLD=24000 / KEEP_RECENT_MESSAGES=12 / KEEP_RECENT_TOKENS=10000 / TOOL_RESULT_LIMIT=3000 / TEXT_LIMIT=6000 / LOCAL_SUMMARY_TOKENS=2000 / CACHE_MAX_MB=10 / CHUNK_SIZE_MESSAGES=8 / COMPAT_PROMPT=0 / FORWARD_IMAGES=auto
 </details>
 
 ## Stats 面板
 
-Settings → Stats 基于本地 `daily_stats.json`（最多 45 天）展示使用情况，数据完全留在本机。
-
-- **顶部 KPI** — 大字为今天，下方 `7d · N` 为近 7 天合计。涵盖 Prompts（提问轮次）、Tokens（输入+输出+缓存读写）、Cache hit（缓存读 ÷ 全部上下文输入，越高越省钱）、Tool calls。
-- **Activity** — 14 天提问数柱状图，今天高亮，空闲日保留空柱；标题给出每日提问数、14 天峰值和近 7 天活跃天数。
-- **Productivity highlights**（近 7 天）— 活跃天数、平均每 prompt token、最常用工具类别、完成的番茄钟数。
-- **Detail**（近 7 天分布）— Tool mix（Write/Bash/Search/Agent/Perm/Choice）与 Tokens（Input/Output/Cache W/Cache R）。
+Settings → Stats 基于本地 `daily_stats.json`（最多 45 天）展示使用情况，数据不留出本机。顶部 KPI 大字为今日值，下方 `7d · N` 为近 7 天合计，涵盖 Prompts、Tokens（输入+输出+缓存读写）、Cache hit、Tool calls。Activity 为 14 天柱状图；Productivity highlights、Tool mix 与 Token 分布见 Detail 区域。
 
 ## 本地数据
 

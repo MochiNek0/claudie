@@ -45,6 +45,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `src/globals.rs`: process-wide `OnceLock` handles for shared app state and pet renderer.
 - `src/notifier.rs`: Win32 message-box notification wrapper.
 - `src/util.rs`: argument parsing, text shortening, markdown block parsing, and UTF-16 conversion.
+- `src/i18n.rs`: lightweight dependency-free bilingual (zh/en) string table with process-wide language selection and Slint I18n global binding.
 - `src/time_util.rs`: RFC3339/epoch timestamp parsing, duration formatting, and percentage value extraction.
 - `src/official_usage.rs`: Claude Code OAuth usage API polling thread and credential management.
 - `src/usage_display.rs`: official usage percentage bars, reset countdown, subscription plan formatting, and UI display adapter.
@@ -80,7 +81,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `src/settings/mod.rs`: settings/profile structs, normalization, OpenAI profile detection, extra env/body parsing, Claude settings writes, and onboarding helper.
 - `src/settings/secrets.rs`: Windows DPAPI encrypted sensitive credential storage, custom serde serialization, and transparent load/save.
 - `src/settings/storage.rs`: BOM-tolerant reads and pretty JSON writes.
-- `src/ui/`: raw Win32 windowing, Slint dialog views, GIF rendering, window icons, and theme tokens.
+- `src/ui/`: raw Win32 windowing, Slint dialog views, GIF rendering, window icons, folder picker, and theme tokens.
 - `src/ui/mod.rs`: UI module structure and type re-exports.
 - `src/ui/gif_animation.rs`: GDI+ GIF loading, frame delay sampling, mood transitions, and drawing.
 - `src/ui/theme.rs`: shared color and radius tokens for the GDI-drawn HUD windows.
@@ -89,6 +90,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `src/ui/window/mod.rs`: main transparent pet window, hotkeys, context menu, dragging/clicking, profile menu, official usage display, position persistence, system tray icon (`Shell_NotifyIconW`), multi-session switcher auxiliary window, and fishing minigame click trigger.
 - `src/ui/window/render.rs`: render snapshot, HUD, pet drawing, session switcher row rendering, and fishing HUD overlay.
 - `src/ui/window_position.rs`: monitor-aware window centering and bounds helpers used by auxiliary Slint windows (permission/choice popup, settings).
+- `src/ui/folder_dialog.rs`: Vista+ `IFileOpenDialog` folder picker for the Settings panel GIF directory selector.
 - `src/ui/prompt_popup.rs`: Slint permission/choice popup snapshots and callbacks.
 - `src/ui/settings_panel/`: Settings window Slint bridge, tab controllers, and live timers.
 - `src/ui/settings_panel/mod.rs`: settings panel top-level refcell bridge and timer thread lifecycle.
@@ -115,37 +117,19 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 
 ## Architecture Notes
 
-- `AppState` is the central mutable model. Access it through `Arc<Mutex<AppState>>` or `APP_STATE`.
-- Normal startup starts the hook server on `DEFAULT_PORT` (`17387`), starts the OpenAI proxy on `DEFAULT_PROXY_PORT` (`17388`), then ensures Claude Code hooks point at the selected hook port. Exiting the UI uninstalls claudie-managed hooks.
-- Installed hook events are defined in `src/hooks/claude_settings.rs`; event semantics belong in `src/hooks/events.rs`. The event handler also tolerates common camelCase field variants and some compatibility event names.
-- Mood transitions should go through `AppState::set_mood`, `set_resting_mood`, `start_tool_activity`, `finish_tool_activity`, `start_subagent`, `finish_subagent`, or `decay_mood` so timestamps and renderer priority stay correct. `PetMood::Deny` (and `ClaudeSessionStatus::Denied`) is a separate mood from `Error`, fired when a permission deny interrupts the turn — it has its own `deny.gif`, color, and switcher symbol. `PetMood::Shrug` (`shrug.gif`) is the recoverable-hiccup reaction fired by `PostToolUseFailure` (a single tool failed but the turn continues): it is a low-priority (50) resting mood with a short ~3s decay and, unlike `Error`/`Deny`, has **no** `ClaudeSessionStatus` — `PostToolUseFailure` deliberately leaves the session status untouched so its projection cannot outrank the shrug, and the next tool's working mood naturally overrides it. Only `StopFailure` (turn-ending failure) maps to `Error`.
-- `PreToolUse` mood classification treats edit/write tools as `Typing`, shell tools as `Building`, read/search tools as `Search`, and `Task` based on task text.
-- Popups are created only by the blocking `PermissionRequest` hook; `PreToolUse` is never intercepted. Claude Code keeps its own terminal prompt visible while the hook waits, so the claudie popup and the terminal options stay usable side by side, and auto/bypass permission modes (which never fire `PermissionRequest`) never trigger popups. `ExitPlanMode` and `AskUserQuestion` also arrive through this event.
-- Permission requests are `PendingPermission` values and complete through `decide_current_permission`. Denying a normal tool writes `continue=false` + `stopReason` and `interrupt=true` — this matches a terminal "No" (interrupt the turn) rather than feeding a tool-error back to the model. Denying `ExitPlanMode`/`AskUserQuestion` sends a plain deny instead, so Claude Code falls back to its own terminal flow (keep planning / ask in terminal). Denial also calls `finish_session_work` so the pet does not stay in a working mood when the tool will not run.
-- `AskUserQuestion` permission requests do not use the generic popup: `handle_question_request` parses `tool_input.questions` into a `PendingChoice` (appending an "Other..." free-text option per question) and the Slint questions UI renders selectable options. Submitting answers the hook with `behavior=allow` plus `updatedInput` carrying an `answers` map (question text → chosen labels, comma-joined), matching what Claude Code's own dialog sends; cancelling sends the plain fall-back-to-terminal deny. Unparseable question input falls through to the generic permission popup. `ExitPlanMode` stays on the permission popup and renders the `plan` field as markdown.
-- Tool events (`PreToolUse`, `PostToolUse`) MUST NOT blanket-clear pending interactions — parallel tools completing must not accidentally close a popup belonging to a different tool call. Precise sweeps are allowed: `PostToolUse`/`PostToolUseFailure` resolves the pending permission with the same session and `tool_use_id`, plus any pending `ExitPlanMode` popups and question choices in that session (forward progress means they were answered in the terminal); `PreToolUse` of another tool resolves pending `ExitPlanMode` popups.
-- `session_status_for_event` returns `Option`; late events such as `SubagentStop`/`TaskCompleted` for an already-ended session do not roll the session back into `Streaming`.
-- The primary "answered in the terminal" signal is the hook socket closing — Claude Code aborts the pending `PermissionRequest` once the terminal dialog is resolved, and the wait loop probes the connection every 250ms. The transcript-denial detector in `src/hooks/events.rs` is a fallback and only matches Claude Code's own structured denial markers in transcript lines, so reading source code or logs that mention "permission/denied" does not falsely dismiss popups.
-- Claude Code may run several sessions in parallel. `AppState` keeps a `sessions` map keyed by session id with status (`Streaming`, `WaitingPermission`, `WaitingChoice`, `Idle`, …), CWD, and last-activity timestamp; `focused_session_id` drives which session the pet mood and HUD reflect. The session switcher auxiliary window (toggle: `Settings -> Basic -> show_session_switcher`, default on) renders one row per session and lets the user scroll/click to switch focus. Hide it when only one session is active.
-- Daily stats should be recorded via `AppState` methods and stored by `src/app/stats.rs`; UI code should display counters, not derive business stats.
-- Keep the hook server small and synchronous. Put Claude-event behavior in `src/hooks/events.rs`, not in the HTTP parser.
-- Keep OpenAI proxy transport and Anthropic/OpenAI conversion in `src/proxy/`; keep context optimization and cache logic in `src/proxy_optimizer/`; keep profile persistence and Claude env behavior in `src/settings/`.
-- The proxy defaults `parallel_tool_calls=true` when tools are present and the model supports tools. Users can set `{"parallel_tool_calls": false}` in `OpenAI body` for older/smaller upstreams.
-- The proxy authenticates incoming requests against a Bearer token derived from the active profile (`proxy_auth_token`); the OAuth token Claude Code sends via `ANTHROPIC_AUTH_TOKEN` is the expected value. Requests without a matching token get `401 Unauthorized`.
-- Upstream errors map to Anthropic-style responses. 429/529 from the upstream forward the upstream `Retry-After` header back to Claude Code so its native retry/backoff kicks in; transient upstream unavailability is reported as HTTP 529 (not 503) to align with Anthropic's overload semantics.
-- Recognized OpenAI/Azure/DeepSeek/Qwen/Kimi/GLM/OpenRouter hosts keep the compat prompt off by default; Generic providers get it unless `CLAUDIE_PROXY_COMPAT_PROMPT=0` is set.
-- Vision/image forwarding is auto-detected by model name and can be forced with `CLAUDIE_PROXY_FORWARD_IMAGES=always` or disabled with `CLAUDIE_PROXY_FORWARD_IMAGES=never`.
-- Each model field (`model` / `opus_model` / `sonnet_model` / `haiku_model`) has its own `*_1m` opt-in. When set, `apply_1m_suffix` appends `[1m]` to the id written to Claude Code; the proxy strips it via `strip_1m_suffix` before forwarding upstream. Loaders detect the suffix on saved profiles and restore the toggle.
-- The Settings → LLM Profiles `Fetch models` button hits the active profile's upstream `/v1/models` (Bearer-only OpenAI shape, with `/anthropic` and `/v{N}` path normalization, and a fallback to the site root). Real `api.anthropic.com` uses `x-api-key`; the official profile reuses its OAuth token, and OAuth tokens are only sent to the official profile to avoid leaking to third parties. Empty results fall back to a grey placeholder dropdown rather than an empty popup.
-- UI code uses raw Win32 handles and unsafe calls. Keep unsafe usage close to Win32 boundaries and prefer small helper functions for repeated patterns.
-- A Win32 tray icon (`Shell_NotifyIconW`, id `1`, callback `WM_APP+1`) is installed on window creation and removed on destroy; the tray menu mirrors the right-click context menu.
-- Settings and prompt windows use Slint declarations in `src/ui/slint_views.rs`; keep Rust callback/state logic in `src/ui/settings_panel/` and `src/ui/prompt_popup.rs`. Slint runs the software renderer only (no femtovg/OpenGL backend); when state changes from a callback or background thread, wrap it in `redraw_after`/`redraw_after_arg` or call `request_redraw` so the panel actually repaints.
-- Use `util::wide` for strings passed to Win32 APIs.
-- Do not block the UI thread with noticeable network or filesystem work.
-- When settings change, update both persisted files and in-memory `AppState`.
-- Secrets in `src/settings/secrets.rs` use Windows DPAPI (`CryptProtectData`/`CryptUnprotectData`) for encryption at rest. The `Secrets` struct wraps a `serde_json::Value` and serializes encrypted. Secrets are scoped to the current Windows user — they cannot be decrypted by another user or on another machine.
-- Official usage polling runs in a dedicated thread spawned at startup. It polls the Claude Code OAuth API (`/api/v2/organizations/.../usage` and `/api/v2/billing/subscription`) every 60 seconds with a cached `token.json` from the Claude Code config directory. Results are stored in `AppState` and displayed in the Settings panel Usage tab and the right-click menu live quota bar.
-- The fishing minigame in `src/app/fishing.rs` is a turn-based state machine: `Inactive → Waiting → Reeling → Caught | Missed`. Left-click on the pet starts the game. During the `Reeling` phase, the player must click when the tension bar is within the green zone. Each phase maps to its own GIF file by the fixed naming convention (`fishing.gif` / `reel.gif` / `caught.gif` / `missed.gif`), resolved per-mood from the user's GIF folder with a fallback to the bundled default. Fishing stats are recorded in `daily_stats.json` alongside tool usage stats.
+**State & data flow.** `AppState` (behind `Arc<Mutex<AppState>>` or `APP_STATE`) is the central mutable model. Access via `app_state.lock().unwrap()`. The hook server is on `DEFAULT_PORT` (17387), the OpenAI proxy on `DEFAULT_PROXY_PORT` (17388). Exiting uninstalls claudie-managed hooks from `settings.json`.
+
+**Permissions & popups.** Popups fire only from `PermissionRequest`, never `PreToolUse`. `ExitPlanMode` and `AskUserQuestion` also arrive through `PermissionRequest`. Denying a normal tool writes `continue=false` + `interrupt=true` (matches terminal "No"). Denying `ExitPlanMode`/`AskUserQuestion` sends a plain deny so Claude Code falls back to its own terminal flow. `AskUserQuestion` uses a custom choice UI; `ExitPlanMode` renders the plan as markdown. Parallel tool events MUST NOT blanket-clear pending interactions — only precise (session, tool_use_id) sweeps. The primary "answered in terminal" signal is the hook socket closing; transcript denial markers are a fallback only.
+
+**Moods.** Use `AppState::set_mood`, `set_resting_mood`, `start_tool_activity`, `finish_tool_activity`, `start_subagent`, `finish_subagent` or `decay_mood`. `PetMood::Deny` (turn-interrupted-by-deny) is distinct from `Error`; `PetMood::Shrug` (recoverable `PostToolUseFailure`) is low-priority (50) resting with ~3s decay and no `ClaudeSessionStatus`. Only `StopFailure` maps to `Error`. Tool classification: edit/write → `Typing`, shell → `Building`, read/search → `Search`.
+
+**Proxy & profiles.** `src/proxy/` handles transport and format conversion; `src/proxy_optimizer/` handles context compression/cache; `src/settings/` handles profiles and env. Bearer token auth (`proxy_auth_token`), upstream 429/529 forward `Retry-After`, transient failures → 529. Compat prompt auto-disabled for known OpenAI/Azure/DeepSeek/Qwen/Kimi/GLM/OpenRouter hosts. `[1m]` suffix stripped before upstream. `Fetch models` hits `/v1/models` with Bearer auth. Official profile reuses OAuth token; never sent to third-party hosts.
+
+**UI.** Raw Win32, unsafe — keep close to FFI boundaries. Settings/prompt windows use Slint (`src/ui/slint_views.rs`), software renderer only. State changes from callbacks/background threads must call `redraw_after`/`request_redraw`. Tray icon (`Shell_NotifyIconW`, id `1`) mirrors the context menu. Use `util::wide` for Win32 strings. Do not block the UI thread.
+
+**Sessions & persistence.** Multiple Claude Code sessions keyed by id in `sessions` map; `focused_session_id` drives mood/HUD. Session switcher row (default on) renders one row per session, hidden when only one is active. Settings merge into `settings.json` preserving unrelated fields. Secrets use Windows DPAPI (user-scoped). Official usage polled every 60s from Claude Code OAuth API. Stats via `src/app/stats.rs`; UI only displays counters.
+
+**Modules.** Hook events → `src/hooks/events.rs`, not the HTTP parser. Keep focus: proxy transport/conversion in `src/proxy/`, cache in `src/proxy_optimizer/`, profiles/env in `src/settings/`.
 
 ## Maintenance Guidelines
 
@@ -157,37 +141,4 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 
 ## Verification Checklist
 
-Run at least:
-
-```powershell
-cargo fmt
-cargo check
-```
-
-Run `cargo test` when touching hook settings, quota extraction, LLM profile logic, proxy conversion/streaming, optimizer/cache logic, stats, pomodoro, or other pure domain rules.
-
-For UI, hook, permission, settings, or proxy behavior changes, also run:
-
-```powershell
-cargo run --release
-```
-
-Manual checks worth doing for relevant changes:
-
-- Pet window opens without a console in release builds and restores its last saved position.
-- A tray icon appears in the system notification area; clicking/right-clicking it surfaces the same menu as the pet's right-click menu.
-- When two or more Claude Code sessions are active, the session switcher row appears alongside the pet; scrolling/clicking changes the focused session and the pet mood/HUD follow.
-- Right-click menu opens Settings, Pomodoro actions, LLM Profile submenu, and Exit.
-- Settings tabs switch cleanly between Basic, Pomodoro, LLM Profiles, and Stats.
-- GIF resources load from configured or bundled assets.
-- Short left-click plays an interaction animation; click-and-move still drags the window.
-- `POST /hook` updates mood/events and stats.
-- Permission requests show Allow, Always, and Deny controls in claudie while the same options stay usable in the Claude Code terminal; answering on either side resolves both (the popup closes when the terminal answers). Deny interrupts the current turn for normal tools; for plan approval and AskUserQuestion it falls back to the terminal instead. A parallel tool finishing in the meantime does not dismiss the popup.
-- `AskUserQuestion` (e.g. plan-mode questions) shows the questions with selectable option rows plus an "Other..." free-text answer; picking an option and submitting in claudie answers the question in Claude Code, while the terminal selector stays usable and answering there closes the popup. `ExitPlanMode` shows the plan as rendered markdown, not raw JSON.
-- With auto-accept or bypass permissions enabled, claudie shows no popups at all.
-- LLM Profiles can save/use/import/delete profiles and switch from the right-click menu.
-- OpenAI-format profiles route Claude Code through `http://127.0.0.1:17388`, forward `OpenAI body`, stream correctly when requested, and compress/summarize long conversations without losing recent messages.
-- Stats records daily counters and token usage in `%USERPROFILE%\.claudie\daily_stats.json`, and the Stats tab charts do not overflow.
-- Right-click menu shows official Claude Code usage (5h/7d) with percentage bars; basic users see the upgrade link.
-- Left-clicking the pet triggers the fishing minigame: waiting phase, click again to reel, keep tension in the green zone to catch.
-- Secrets are encrypted with DPAPI and survive app restart; importing an API key stores it encrypted.
+Always run: `cargo fmt && cargo check`. Run `cargo test` when touching domain logic (hooks, proxy, optimizer, settings, stats, pomodoro, fishing). For UI/hook/permission changes, run `cargo run --release` and verify the pet window, tray icon, session switcher, settings tabs, GIF loading, permission popups, fishing minigame, and profile switching work as expected.
