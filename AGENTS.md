@@ -50,14 +50,14 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `src/official_usage.rs`: Claude Code OAuth usage API polling thread and credential management.
 - `src/usage_display.rs`: official usage percentage bars, reset countdown, subscription plan formatting, and UI display adapter.
 - `src/app/`: core domain state.
-- `src/app/mod.rs`: `AppState`, `PetMood`, multi-session tracking (`sessions`, `focused_session_id`, switcher ordering), pending permissions/choices, quota snapshots, fishing, pomodoro, stats, and mood decay.
+- `src/app/mod.rs`: `AppState`, `PetMood`, multi-session tracking (`sessions`, `focused_session_id`, `focus_pinned`, `transcript_path`, `turn_baseline_len`), pending permissions/choices, quota snapshots, fishing, pomodoro, stats, mood decay, and interrupt polling.
 - `src/app/fishing.rs`: fishing minigame state machine with waiting/reeling/caught/missed phases and tension zone tracking.
 - `src/app/pomodoro.rs`: focus/short-break/long-break timer state and transitions.
 - `src/app/stats.rs`: local daily ledger, local date bucketing, tool classification, token counters, and fishing stats.
 - `src/hooks/`: Claude Code hook facade.
 - `src/hooks/mod.rs`: public re-exports and helper entry points.
 - `src/hooks/server.rs`: minimal synchronous HTTP server accepting `POST /hook`.
-- `src/hooks/events.rs`: Claude hook event semantics, mood transitions, permission waiting, hook responses, and stats call sites.
+- `src/hooks/events.rs`: Claude hook event semantics, mood transitions, permission waiting, hook responses, stats call sites, and terminal ESC interrupt detection (`transcript_recently_interrupted`, `poll_session_interrupts`).
 - `src/hooks/quota.rs`: token, model, provider, quota, rate-limit, and official usage window capture from payloads/transcripts.
 - `src/hooks/claude_settings.rs`: hook settings generation, merge, install, uninstall, and one-time backup handling.
 - `src/proxy/`: local Anthropic Messages to OpenAI Chat Completions compatibility proxy.
@@ -87,7 +87,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 - `src/ui/theme.rs`: shared color and radius tokens for the GDI-drawn HUD windows.
 - `src/ui/slint_views.rs`: Slint declarations for Settings and Prompt windows.
 - `src/ui/window_icon.rs`: Slint/Winit/Win32 icon bridge for auxiliary windows.
-- `src/ui/window/mod.rs`: main transparent pet window, hotkeys, context menu, dragging/clicking, profile menu, official usage display, position persistence, system tray icon (`Shell_NotifyIconW`), multi-session switcher auxiliary window, and fishing minigame click trigger.
+- `src/ui/window/mod.rs`: main transparent pet window, hotkeys, context menu, dragging/clicking, profile menu, official usage display, position persistence, system tray icon (`Shell_NotifyIconW`), multi-session switcher auxiliary window, ESC interrupt polling (`poll_session_interrupts` call in `WM_TIMER`), fishing minigame click trigger, and HUD anchoring to stable nominal pet rect.
 - `src/ui/window/render.rs`: render snapshot, HUD, pet drawing, session switcher row rendering, and fishing HUD overlay.
 - `src/ui/window_position.rs`: monitor-aware window centering and bounds helpers used by auxiliary Slint windows (permission/choice popup, settings).
 - `src/ui/folder_dialog.rs`: Vista+ `IFileOpenDialog` folder picker for the Settings panel GIF directory selector.
@@ -125,9 +125,9 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 
 **Proxy & profiles.** `src/proxy/` handles transport and format conversion; `src/proxy_optimizer/` handles context compression/cache; `src/settings/` handles profiles and env. Bearer token auth (`proxy_auth_token`), upstream 429/529 forward `Retry-After`, transient failures → 529. Compat prompt auto-disabled for known OpenAI/Azure/DeepSeek/Qwen/Kimi/GLM/OpenRouter hosts. `[1m]` suffix stripped before upstream. `Fetch models` hits `/v1/models` with Bearer auth. Official profile reuses OAuth token; never sent to third-party hosts.
 
-**UI.** Raw Win32, unsafe — keep close to FFI boundaries. Settings/prompt windows use Slint (`src/ui/slint_views.rs`), software renderer only. State changes from callbacks/background threads must call `redraw_after`/`request_redraw`. Tray icon (`Shell_NotifyIconW`, id `1`) mirrors the context menu. Use `util::wide` for Win32 strings. Do not block the UI thread.
+**UI.** Raw Win32, unsafe — keep close to FFI boundaries. Settings/prompt windows use Slint (`src/ui/slint_views.rs`), software renderer only. State changes from callbacks/background threads must call `redraw_after`/`request_redraw`. Tray icon (`Shell_NotifyIconW`, id `1`) mirrors the context menu. Use `util::wide` for Win32 strings. Do not block the UI thread. HUD sub-windows (pomodoro, fishing, session switcher) anchor to the stable nominal pet box (`pet_nominal_width`/`pet_nominal_height`, `nominal_pet_screen_rect`), not the variable visible rect, so they don't shift when mood GIF bounds change.
 
-**Sessions & persistence.** Multiple Claude Code sessions keyed by id in `sessions` map; `focused_session_id` drives mood/HUD. Session switcher row (default on) renders one row per session, hidden when only one is active. Settings merge into `settings.json` preserving unrelated fields. Secrets use Windows DPAPI (user-scoped). Official usage polled every 60s from Claude Code OAuth API. Stats via `src/app/stats.rs`; UI only displays counters.
+**Sessions & persistence.** Multiple Claude Code sessions keyed by id in `sessions` map; `focused_session_id` drives mood/HUD. Focus behavior: new `SessionStart`/`SessionResume` auto-focuses if current is idle (`acquire_focus_for_new_session`); switcher click pins focus (`focus_pinned`) until that session ends; unpinned focus auto-follows the most recently working session when idle (`most_recently_working_session`); a waiting permission/choice always preempts. ESC interrupt is detected by polling transcript file tail for `[Request interrupted by user]` markers past a per-session turn baseline (`transcript_path`, `turn_baseline_len`, `mark_session_interrupted`). Session switcher row (default on) renders one row per session, hidden when only one is active. Settings merge into `settings.json` preserving unrelated fields. Secrets use Windows DPAPI (user-scoped). Official usage polled every 60s from Claude Code OAuth API. Stats via `src/app/stats.rs`; UI only displays counters.
 
 **Modules.** Hook events → `src/hooks/events.rs`, not the HTTP parser. Keep focus: proxy transport/conversion in `src/proxy/`, cache in `src/proxy_optimizer/`, profiles/env in `src/settings/`.
 

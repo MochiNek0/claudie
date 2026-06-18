@@ -123,111 +123,128 @@ fn draw_session_switcher(hdc: HDC, state: &RenderState, x: i32, y: i32, w: i32, 
     if !state.settings.show_session_switcher || state.sessions.len() <= 1 {
         return;
     }
-    let panel = rgb(33, 32, 37);
-    let panel_border = rgb(43, 42, 49);
-    let focused_row = rgb(39, 37, 45);
-    let divider = rgb(48, 47, 55);
     let visible_count = state.sessions.len().min(SESSION_SWITCHER_MAX_VISIBLE_ITEMS);
 
-    filled_round_rect(hdc, x, y, w, h, theme::RADIUS_FIELD, panel, panel_border);
+    // Light frosted panel, matching the pomodoro and fishing HUDs.
+    filled_round_rect(
+        hdc,
+        x,
+        y,
+        w,
+        h,
+        theme::RADIUS_FIELD,
+        theme::SURFACE,
+        theme::HAIRLINE,
+    );
 
     for (index, item) in state.sessions.iter().take(visible_count).enumerate() {
         let row_y = y + SESSION_SWITCHER_VERTICAL_PADDING + index as i32 * (SESSION_BAR_HEIGHT + 1);
-        let accent = session_accent_color(item, index);
+        let accent = session_accent_color(item);
+        let text_y = row_y + 5;
+        let name_x = x + 16;
 
+        // Selected row gets a soft tint.
         if item.focused {
-            filled_rect(
+            filled_round_rect(
                 hdc,
-                x + 7,
+                x + 3,
                 row_y + 1,
-                w - 14,
+                w - 6,
                 SESSION_BAR_HEIGHT - 2,
-                focused_row,
+                theme::RADIUS_CHIP,
+                theme::SURFACE_HOVER,
+                theme::SURFACE_HOVER,
             );
         }
 
-        filled_round_rect(
+        // Pending badge, pinned right, shown only when something is waiting.
+        let mut content_right = x + w - 12;
+        if item.pending_count > 0 {
+            content_right =
+                draw_count_badge(hdc, content_right, row_y, item.pending_count, accent) - 8;
+        }
+
+        // Status text carries the status color — replaces the old leading-edge
+        // accent bar so the row reads clean without a quote-style stripe.
+        let status = session_status_text(item);
+        let status_max = (content_right - name_x - 56).max(20);
+        let fitted_status = fit_text_to_width(hdc, &status, status_max);
+        let status_w = text_width(hdc, &fitted_status);
+        let status_x = content_right - status_w;
+        text(
             hdc,
-            x + 2,
-            row_y + 3,
-            5,
-            SESSION_BAR_HEIGHT - 6,
-            4,
-            accent,
-            accent,
+            status_x,
+            text_y,
+            &fitted_status,
+            session_status_text_color(item),
         );
 
-        let count_x = (x + (w * 40) / 100).max(x + 88).min(x + w - 96);
-        let symbol_x = count_x + 30;
-        let detail_x = symbol_x + 20;
-        let name_x = x + 22;
-        let text_y = row_y + 5;
+        // Project name in primary ink, filling the remaining width.
         let name = item.display_name.trim();
         let name = if name.is_empty() {
             crate::i18n::strings().session_default_name
         } else {
             name
         };
-        let fitted_name = fit_text_to_width(hdc, name, (count_x - name_x - 8).max(1));
-        text(hdc, name_x, text_y, &fitted_name, accent);
-
-        let count = session_count_text(item);
-        text_fit(
-            hdc,
-            count_x,
-            text_y,
-            (symbol_x - count_x - 8).max(1),
-            &count,
-            rgb(196, 199, 206),
-        );
-
-        text_fit(
-            hdc,
-            symbol_x,
-            text_y,
-            16,
-            session_status_symbol(item.status),
-            rgb(239, 156, 46),
-        );
-        text_fit(
-            hdc,
-            detail_x,
-            text_y,
-            (x + w - detail_x - 12).max(1),
-            &session_status_text(item),
-            rgb(237, 239, 244),
-        );
+        let name_max = (status_x - 8 - name_x).max(1);
+        let fitted_name = fit_text_to_width(hdc, name, name_max);
+        text(hdc, name_x, text_y, &fitted_name, theme::INK);
 
         if index + 1 < visible_count {
-            filled_rect(hdc, x + 7, row_y + SESSION_BAR_HEIGHT, w - 9, 1, divider);
+            filled_rect(
+                hdc,
+                x + 10,
+                row_y + SESSION_BAR_HEIGHT,
+                w - 20,
+                1,
+                theme::HAIRLINE,
+            );
         }
     }
 }
 
-fn session_accent_color(item: &SessionSwitcherItem, index: usize) -> u32 {
+/// Draws a rounded count badge ending at `right_x`; returns its left edge.
+fn draw_count_badge(hdc: HDC, right_x: i32, row_y: i32, count: usize, accent: u32) -> i32 {
+    let label = count.to_string();
+    let label_w = text_width(hdc, &label);
+    let badge_w = (label_w + 12).max(16);
+    let badge_x = right_x - badge_w;
+    filled_round_rect(hdc, badge_x, row_y + 4, badge_w, 15, 7, accent, accent);
+    text(
+        hdc,
+        badge_x + (badge_w - label_w) / 2,
+        row_y + 5,
+        &label,
+        theme::SURFACE,
+    );
+    badge_x
+}
+
+fn session_accent_color(item: &SessionSwitcherItem) -> u32 {
+    let waiting = theme::rgb(120, 86, 224);
     match item.status {
-        ClaudeSessionStatus::Error | ClaudeSessionStatus::Denied => rgb(232, 93, 87),
-        ClaudeSessionStatus::WaitingPermission | ClaudeSessionStatus::WaitingChoice => {
-            rgb(145, 95, 231)
-        }
-        _ if item.focused => rgb(125, 83, 224),
-        _ if index % 2 == 0 => rgb(125, 83, 224),
-        _ => rgb(32, 143, 242),
+        ClaudeSessionStatus::Error | ClaudeSessionStatus::Denied => theme::DANGER,
+        ClaudeSessionStatus::WaitingPermission | ClaudeSessionStatus::WaitingChoice => waiting,
+        ClaudeSessionStatus::Streaming
+        | ClaudeSessionStatus::Tool
+        | ClaudeSessionStatus::Compacting => theme::ACCENT,
+        _ if item.focused => theme::ACCENT,
+        _ => theme::HAIRLINE,
     }
 }
 
-fn session_count_text(item: &SessionSwitcherItem) -> String {
-    item.pending_count.to_string()
-}
-
-fn session_status_symbol(status: ClaudeSessionStatus) -> &'static str {
-    match status {
-        ClaudeSessionStatus::Tool => ">",
-        ClaudeSessionStatus::Streaming | ClaudeSessionStatus::Compacting => "*",
-        ClaudeSessionStatus::WaitingPermission | ClaudeSessionStatus::WaitingChoice => "!",
-        ClaudeSessionStatus::Error | ClaudeSessionStatus::Denied => "x",
-        ClaudeSessionStatus::Idle | ClaudeSessionStatus::Done => "-",
-        ClaudeSessionStatus::Ended => ".",
+/// Color used for the right-aligned status text. Idle/done states stay muted
+/// so they don't compete with the focused row tint; active/waiting/error
+/// states pick up the same hue family as the pending badge.
+fn session_status_text_color(item: &SessionSwitcherItem) -> u32 {
+    let waiting = theme::rgb(120, 86, 224);
+    match item.status {
+        ClaudeSessionStatus::Error | ClaudeSessionStatus::Denied => theme::DANGER,
+        ClaudeSessionStatus::WaitingPermission | ClaudeSessionStatus::WaitingChoice => waiting,
+        ClaudeSessionStatus::Streaming
+        | ClaudeSessionStatus::Tool
+        | ClaudeSessionStatus::Compacting => theme::ACCENT,
+        _ => theme::INK_MUTED,
     }
 }
 

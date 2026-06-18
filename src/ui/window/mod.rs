@@ -58,7 +58,7 @@ use crate::app::pomodoro::{PomodoroMode, PomodoroStatus};
 use crate::app::{AppState, PermissionDecision, PetMood, SessionSwitcherItem};
 use crate::config::*;
 use crate::globals::{APP_STATE, PET_RENDERER};
-use crate::hooks::decide_current_permission;
+use crate::hooks::{decide_current_permission, poll_session_interrupts};
 use crate::settings::{
     LlmProfile, UserSettings, WindowPosition, apply_llm_profile_to_claude,
     ensure_claude_onboarding_complete, load_user_settings, save_llm_profile_db, save_user_settings,
@@ -139,6 +139,10 @@ thread_local! {
 
 struct WindowLayout {
     pet_visible_rect: PetVisibleRect,
+    // Full nominal pet box (scale-only, mood-independent). HUDs anchor to this
+    // so they don't shift when a mood's GIF has different visible bounds.
+    pet_nominal_width: i32,
+    pet_nominal_height: i32,
     pomodoro_visible: bool,
     pomodoro_width: i32,
     pomodoro_height: i32,
@@ -405,6 +409,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_ERASEBKGND => 1,
         WM_TIMER => {
+            // ESC in the terminal fires no hook; detect it from the transcript
+            // (throttled) before snapshotting state so the layout reflects it.
+            poll_session_interrupts();
             let mut timer_ms = IDLE_TIMER_MS;
             let mut target_layout = None;
             let mut repaint = RepaintKeys::default();
@@ -586,9 +593,13 @@ fn current_user_settings() -> UserSettings {
 
 fn window_layout_for_state(state: &AppState) -> WindowLayout {
     let pet_visible_rect = visible_pet_rect_in_window(&state.settings, state.mood);
+    let (nominal_width, nominal_height) =
+        scaled_pet_size_for_percent(state.settings.pet_scale_percent());
     let (session_width, session_height) = session_window_size_for_state(state);
     WindowLayout {
         pet_visible_rect,
+        pet_nominal_width: nominal_width,
+        pet_nominal_height: nominal_height,
         pomodoro_visible: state.pomodoro.status != PomodoroStatus::Stopped,
         pomodoro_width: POMODORO_HUD_WIDTH,
         pomodoro_height: POMODORO_HUD_HEIGHT,
@@ -835,9 +846,36 @@ unsafe fn sync_window_layout(hwnd: HWND, layout: &WindowLayout) {
     if GetWindowRect(hwnd, &mut pet_rect) == 0 {
         return;
     }
-    sync_pomodoro_window(&pet_rect, aux.pomodoro_hud, layout);
-    sync_fishing_window(&pet_rect, aux.fishing_hud, layout);
-    sync_session_window(&pet_rect, aux.session_switcher, layout);
+    // Anchor HUDs to the stable nominal pet box rather than the per-mood
+    // visible window rect, so they hold position as the GIF (and thus the
+    // tightly-wrapped pet window) changes size between moods.
+    let anchor = nominal_pet_screen_rect(
+        &pet_rect,
+        layout.pet_visible_rect,
+        layout.pet_nominal_width,
+        layout.pet_nominal_height,
+    );
+    sync_pomodoro_window(&anchor, aux.pomodoro_hud, layout);
+    sync_fishing_window(&anchor, aux.fishing_hud, layout);
+    sync_session_window(&anchor, aux.session_switcher, layout);
+}
+
+/// The full nominal pet box in screen coordinates, derived from the cached
+/// nominal origin. Stable across moods (the cached origin only moves on drag),
+/// unlike the visible window rect which shrinks/grows to wrap each GIF.
+fn nominal_pet_screen_rect(
+    window_rect: &RECT,
+    visible_rect: PetVisibleRect,
+    nominal_width: i32,
+    nominal_height: i32,
+) -> RECT {
+    let (origin_x, origin_y) = pet_nominal_origin(window_rect, visible_rect);
+    RECT {
+        left: origin_x + PET_X,
+        top: origin_y + PET_Y,
+        right: origin_x + PET_X + nominal_width,
+        bottom: origin_y + PET_Y + nominal_height,
+    }
 }
 
 unsafe fn sync_current_window_layout(hwnd: HWND) {

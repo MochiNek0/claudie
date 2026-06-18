@@ -71,6 +71,9 @@ pub(crate) fn process_hook_on_connection(
 
     let transcript_path = string_field(&payload, "transcript_path")
         .or_else(|| string_field(&payload, "transcriptPath"));
+    // Stat the transcript off the lock so the per-session interrupt baseline
+    // can be recorded without holding state during file I/O.
+    let transcript_len_now = transcript_path.as_deref().and_then(transcript_len);
 
     {
         let mut state = state.lock().expect("state poisoned");
@@ -97,6 +100,18 @@ pub(crate) fn process_hook_on_connection(
         update_quota_from_value(&mut state.quota, &payload, capture_official);
         if let Some(path) = transcript_path.as_deref() {
             state.quota.transcript_path = path.to_string();
+            // UserPromptSubmit/SessionStart begin a turn: re-baseline so only a
+            // marker written during this turn is treated as a fresh interrupt.
+            let is_turn_start = matches!(
+                event.as_str(),
+                "UserPromptSubmit" | "SessionStart" | "SessionResume"
+            );
+            state.note_session_transcript(
+                &event_session_id,
+                path,
+                transcript_len_now.unwrap_or(0),
+                is_turn_start,
+            );
         }
         record_daily_stats(&mut state, event.as_str(), &tool_name);
         state.record_token_snapshot();
@@ -229,7 +244,11 @@ fn handle_permission_request(
             permission.interaction_sequence,
         );
         state.start_permission_activity(permission.id, &permission.session_id, mood);
-        state.set_resting_mood(mood, true);
+        // Only the focused conversation tints the pet's resting mood; a
+        // background session's request must not change what the pet shows.
+        if state.focused_session_id.as_deref() == Some(permission.session_id.as_str()) {
+            state.set_resting_mood(mood, true);
+        }
         state.record_permission_stats();
         let capture_official = state.llm_profiles.official_profile_active();
         update_quota_from_value(&mut state.quota, &payload, capture_official);
@@ -429,7 +448,11 @@ fn handle_question_request(
             .unwrap_or_default();
         state.mark_session_waiting_choice(&choice.session_id, &detail, choice.interaction_sequence);
         state.start_choice_activity(choice.id, &choice.session_id, PetMood::Thinking);
-        state.set_resting_mood(PetMood::Thinking, true);
+        // Only the focused conversation tints the pet's resting mood; a
+        // background session's request must not change what the pet shows.
+        if state.focused_session_id.as_deref() == Some(choice.session_id.as_str()) {
+            state.set_resting_mood(PetMood::Thinking, true);
+        }
         state.record_choice_stats();
         let capture_official = state.llm_profiles.official_profile_active();
         update_quota_from_value(&mut state.quota, payload, capture_official);
@@ -647,25 +670,83 @@ fn transcript_has_terminal_denial(path: &str, start: u64) -> bool {
     if file.read_to_string(&mut text).is_err() {
         return false;
     }
+    compact_json_contains_denial(&text)
+}
+
+// Only the structural records Claude Code itself writes on a terminal "No" /
+// Esc count. Loose phrase matching used to dismiss popups whenever code or chat
+// text in the transcript merely mentioned a denial. The quote-anchored prefixes
+// cannot occur inside nested tool-result text because there the quotes are
+// JSON-escaped (\"). The `[requestinterruptedbyuser` marker is what ESC writes.
+const TERMINAL_DENIAL_MARKERS: [&str; 4] = [
+    "\"content\":\"theuserdoesn'twanttoproceedwiththistooluse",
+    "\"text\":\"theuserdoesn'twanttoproceedwiththistooluse",
+    "\"tooluseresult\":\"userrejected",
+    "\"content\":\"[requestinterruptedbyuser",
+];
+
+fn compact_json_contains_denial(text: &str) -> bool {
     let compact_json = text
         .chars()
         .filter(|ch| !ch.is_ascii_whitespace())
         .map(|ch| ch.to_ascii_lowercase())
         .collect::<String>();
-    // Only the structural records Claude Code itself writes on a terminal
-    // "No" / Esc count. Loose phrase matching used to dismiss popups whenever
-    // code or chat text in the transcript merely mentioned a denial. The
-    // quote-anchored prefixes cannot occur inside nested tool-result text
-    // because there the quotes are JSON-escaped (\").
-    const DENIAL_MARKERS: [&str; 4] = [
-        "\"content\":\"theuserdoesn'twanttoproceedwiththistooluse",
-        "\"text\":\"theuserdoesn'twanttoproceedwiththistooluse",
-        "\"tooluseresult\":\"userrejected",
-        "\"content\":\"[requestinterruptedbyuser",
-    ];
-    DENIAL_MARKERS
+    TERMINAL_DENIAL_MARKERS
         .iter()
         .any(|marker| compact_json.contains(marker))
+}
+
+// Lighter tail scan for the UI poll. ESC writes the interrupt marker as the
+// turn's final record, so only the tail past the turn baseline needs checking.
+// Returns the current file length when a fresh marker is present.
+fn transcript_recently_interrupted(path: &str, baseline: u64) -> Option<u64> {
+    const POLL_TAIL_BYTES: u64 = 64_000;
+    let mut file = fs::File::open(Path::new(path)).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len <= baseline {
+        return None;
+    }
+    let read_start = baseline.max(len.saturating_sub(POLL_TAIL_BYTES));
+    file.seek(SeekFrom::Start(read_start)).ok()?;
+    let mut text = String::new();
+    file.read_to_string(&mut text).ok()?;
+    compact_json_contains_denial(&text).then_some(len)
+}
+
+// ESC (and a terminal "No") fire no hook, so a session's working state can get
+// stuck. Periodically re-scan each working session's transcript tail; when a
+// fresh interrupt marker appears, release that session's turn so the pet
+// returns to idle. File reads happen off the state lock. Returns true if any
+// session was released.
+pub(crate) fn poll_session_interrupts() -> bool {
+    let Some(state) = APP_STATE.get() else {
+        return false;
+    };
+    let now = Instant::now();
+    let targets = {
+        let mut state = state.lock().expect("state poisoned");
+        if !state.interrupt_poll_due(now) {
+            return false;
+        }
+        state.working_sessions_for_interrupt_poll()
+    };
+    if targets.is_empty() {
+        return false;
+    }
+    let interrupted: Vec<(String, u64)> = targets
+        .into_iter()
+        .filter_map(|(session_id, path, baseline)| {
+            transcript_recently_interrupted(&path, baseline).map(|len| (session_id, len))
+        })
+        .collect();
+    if interrupted.is_empty() {
+        return false;
+    }
+    let mut state = state.lock().expect("state poisoned");
+    for (session_id, len) in interrupted {
+        state.mark_session_interrupted(&session_id, len);
+    }
+    true
 }
 
 // Non-destructive probe for "Claude Code gave up on this hook request". The
@@ -1004,12 +1085,24 @@ fn apply_hook_activity_for_session(
     payload: &Value,
     session_id: &str,
 ) {
+    // A session only tints the pet's mood while it is the focused conversation
+    // (or when nothing is focused, e.g. the last session just ended). Activity
+    // spans are already focus-filtered; this gate stops a background session's
+    // think/done/error from leaking into the focused session's display.
+    let drives_mood = {
+        let focused = state.focused_session_id.as_deref();
+        focused == Some(session_id) || focused.is_none()
+    };
     match activity {
         HookActivity::Idle => {
-            state.set_resting_mood(PetMood::Idle, false);
+            if drives_mood {
+                state.set_resting_mood(PetMood::Idle, false);
+            }
         }
         HookActivity::Thinking => {
-            state.set_resting_mood(PetMood::Thinking, true);
+            if drives_mood {
+                state.set_resting_mood(PetMood::Thinking, true);
+            }
         }
         HookActivity::StartTool(mood) => {
             state.start_tool_activity(
@@ -1032,7 +1125,9 @@ fn apply_hook_activity_for_session(
         HookActivity::Error => {
             state.finish_session_work(session_id);
             state.last_error = summarize_payload(payload);
-            state.set_resting_mood(PetMood::Error, true);
+            if drives_mood {
+                state.set_resting_mood(PetMood::Error, true);
+            }
         }
         HookActivity::Shrug => {
             // Release the failed tool's working span so the (low-priority)
@@ -1040,11 +1135,13 @@ fn apply_hook_activity_for_session(
             // away from the just-cleared working mood. No last_error: this is a
             // recoverable hiccup, not a turn-ending error.
             state.finish_session_work(session_id);
-            state.set_resting_mood(PetMood::Shrug, true);
+            if drives_mood {
+                state.set_resting_mood(PetMood::Shrug, true);
+            }
         }
         HookActivity::PermissionDenied => {
             state.finish_session_work(session_id);
-            if state.activity_mood().is_none() {
+            if drives_mood && state.activity_mood().is_none() {
                 state.set_resting_mood(PetMood::Idle, true);
             }
         }
@@ -1056,13 +1153,13 @@ fn apply_hook_activity_for_session(
         }
         HookActivity::Done => {
             state.finish_session_work(session_id);
-            if state.activity_mood().is_none() {
+            if drives_mood && state.activity_mood().is_none() {
                 state.set_resting_mood(PetMood::Happy, true);
             }
         }
         HookActivity::EndSession => {
             state.finish_session_work(session_id);
-            if state.activity_mood().is_none() {
+            if drives_mood && state.activity_mood().is_none() {
                 state.set_resting_mood(PetMood::Idle, true);
             }
         }
@@ -1342,6 +1439,42 @@ mod tests {
     use super::*;
     use crate::app::{ChoiceKind, ChoiceOption, ChoiceQuestion, ChoiceWaiter, PendingChoice};
     use std::sync::{Arc, Condvar, Mutex};
+
+    #[test]
+    fn transcript_recently_interrupted_detects_marker_past_baseline() {
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "claudie_test_interrupt_{}.jsonl",
+            std::process::id()
+        ));
+        let path_str = path.to_string_lossy().to_string();
+
+        let baseline = {
+            let mut file = fs::File::create(&path).expect("create temp transcript");
+            writeln!(file, "{{\"type\":\"user\",\"message\":\"hi\"}}").unwrap();
+            file.metadata().unwrap().len()
+        };
+        // Nothing past the baseline yet.
+        assert!(transcript_recently_interrupted(&path_str, baseline).is_none());
+
+        // Append the record Claude Code writes when the user hits ESC.
+        {
+            let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(
+                file,
+                "{{\"type\":\"user\",\"message\":{{\"content\":\"[Request interrupted by user]\"}}}}"
+            )
+            .unwrap();
+        }
+        assert!(transcript_recently_interrupted(&path_str, baseline).is_some());
+
+        // A baseline at/after the marker excludes it (already handled).
+        let len = fs::metadata(&path).unwrap().len();
+        assert!(transcript_recently_interrupted(&path_str, len).is_none());
+
+        let _ = fs::remove_file(&path);
+    }
 
     #[test]
     fn tool_names_map_to_work_moods() {

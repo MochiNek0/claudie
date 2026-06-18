@@ -22,6 +22,10 @@ const INTERACTION_MIN_VISIBLE: Duration = Duration::from_millis(1_800);
 const ENDED_SESSION_RETENTION: Duration = Duration::from_secs(30 * 60);
 const MAX_ENDED_SESSIONS: usize = 50;
 const STATS_FLUSH_INTERVAL: Duration = Duration::from_secs(3);
+// How often the UI tick re-scans a working session's transcript tail for a
+// terminal interrupt (ESC) marker. ESC fires no hook, so polling is the only
+// signal that the turn ended.
+const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(750);
 const RESTING_ACTIVITY_KEY: &str = "resting";
 const SUBAGENT_ACTIVITY_KEY: &str = "subagent";
 const POMODORO_ACTIVITY_KEY: &str = "pomodoro";
@@ -334,6 +338,29 @@ impl ClaudeSessionStatus {
         !matches!(self, Self::Ended)
     }
 
+    /// A session the user is actively working through: streaming, running a
+    /// tool, compacting, or waiting on the user. Focus stays put while the
+    /// focused session is busy; once it finishes its turn (or errors/ends),
+    /// focus is free to hand off to a session waiting on a request.
+    fn is_busy(self) -> bool {
+        matches!(
+            self,
+            Self::Streaming
+                | Self::Tool
+                | Self::Compacting
+                | Self::WaitingPermission
+                | Self::WaitingChoice
+        )
+    }
+
+    /// Actively producing output (as opposed to merely waiting on the user).
+    /// Drives auto-follow: an idle focused session yields to whichever session
+    /// is currently working. Waiting states are handled separately via the
+    /// pending-request hand-off so their popup can surface.
+    fn is_working(self) -> bool {
+        matches!(self, Self::Streaming | Self::Tool | Self::Compacting)
+    }
+
     fn visual_projection(self) -> Option<ActivityProjection> {
         let interrupts_visual = matches!(
             self,
@@ -360,6 +387,11 @@ pub(crate) struct ClaudeSession {
     pub(crate) order: u64,
     pub(crate) last_seen: Instant,
     waiting_interaction_sequence: Option<u64>,
+    // Latest transcript path seen for this session and the file length at the
+    // current turn's start. A terminal-interrupt marker appearing past the
+    // baseline means the turn was ESC-cancelled (no hook fires for that).
+    transcript_path: String,
+    turn_baseline_len: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -393,6 +425,9 @@ pub(crate) struct AppState {
     pub(crate) activity_spans: HashMap<String, ActivitySpan>,
     pub(crate) sessions: HashMap<String, ClaudeSession>,
     pub(crate) focused_session_id: Option<String>,
+    // Set when the user picks a session in the switcher: focus stays pinned to
+    // it (auto-follow suppressed) until that session ends, then releases.
+    focus_pinned: bool,
     next_session_order: u64,
     pub(crate) pending_permissions: VecDeque<PendingPermission>,
     pub(crate) pending_choices: VecDeque<PendingChoice>,
@@ -408,6 +443,7 @@ pub(crate) struct AppState {
     stats_last_cache_creation_tokens: u64,
     stats_last_cache_read_tokens: u64,
     stats_last_flush: Instant,
+    last_interrupt_poll: Instant,
 }
 
 impl AppState {
@@ -434,6 +470,7 @@ impl AppState {
             activity_spans: HashMap::new(),
             sessions: HashMap::new(),
             focused_session_id: None,
+            focus_pinned: false,
             next_session_order: 1,
             pending_permissions: VecDeque::new(),
             pending_choices: VecDeque::new(),
@@ -449,6 +486,7 @@ impl AppState {
             stats_last_cache_creation_tokens: 0,
             stats_last_cache_read_tokens: 0,
             stats_last_flush: now,
+            last_interrupt_poll: now,
         };
         state.set_resting_activity_at(PetMood::Idle, false, now);
         state
@@ -580,6 +618,9 @@ impl AppState {
             }
             None => self.touch_session(session_id, cwd),
         }
+        if matches!(event, "SessionStart" | "SessionResume") {
+            self.acquire_focus_for_new_session(session_id);
+        }
     }
 
     pub(crate) fn mark_session_waiting_permission(
@@ -640,13 +681,113 @@ impl AppState {
         self.set_session_status(&session_id, "", status, detail.into(), None);
     }
 
+    /// Record a session's transcript path and, at a turn boundary (or the first
+    /// time we see the file), baseline its length so only markers written
+    /// during the current turn count as a fresh interrupt.
+    pub(crate) fn note_session_transcript(
+        &mut self,
+        session_id: &str,
+        path: &str,
+        len: u64,
+        is_turn_start: bool,
+    ) {
+        let session_id = normalize_session_id(session_id);
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            let first_capture = session.transcript_path.is_empty();
+            session.transcript_path = path.to_string();
+            if first_capture || is_turn_start {
+                session.turn_baseline_len = len;
+            }
+        }
+    }
+
+    /// Throttle gate for transcript interrupt polling; returns true at most once
+    /// per `INTERRUPT_POLL_INTERVAL`.
+    pub(crate) fn interrupt_poll_due(&mut self, now: Instant) -> bool {
+        if now.saturating_duration_since(self.last_interrupt_poll) < INTERRUPT_POLL_INTERVAL {
+            return false;
+        }
+        self.last_interrupt_poll = now;
+        true
+    }
+
+    /// Snapshot of `(session_id, transcript_path, turn_baseline_len)` for every
+    /// session we still believe is actively working and has a transcript to scan.
+    pub(crate) fn working_sessions_for_interrupt_poll(&self) -> Vec<(String, String, u64)> {
+        self.sessions
+            .values()
+            .filter(|session| session.status.is_working() && !session.transcript_path.is_empty())
+            .map(|session| {
+                (
+                    session.id.clone(),
+                    session.transcript_path.clone(),
+                    session.turn_baseline_len,
+                )
+            })
+            .collect()
+    }
+
+    /// Apply a detected terminal interrupt (ESC): release the turn's work, drop
+    /// the now-stale "thinking" tint if it was on screen, advance the scan
+    /// baseline so the same marker isn't re-detected, and mark the turn done.
+    pub(crate) fn mark_session_interrupted(&mut self, session_id: &str, new_baseline: u64) {
+        let session_id = normalize_session_id(session_id);
+        let still_working = self
+            .sessions
+            .get(&session_id)
+            .is_some_and(|session| session.status.is_working());
+        if !still_working {
+            return;
+        }
+        let was_focused = self.focused_session_id.as_deref() == Some(session_id.as_str());
+        self.finish_session_work(&session_id);
+        if was_focused {
+            let resting = self.default_resting_mood();
+            self.set_resting_mood(resting, true);
+        }
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.turn_baseline_len = new_baseline;
+        }
+        self.set_session_status(
+            &session_id,
+            "",
+            ClaudeSessionStatus::Done,
+            "Ready".to_string(),
+            None,
+        );
+    }
+
     pub(crate) fn focus_session(&mut self, session_id: &str) {
         let session_id = normalize_session_id(session_id);
         if !self.sessions.contains_key(&session_id) {
             return;
         }
         self.focused_session_id = Some(session_id);
+        // A deliberate switcher pick pins focus until that session ends.
+        self.focus_pinned = true;
         self.refresh_visual_mood();
+    }
+
+    /// A freshly started/resumed session takes focus when the user is not
+    /// actively working through another conversation and hasn't pinned one.
+    /// This is the "opening a new window focuses it" behavior.
+    fn acquire_focus_for_new_session(&mut self, session_id: &str) {
+        let session_id = normalize_session_id(session_id);
+        if self.focus_pinned || !self.session_is_live(&session_id) {
+            return;
+        }
+        let focus_busy = self
+            .focused_session_id
+            .as_deref()
+            .and_then(|id| self.sessions.get(id))
+            .is_some_and(|session| session.status.is_busy());
+        if focus_busy {
+            return;
+        }
+        if self.focused_session_id.as_deref() != Some(session_id.as_str()) {
+            self.focused_session_id = Some(session_id);
+            self.refresh_visual_mood();
+        }
     }
 
     pub(crate) fn session_switcher_items(&self) -> Vec<SessionSwitcherItem> {
@@ -742,6 +883,8 @@ impl AppState {
                 order,
                 last_seen: now,
                 waiting_interaction_sequence: None,
+                transcript_path: String::new(),
+                turn_baseline_len: 0,
             },
         );
     }
@@ -784,6 +927,55 @@ impl AppState {
     }
 
     fn reconcile_focused_session(&mut self, preferred: Option<&str>) {
+        // A manual pin only lasts while its session is alive; once it ends,
+        // release the pin so auto-follow resumes.
+        if self.focus_pinned
+            && !self
+                .focused_session_id
+                .as_deref()
+                .is_some_and(|id| self.session_is_live(id))
+        {
+            self.focus_pinned = false;
+        }
+
+        // A busy focused session is never preempted — keep the user's
+        // attention on the conversation they are actively working through.
+        let focus_busy = self
+            .focused_session_id
+            .as_deref()
+            .and_then(|id| self.sessions.get(id))
+            .is_some_and(|session| session.status.is_busy());
+        if focus_busy {
+            return;
+        }
+
+        // Focus is pinned to a live (but idle) session: hold it there. A
+        // blocking request elsewhere still needs the user, so a waiting session
+        // releases the pin and takes focus so its popup can surface.
+        if self.focus_pinned {
+            if let Some(waiter) = self.oldest_waiting_session() {
+                self.focused_session_id = Some(waiter);
+                self.focus_pinned = false;
+            }
+            return;
+        }
+
+        // Focus is free and unpinned. Hand off to the longest-waiting request
+        // so its popup pops as soon as the previous conversation releases focus.
+        if let Some(waiter) = self.oldest_waiting_session() {
+            self.focused_session_id = Some(waiter);
+            return;
+        }
+
+        // Auto-follow: track whichever session is actively working now.
+        if let Some(working) = self.most_recently_working_session() {
+            self.focused_session_id = Some(working);
+            return;
+        }
+
+        // Nobody is waiting or working. Keep the current focus if it is still
+        // alive to avoid flicker; otherwise fall back to the just-active
+        // session, then the oldest live session.
         if self
             .focused_session_id
             .as_deref()
@@ -805,6 +997,35 @@ impl AppState {
             .filter(|session| session.status.is_live())
             .min_by_key(|session| session.order)
             .map(|session| session.id.clone());
+    }
+
+    /// The live session most recently seen in an actively-working state.
+    /// Drives auto-follow once the focused session goes idle.
+    fn most_recently_working_session(&self) -> Option<String> {
+        self.sessions
+            .values()
+            .filter(|session| session.status.is_working())
+            .max_by_key(|session| (session.last_seen, session.order))
+            .map(|session| session.id.clone())
+    }
+
+    /// The live session with the oldest outstanding permission/choice request
+    /// (by interaction sequence). Drives focus hand-off so a finished session
+    /// yields to whoever has been waiting longest.
+    fn oldest_waiting_session(&self) -> Option<String> {
+        let permissions = self
+            .pending_permissions
+            .iter()
+            .map(|pending| (pending.interaction_sequence, pending.session_id.as_str()));
+        let choices = self
+            .pending_choices
+            .iter()
+            .map(|pending| (pending.interaction_sequence, pending.session_id.as_str()));
+        permissions
+            .chain(choices)
+            .filter(|&(_, session_id)| self.session_is_live(session_id))
+            .min_by_key(|&(sequence, _)| sequence)
+            .map(|(_, session_id)| session_id.to_string())
     }
 
     fn session_is_live(&self, session_id: &str) -> bool {
@@ -861,12 +1082,11 @@ impl AppState {
     }
 
     fn current_pending_target(&self) -> Option<PendingInteractionTarget> {
-        if let Some(focused) = self.focused_session_id.as_deref()
-            && let Some(target) = self.pending_target_for_session(Some(focused))
-        {
-            return Some(target);
-        }
-        self.pending_target_for_session(None)
+        // Popups are strictly focus-gated: only the focused session's requests
+        // surface. Other sessions' requests wait (shown as a switcher hint)
+        // until focus hands off to them, at which point their popup pops.
+        let focused = self.focused_session_id.as_deref()?;
+        self.pending_target_for_session(Some(focused))
     }
 
     fn pending_target_for_session(
@@ -2049,6 +2269,9 @@ mod tests {
     #[test]
     fn current_pending_interaction_uses_arrival_order_across_types() {
         let mut state = AppState::new();
+        // Both requests belong to the focused session; popups are focus-gated,
+        // so focus s1 to exercise the across-type arrival-order tie-break.
+        state.note_session_event("s1", "", "SessionStart", "", PetMood::Thinking);
 
         state.pending_permissions.push_back(PendingPermission {
             id: 1,
@@ -2210,6 +2433,145 @@ mod tests {
         assert_eq!(state.mood, PetMood::Subagent);
     }
 
+    fn push_test_permission(state: &mut AppState, id: u64, sequence: u64, session: &str) {
+        state.pending_permissions.push_back(PendingPermission {
+            id,
+            interaction_sequence: sequence,
+            session_id: session.to_string(),
+            tool_name: "Edit".to_string(),
+            tool_use_id: String::new(),
+            tool_input_fingerprint: String::new(),
+            summary: String::new(),
+            cwd: String::new(),
+            suggestions: Vec::new(),
+            waiter: Arc::new(PermissionWaiter {
+                decision: Mutex::new(None),
+                ready: Condvar::new(),
+            }),
+        });
+    }
+
+    #[test]
+    fn busy_focus_is_not_preempted_by_other_session_request() {
+        let mut state = AppState::new();
+        state.note_session_event("a", "", "UserPromptSubmit", "", PetMood::Thinking);
+        state.note_session_event("b", "", "SessionStart", "", PetMood::Thinking);
+        assert_eq!(state.focused_session_id.as_deref(), Some("a"));
+
+        // b raises a permission while a is still streaming.
+        push_test_permission(&mut state, 1, 1, "b");
+        state.mark_session_waiting_permission("b", "", "Edit", 1);
+
+        // Focus stays on the busy session and b's popup is withheld.
+        assert_eq!(state.focused_session_id.as_deref(), Some("a"));
+        assert!(state.current_pending_permission().is_none());
+    }
+
+    #[test]
+    fn finished_focus_releases_to_waiting_session() {
+        let mut state = AppState::new();
+        state.note_session_event("a", "", "UserPromptSubmit", "", PetMood::Thinking);
+        state.note_session_event("b", "", "SessionStart", "", PetMood::Thinking);
+        push_test_permission(&mut state, 1, 1, "b");
+        state.mark_session_waiting_permission("b", "", "Edit", 1);
+        assert_eq!(state.focused_session_id.as_deref(), Some("a"));
+
+        // a finishes its turn -> focus hands off to the waiting session b and
+        // its popup becomes the current target.
+        state.note_session_event("a", "", "Stop", "", PetMood::Thinking);
+        assert_eq!(state.focused_session_id.as_deref(), Some("b"));
+        assert_eq!(state.current_pending_permission().map(|p| p.id), Some(1));
+    }
+
+    #[test]
+    fn errored_focus_also_releases_to_waiting_session() {
+        let mut state = AppState::new();
+        state.note_session_event("a", "", "UserPromptSubmit", "", PetMood::Thinking);
+        state.note_session_event("b", "", "SessionStart", "", PetMood::Thinking);
+        push_test_permission(&mut state, 1, 1, "b");
+        state.mark_session_waiting_permission("b", "", "Edit", 1);
+
+        // An error ends a's turn (per design) -> focus releases to the waiter.
+        state.note_session_event("a", "", "StopFailure", "", PetMood::Thinking);
+        assert_eq!(state.focused_session_id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn idle_focus_keeps_when_no_session_is_waiting() {
+        let mut state = AppState::new();
+        state.note_session_event("a", "", "UserPromptSubmit", "", PetMood::Thinking);
+        state.note_session_event("b", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("a", "", "Stop", "", PetMood::Thinking);
+
+        // a is done and nobody is waiting: focus stays on a, no flicker to b.
+        assert_eq!(state.focused_session_id.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn new_window_takes_focus_from_idle_session() {
+        let mut state = AppState::new();
+        state.note_session_event("a", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("a", "", "Stop", "", PetMood::Thinking);
+        assert_eq!(state.focused_session_id.as_deref(), Some("a"));
+
+        // Opening a new window focuses it when the current focus is idle.
+        state.note_session_event("b", "", "SessionStart", "", PetMood::Thinking);
+        assert_eq!(state.focused_session_id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn auto_follow_tracks_working_session_when_focus_idle() {
+        let mut state = AppState::new();
+        state.note_session_event("a", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("a", "", "Stop", "", PetMood::Thinking);
+        state.note_session_event("b", "", "SessionStart", "", PetMood::Thinking);
+        // b (just opened) is focused and idle; a resuming work pulls focus back.
+        assert_eq!(state.focused_session_id.as_deref(), Some("b"));
+
+        state.note_session_event("a", "", "UserPromptSubmit", "", PetMood::Thinking);
+        assert_eq!(state.focused_session_id.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn manual_pin_holds_against_active_work() {
+        let mut state = AppState::new();
+        state.note_session_event("a", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("b", "", "SessionStart", "", PetMood::Thinking);
+        state.focus_session("b");
+
+        // a starts working, but the manual pin keeps the pet on b.
+        state.note_session_event("a", "", "UserPromptSubmit", "", PetMood::Thinking);
+        assert_eq!(state.focused_session_id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn manual_pin_releases_when_pinned_session_ends_then_auto_follows() {
+        let mut state = AppState::new();
+        state.note_session_event("a", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("b", "", "SessionStart", "", PetMood::Thinking);
+        state.focus_session("b");
+        state.note_session_event("a", "", "UserPromptSubmit", "", PetMood::Thinking);
+        assert_eq!(state.focused_session_id.as_deref(), Some("b"));
+
+        // b's window closes: the pin releases and focus auto-follows working a.
+        state.note_session_event("b", "", "SessionEnd", "", PetMood::Thinking);
+        assert_eq!(state.focused_session_id.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn pinned_session_yields_to_waiting_popup() {
+        let mut state = AppState::new();
+        state.note_session_event("a", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("b", "", "SessionStart", "", PetMood::Thinking);
+        state.focus_session("b");
+
+        // A blocking request on a must surface even though b is pinned.
+        push_test_permission(&mut state, 1, 1, "a");
+        state.mark_session_waiting_permission("a", "", "Edit", 1);
+        assert_eq!(state.focused_session_id.as_deref(), Some("a"));
+        assert_eq!(state.current_pending_permission().map(|p| p.id), Some(1));
+    }
+
     #[test]
     fn completed_focused_session_does_not_mask_resting_happy() {
         let mut state = AppState::new();
@@ -2336,6 +2698,51 @@ mod tests {
 
         assert_eq!(state.resting_mood, PetMood::Thinking);
         assert_eq!(state.mood, PetMood::Thinking);
+    }
+
+    #[test]
+    fn interrupt_releases_focused_session_work_and_resets_mood() {
+        let mut state = AppState::new();
+        state.note_session_event("s1", "", "UserPromptSubmit", "", PetMood::Thinking);
+        state.start_tool_activity(
+            "s1:id:bash-1".to_string(),
+            "Bash".to_string(),
+            PetMood::Building,
+        );
+        assert_eq!(state.mood, PetMood::Building);
+        assert_eq!(state.focused_session_id.as_deref(), Some("s1"));
+
+        // ESC interrupt detected at file length 4096.
+        state.mark_session_interrupted("s1", 4096);
+
+        assert_eq!(state.active_tools, 0);
+        assert_eq!(
+            state.sessions.get("s1").expect("session").status,
+            ClaudeSessionStatus::Done
+        );
+        assert_eq!(
+            state.sessions.get("s1").expect("session").turn_baseline_len,
+            4096
+        );
+        assert!(!state.mood.is_active_work());
+    }
+
+    #[test]
+    fn note_session_transcript_baselines_at_first_sight_and_turn_start() {
+        let mut state = AppState::new();
+        state.note_session_event("s1", "", "SessionStart", "", PetMood::Thinking);
+
+        // First capture baselines at the current length (excludes old markers).
+        state.note_session_transcript("s1", "t.jsonl", 100, false);
+        assert_eq!(state.sessions.get("s1").unwrap().turn_baseline_len, 100);
+
+        // A mid-turn update keeps the baseline.
+        state.note_session_transcript("s1", "t.jsonl", 250, false);
+        assert_eq!(state.sessions.get("s1").unwrap().turn_baseline_len, 100);
+
+        // A new turn advances it.
+        state.note_session_transcript("s1", "t.jsonl", 250, true);
+        assert_eq!(state.sessions.get("s1").unwrap().turn_baseline_len, 250);
     }
 
     #[test]
