@@ -132,6 +132,16 @@ Windows 安装包模板位于 `packaging/windows/claudie.iss`，输出 `dist\cla
 powershell -ExecutionPolicy Bypass -File packaging\windows\build-installer.ps1
 ```
 
+## 发布
+
+推送 `v*` 标签即由 GitHub Actions（`.github/workflows/release.yml`）自动编译、打包安装器并创建 GitHub Release，附带 `claudie-setup.exe`。发布步骤：
+
+1. 修改 `Cargo.toml` 的 `version`（应用通过 `CARGO_PKG_VERSION` 上报版本，需与标签一致，否则 CI 失败）。
+2. 提交并推送。
+3. `git tag vX.Y.Z && git push origin vX.Y.Z`。
+
+应用会每 24 小时静默检查 `MochiNek0/claudie` 的最新 Release，发现新版本时右键菜单出现「发现新版本 vX.Y.Z」项，点击用浏览器打开下载页。
+
 ## 开发
 
 提交前至少运行 `cargo fmt` 和 `cargo check`；触及 hook、配额、profile、代理转换/流式、优化器、stats、番茄钟等纯领域逻辑时运行 `cargo test`；UI/hook/权限/代理行为改动还需 `cargo run --release` 手动验证。

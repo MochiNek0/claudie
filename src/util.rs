@@ -46,6 +46,26 @@ pub(crate) fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Open a URL in the user's default browser via the shell. Errors are ignored;
+/// the worst case is the page simply not opening.
+pub(crate) fn open_url(url: &str) {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+
+    let operation = wide("open");
+    let target = wide(url);
+    unsafe {
+        // nShowCmd = SW_SHOWNORMAL (1).
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        );
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ConnectionLimiter {
     active: Arc<AtomicUsize>,

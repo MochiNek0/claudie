@@ -1346,13 +1346,17 @@ unsafe fn show_context_menu(hwnd: HWND) {
     // owner-drawn items appended below.
     clear_menu_draw_entries();
 
-    let (pomodoro_status, fishing_active) = APP_STATE
+    let (pomodoro_status, fishing_active, update) = APP_STATE
         .get()
         .map(|state| {
             let state = state.lock().expect("state poisoned");
-            (state.pomodoro.status, state.fishing.is_active())
+            (
+                state.pomodoro.status,
+                state.fishing.is_active(),
+                state.update.clone(),
+            )
         })
-        .unwrap_or((PomodoroStatus::Stopped, false));
+        .unwrap_or((PomodoroStatus::Stopped, false, Default::default()));
     let s = crate::i18n::strings();
 
     append_menu_item(menu, MENU_SETTINGS_ID, s.menu_settings, theme::INK);
@@ -1402,6 +1406,10 @@ unsafe fn show_context_menu(hwnd: HWND) {
         );
     }
     append_menu_separator(menu);
+    if !update.latest_version.is_empty() {
+        let label = format!("{} v{}", s.menu_update_available, update.latest_version);
+        append_menu_item(menu, MENU_CHECK_UPDATE_ID, &label, theme::ACCENT);
+    }
     append_menu_item(menu, MENU_EXIT_ID, s.menu_exit, theme::DANGER);
 
     let mut point = POINT { x: 0, y: 0 };
@@ -1451,6 +1459,10 @@ unsafe fn show_context_menu(hwnd: HWND) {
             with_app_state(|state| state.stop_fishing());
             sync_current_window_layout(hwnd);
             invalidate_pet_and_aux(hwnd);
+        } else if command == MENU_CHECK_UPDATE_ID {
+            if !update.release_url.is_empty() {
+                crate::util::open_url(&update.release_url);
+            }
         } else if command == MENU_EXIT_ID {
             DestroyWindow(hwnd);
         }

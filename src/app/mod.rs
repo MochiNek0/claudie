@@ -287,6 +287,14 @@ pub(crate) struct QuotaStats {
     pub(crate) transcript_path: String,
 }
 
+/// Latest GitHub release info captured by the version checker. Both fields empty
+/// means no newer release was found (or the check has not run yet).
+#[derive(Clone, Default)]
+pub(crate) struct UpdateInfo {
+    pub(crate) latest_version: String,
+    pub(crate) release_url: String,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ActiveTool {
     pub(crate) tool_name: String,
@@ -432,6 +440,7 @@ pub(crate) struct AppState {
     pub(crate) pending_permissions: VecDeque<PendingPermission>,
     pub(crate) pending_choices: VecDeque<PendingChoice>,
     pub(crate) quota: QuotaStats,
+    pub(crate) update: UpdateInfo,
     pub(crate) settings: UserSettings,
     pub(crate) llm_profiles: LlmProfileDb,
     pub(crate) pomodoro: PomodoroState,
@@ -475,6 +484,7 @@ impl AppState {
             pending_permissions: VecDeque::new(),
             pending_choices: VecDeque::new(),
             quota: QuotaStats::default(),
+            update: UpdateInfo::default(),
             settings: load_user_settings(),
             llm_profiles: load_llm_profile_db(),
             pomodoro: PomodoroState::default(),

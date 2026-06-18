@@ -26,6 +26,7 @@ pub(crate) const MENU_FISHING_START_ID: usize = 1004;
 pub(crate) const MENU_FISHING_STOP_ID: usize = 1005;
 pub(crate) const MENU_POMODORO_PAUSE_RESUME_ID: usize = 1006;
 pub(crate) const MENU_POMODORO_SKIP_ID: usize = 1007;
+pub(crate) const MENU_CHECK_UPDATE_ID: usize = 1008;
 pub(crate) const MENU_LLM_PROFILE_BASE_ID: usize = 1100;
 pub(crate) const MENU_LLM_PROFILE_MAX_ITEMS: usize = 24;
 

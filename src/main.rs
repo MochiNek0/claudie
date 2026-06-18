@@ -1,4 +1,4 @@
-﻿#![allow(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(not(windows))]
@@ -18,6 +18,7 @@ mod time_util;
 mod ui;
 mod usage_display;
 mod util;
+mod version_check;
 
 use std::env;
 use std::sync::{Arc, Mutex};
@@ -34,6 +35,7 @@ use official_usage::start_official_usage_poller;
 use proxy::start_openai_proxy_server;
 use ui::{init_animation_store, run_window};
 use util::parse_port;
+use version_check::start_version_checker;
 
 fn main() {
     // Slint's software renderer defaults to partial (dirty-region) rendering,
@@ -152,6 +154,7 @@ fn start_runtime_hooks(state: Arc<Mutex<AppState>>, port: u16) -> bool {
     }
 
     start_official_usage_poller(state.clone());
+    start_version_checker(state.clone());
 
     if let Err(err) = ensure_claude_hooks(state.clone(), port) {
         record_app_error(&state, err);

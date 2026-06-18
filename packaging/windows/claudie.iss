@@ -1,5 +1,7 @@
 #define MyAppName "claudie"
-#define MyAppVersion "0.1.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.1.0"
+#endif
 #define MyAppPublisher "claudie"
 #define MyAppExeName "claudie.exe"
 
@@ -8,6 +10,7 @@ AppId={{B9B032A7-483D-4E88-AB75-3D620A7B8FD2}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+UninstallDisplayName={#MyAppName}
 DefaultDirName={localappdata}\Programs\claudie
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes

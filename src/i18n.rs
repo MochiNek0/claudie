@@ -180,6 +180,7 @@ pub(crate) struct Strings {
     pub menu_stop_fishing: &'static str,
     pub menu_exit: &'static str,
     pub menu_llm_profile: &'static str,
+    pub menu_update_available: &'static str,
 
     // --- Permission / choice popup (Rust-built) ---
     pub permission_title: &'static str,
@@ -385,6 +386,7 @@ impl Strings {
             menu_stop_fishing: "Stop Fishing",
             menu_exit: "Exit",
             menu_llm_profile: "LLM Profile",
+            menu_update_available: "New version available",
 
             permission_title: "Permission request",
             permission_subtitle_fmt: "{} wants access",
@@ -583,6 +585,7 @@ impl Strings {
             menu_stop_fishing: "停止钓鱼",
             menu_exit: "退出",
             menu_llm_profile: "模型配置",
+            menu_update_available: "发现新版本",
 
             permission_title: "权限请求",
             permission_subtitle_fmt: "{} 请求访问",
