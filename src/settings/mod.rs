@@ -925,6 +925,10 @@ fn managed_llm_env_keys() -> &'static [&'static str] {
         "ANTHROPIC_BEDROCK_BASE_URL",
         "CLAUDE_CODE_USE_ANTHROPIC_AWS",
         "ANTHROPIC_AWS_BASE_URL",
+        // Quick-toggle managed env keys from the Settings panel Extra env tab.
+        "ENABLE_TOOL_SEARCH",
+        "DISABLE_AUTOUPDATER",
+        "CLAUDE_CODE_EFFORT_LEVEL",
     ]
 }
 
