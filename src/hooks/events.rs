@@ -125,7 +125,7 @@ pub(crate) fn process_hook_on_connection(
 
     if matches!(
         transcript_path.as_deref(),
-        Some(path) if event == "Stop" || event == "SessionEnd" || event == "PostToolBatch"
+        Some(_) if event == "Stop" || event == "SessionEnd" || event == "PostToolBatch"
     ) {
         if let Some(snapshot) = scan_transcript_usage(Path::new(transcript_path.as_ref().unwrap()))
         {
