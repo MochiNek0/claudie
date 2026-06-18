@@ -126,6 +126,7 @@ slint::slint! {
         in property <string> stats-tool-mix: "Tool mix · 7 days";
         in property <string> stats-tokens-7d: "Tokens · 7 days";
         in property <string> stats-tokens-by-model: "Tokens by model · 7 days";
+        in property <string> stats-model-hint: "Hover a slice for daily detail";
         in property <string> stat-write: "Write";
         in property <string> stat-bash: "Bash";
         in property <string> stat-search: "Search";
@@ -776,14 +777,25 @@ slint::slint! {
         value: string,
     }
 
-    // One model's 7-day token line: `commands` is an SVG polyline in a
-    // 600x100 viewbox (6:1 to match the plot element), `value` the compact
-    // 7-day total for the legend.
-    struct ModelTokenLine {
+    // One model's wedge in the 7-day token pie. `commands` is the filled
+    // wedge as an SVG path in a 200x200 viewbox (1:1, centre 100/100, r 90);
+    // `bars` are the per-day usage heights (0..1, normalized to the model's
+    // own peak day) and `peak` is that peak day's value for the y-scale;
+    // `start_angle`/`end_angle` are degrees (0 at 12 o'clock, clockwise) used
+    // for hover hit-testing; `pop_dx`/`pop_dy` are the px the hovered slice
+    // shifts along its bisector.
+    struct ModelPieSlice {
         name: string,
         value: string,
+        percent: string,
         commands: string,
+        bars: [float],
+        peak: string,
         color_index: int,
+        start_angle: float,
+        end_angle: float,
+        pop_dx: float,
+        pop_dy: float,
     }
 
     // Compact headline metric card used by the Stats tab.
@@ -833,6 +845,139 @@ slint::slint! {
             overflow: elide;
             color: Theme.ink-muted;
             font-size: 11px;
+        }
+    }
+
+    // 7-day token usage as a pie: one coloured wedge per model (top models
+    // plus an "Other" bucket), a permanent legend, and a hover detail panel.
+    // Hover is hit-tested by pointer angle/radius over the pie disc, so each
+    // wedge self-determines whether it is the hovered one.
+    component ModelTokenPie inherits Rectangle {
+        in property <[ModelPieSlice]> slices;
+        in property <string> title;
+        in property <string> caption;
+        in property <[string]> day_labels;
+        in property <string> hint;
+
+        background: Theme.surface;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.card-border;
+
+        // Pointer offset from the pie-box centre (140x140 box, centre 70/70).
+        property <float> dx: (touch.mouse-x - 70px) / 1px;
+        property <float> dy: (touch.mouse-y - 70px) / 1px;
+        // Active only while the pointer sits inside the visible disc (r 63px).
+        property <bool> pointer_active: touch.has-hover && (Math.sqrt(root.dx * root.dx + root.dy * root.dy) <= 64);
+        // Pointer angle in degrees: 0 at 12 o'clock, increasing clockwise.
+        // atan2 yields a Slint `angle`; `/1deg` converts it to plain degrees.
+        property <float> angle_raw: Math.atan2(root.dx, -root.dy) / 1deg;
+        property <float> angle: root.angle_raw < 0 ? root.angle_raw + 360 : root.angle_raw;
+
+        pure function slice-color(idx: int) -> brush {
+            idx == 0 ? Theme.chart-blue
+                : idx == 1 ? Theme.chart-teal
+                : idx == 2 ? Theme.chart-amber
+                : idx == 3 ? Theme.chart-purple
+                : idx == 4 ? Theme.chart-olive
+                : Theme.accent
+        }
+
+        Text { x: 16px; y: 14px; text: root.title; color: Theme.ink; font-size: 14px; font-weight: 600; }
+        Text { x: 300px; y: 16px; width: 268px; text: root.caption; horizontal-alignment: right; overflow: elide; color: Theme.ink-muted; font-size: 11px; }
+
+        // Pie wedges: each Path fills the same 140x140 box via a 1:1 200-unit
+        // viewbox; the hovered wedge pops out along its bisector, the rest dim.
+        for slice in root.slices: Path {
+            property <bool> hov: root.pointer_active && root.angle >= slice.start_angle && root.angle < slice.end_angle;
+            x: 14px + (self.hov ? slice.pop_dx * 1px : 0px);
+            y: 44px + (self.hov ? slice.pop_dy * 1px : 0px);
+            width: 140px;
+            height: 140px;
+            viewbox-width: 200;
+            viewbox-height: 200;
+            commands: slice.commands;
+            fill: root.slice-color(slice.color_index);
+            stroke: Theme.surface;
+            stroke-width: 1.5px;
+            opacity: root.pointer_active && !self.hov ? 0.5 : 1.0;
+            animate opacity { duration: Theme.fast; easing: ease-out; }
+        }
+
+        // Permanent legend: colour dot, model id, 7-day total. The hovered
+        // slice's row is tinted to mirror the pie highlight.
+        for slice[i] in root.slices: Rectangle {
+            property <bool> hov: root.pointer_active && root.angle >= slice.start_angle && root.angle < slice.end_angle;
+            x: 188px;
+            y: 48px + i * 22px;
+            width: 184px;
+            height: 20px;
+            border-radius: 5px;
+            background: self.hov ? Theme.accent-soft : transparent;
+            Rectangle { x: 6px; y: 6px; width: 8px; height: 8px; border-radius: 4px; background: root.slice-color(slice.color_index); }
+            Text { x: 20px; y: 0px; width: 100px; height: 20px; vertical-alignment: center; text: slice.name; overflow: elide; color: Theme.ink-secondary; font-size: 11px; }
+            Text { x: 122px; y: 0px; width: 56px; height: 20px; vertical-alignment: center; horizontal-alignment: right; text: slice.value; color: Theme.ink; font-size: 11px; font-weight: 600; }
+        }
+
+        // Hover detail: the hovered model's name, total, share, 7-day spark
+        // bars, and date span. Only the matching slice's block is visible.
+        for slice in root.slices: Rectangle {
+            property <bool> hov: root.pointer_active && root.angle >= slice.start_angle && root.angle < slice.end_angle;
+            visible: self.hov;
+            x: 380px;
+            y: 44px;
+            width: 196px;
+            height: 140px;
+            background: transparent;
+            Rectangle { x: 0px; y: 7px; width: 9px; height: 9px; border-radius: 4px; background: root.slice-color(slice.color_index); }
+            Text { x: 16px; y: 2px; width: 178px; text: slice.name; overflow: elide; color: Theme.ink; font-size: 13px; font-weight: 600; }
+            Text { x: 16px; y: 24px; width: 178px; text: slice.value + " · " + slice.percent; color: Theme.ink-secondary; font-size: 11px; }
+
+            // Per-day usage bars with a peak/zero y-scale and day-of-month
+            // x-ticks, so magnitudes read clearly instead of as bare bars.
+            Text { x: 0px; y: 44px; width: 22px; height: 12px; horizontal-alignment: right; vertical-alignment: center; text: slice.peak; color: Theme.ink-faint; font-size: 8px; }
+            Text { x: 0px; y: 84px; width: 22px; height: 12px; horizontal-alignment: right; vertical-alignment: center; text: "0"; color: Theme.ink-faint; font-size: 8px; }
+            Rectangle { x: 28px; y: 50px; width: 150px; height: 1px; background: Theme.hairline; }
+            Rectangle { x: 28px; y: 92px; width: 150px; height: 1px; background: Theme.border; }
+            for bar[i] in slice.bars: Rectangle {
+                x: 31.7px + i * 21.43px;
+                y: 92px - bar * 42px;
+                width: 14px;
+                height: bar * 42px;
+                border-radius: 2px;
+                background: root.slice-color(slice.color_index);
+            }
+            for day[i] in root.day_labels: Text {
+                x: 28px + i * 21.43px;
+                y: 95px;
+                width: 21.43px;
+                horizontal-alignment: center;
+                text: day;
+                color: Theme.ink-faint;
+                font-size: 8px;
+            }
+        }
+
+        // Idle hint shown when nothing is hovered (but data exists).
+        if !root.pointer_active && root.slices.length > 0: Text {
+            x: 380px;
+            y: 44px;
+            width: 196px;
+            height: 140px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+            text: root.hint;
+            color: Theme.ink-faint;
+            font-size: 11px;
+        }
+
+        touch := TouchArea {
+            x: 14px;
+            y: 44px;
+            width: 140px;
+            height: 140px;
+            mouse-cursor: default;
         }
     }
 
@@ -943,21 +1088,11 @@ slint::slint! {
         in property <float> stats_recent_output_bar;
         in property <float> stats_recent_cache_write_bar;
         in property <float> stats_recent_cache_read_bar;
-        in property <[ModelTokenLine]> stats_model_lines;
+        in property <[ModelPieSlice]> stats_model_slices;
         in property <[string]> stats_model_days;
         in property <string> stats_model_caption;
 
         in property <string> status_message;
-
-        // Palette for the per-model token lines, indexed by line order.
-        pure function model-color(i: int) -> brush {
-            i == 0 ? Theme.chart-blue
-                : i == 1 ? Theme.chart-teal
-                : i == 2 ? Theme.chart-amber
-                : i == 3 ? Theme.chart-purple
-                : i == 4 ? Theme.chart-olive
-                : Theme.accent
-        }
 
         callback pet_scale_changed(float);
         callback sleep_after_changed(float);
@@ -1305,43 +1440,15 @@ slint::slint! {
                 StatBarRow { x: 324px; y: 488px; width: 236px; height: 20px; label: I18n.stat-cache-w; value: root.stats_recent_cache_write_value; bar: root.stats_recent_cache_write_bar; accent: Theme.chart-amber; }
                 StatBarRow { x: 324px; y: 512px; width: 236px; height: 20px; label: I18n.stat-cache-r; value: root.stats_recent_cache_read_value; bar: root.stats_recent_cache_read_bar; accent: Theme.chart-purple; }
 
-                // Per-model token usage across the last 7 days, one line each.
-                Rectangle { x: 0px; y: 606px; width: 584px; height: 196px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.card-border;
-                    Text { x: 16px; y: 14px; text: I18n.stats-tokens-by-model; color: Theme.ink; font-size: 14px; font-weight: 600; }
-                    Text { x: 280px; y: 16px; width: 288px; text: root.stats_model_caption; horizontal-alignment: right; overflow: elide; color: Theme.ink-muted; font-size: 11px; }
-
-                    // Plot area; lines are SVG polylines in a 0..100 viewbox.
-                    Rectangle { x: 16px; y: 40px; width: 552px; height: 92px; background: transparent; clip: true;
-                        for line in root.stats_model_lines: Path {
-                            x: 0px; y: 0px; width: parent.width; height: parent.height;
-                            viewbox-width: 600; viewbox-height: 100;
-                            commands: line.commands;
-                            stroke: root.model-color(line.color_index);
-                            stroke-width: 1.5px;
-                        }
-                    }
-
-                    // X-axis day-of-month labels, aligned under each plotted point.
-                    for label[i] in root.stats_model_days: Text {
-                        x: 16px + i * (552px / 7);
-                        y: 136px;
-                        width: 552px / 7;
-                        text: label;
-                        horizontal-alignment: center;
-                        color: Theme.ink-faint;
-                        font-size: 9px;
-                    }
-
-                    // Legend: colored dot, model id, 7-day total.
-                    for line[i] in root.stats_model_lines: Rectangle {
-                        x: 16px + i * 94px;
-                        y: 158px;
-                        width: 88px;
-                        height: 30px;
-                        Rectangle { x: 0px; y: 5px; width: 8px; height: 8px; border-radius: 4px; background: root.model-color(line.color_index); }
-                        Text { x: 13px; y: 0px; width: 75px; text: line.name; overflow: elide; color: Theme.ink-secondary; font-size: 10px; }
-                        Text { x: 13px; y: 14px; width: 75px; text: line.value; overflow: elide; color: Theme.ink; font-size: 11px; font-weight: 600; }
-                    }
+                // Per-model token usage across the last 7 days as a pie, with a
+                // permanent legend and a hover detail panel.
+                ModelTokenPie {
+                    x: 0px; y: 606px; width: 584px; height: 196px;
+                    title: I18n.stats-tokens-by-model;
+                    caption: root.stats_model_caption;
+                    day_labels: root.stats_model_days;
+                    hint: I18n.stats-model-hint;
+                    slices: root.stats_model_slices;
                 }
             }
         }

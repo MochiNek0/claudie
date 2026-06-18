@@ -5,15 +5,15 @@ use slint::{ModelRc, VecModel};
 
 use crate::app::stats::{DailyStats, DailyStatsDb, load_daily_stats, sum_days};
 use crate::time_util::{date_key_minus_days, parse_date_key};
-use crate::ui::slint_views::{ModelTokenLine, SettingsWindow, StatHighlight, StatTrendBar};
+use crate::ui::slint_views::{ModelPieSlice, SettingsWindow, StatHighlight, StatTrendBar};
 
 use super::{SettingsController, shared};
 
 const TREND_DAYS: usize = 14;
-/// Days shown in the per-model token line chart.
+/// Days summed into the per-model token pie.
 const MODEL_CHART_DAYS: usize = 7;
-/// Models drawn as their own line; the rest collapse into an "Other" line.
-const MODEL_CHART_LINES: usize = 5;
+/// Models drawn as their own wedge; the rest collapse into an "Other" wedge.
+const MODEL_PIE_SLICES: usize = 5;
 
 impl SettingsController {
     pub(super) fn refresh_stats_tab(&self) {
@@ -37,26 +37,33 @@ pub(super) fn set_stats_status(ui: &SettingsWindow) {
     set_highlights(ui, &recent, active7);
     set_recent_bars(ui, &recent);
     set_recent_token_bars(ui, &recent);
-    set_model_token_chart(ui, &window);
+    set_model_token_pie(ui, &window);
 }
 
-/// Per-model token line chart: one polyline per model over the last
-/// `MODEL_CHART_DAYS` days, with low-volume models folded into an "Other" line.
-fn set_model_token_chart(ui: &SettingsWindow, window: &[DailyStats]) {
+/// Per-model token pie: one wedge per model over the last `MODEL_CHART_DAYS`
+/// days, sized by each model's share of the 7-day total, with low-volume
+/// models folded into an "Other" wedge. Also feeds the legend and the
+/// hover-detail bar chart (per-day usage with a peak/zero y-scale).
+fn set_model_token_pie(ui: &SettingsWindow, window: &[DailyStats]) {
     let start = window.len().saturating_sub(MODEL_CHART_DAYS);
     let days = &window[start..];
 
-    // Day-of-month labels along the x-axis.
-    let labels: Vec<slint::SharedString> = days
+    // Day-of-month labels for the hover detail's x-axis ticks (shared by all
+    // wedges, since every model spans the same window).
+    let day_labels: Vec<slint::SharedString> = days
         .iter()
         .map(|day| shared(&day_label(&day.date)))
         .collect();
-    ui.set_stats_model_days(ModelRc::from(Rc::new(VecModel::from(labels))));
+    ui.set_stats_model_days(ModelRc::from(Rc::new(VecModel::from(day_labels))));
 
-    // Rank models by their total tokens across the window.
+    // Rank models by their total tokens across the window, ignoring Claude
+    // Code's pseudo-model ids (see `is_real_model`).
     let mut totals: HashMap<&str, u64> = HashMap::new();
     for day in days {
         for entry in &day.models {
+            if !is_real_model(&entry.model) {
+                continue;
+            }
             *totals.entry(entry.model.as_str()).or_insert(0) += entry.tokens;
         }
     }
@@ -64,17 +71,15 @@ fn set_model_token_chart(ui: &SettingsWindow, window: &[DailyStats]) {
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
 
     if ranked.is_empty() {
-        ui.set_stats_model_lines(ModelRc::from(
-            Rc::new(VecModel::<ModelTokenLine>::default()),
-        ));
+        ui.set_stats_model_slices(ModelRc::from(Rc::new(VecModel::<ModelPieSlice>::default())));
         ui.set_stats_model_caption(shared(crate::i18n::strings().stats_no_model_data));
         return;
     }
 
-    let named = &ranked[..ranked.len().min(MODEL_CHART_LINES)];
-    let has_other = ranked.len() > MODEL_CHART_LINES;
+    let named = &ranked[..ranked.len().min(MODEL_PIE_SLICES)];
+    let has_other = ranked.len() > MODEL_PIE_SLICES;
 
-    // Per-day series for each drawn line (named models + an "Other" bucket).
+    // Per-day series for each wedge (named models + an "Other" bucket).
     let mut series: Vec<(String, u64, Vec<u64>)> = Vec::new();
     for (model, total) in named {
         let daily = days
@@ -90,36 +95,77 @@ fn set_model_token_chart(ui: &SettingsWindow, window: &[DailyStats]) {
             .map(|day| {
                 day.models
                     .iter()
-                    .filter(|e| !named_set.contains(&e.model.as_str()))
+                    .filter(|e| is_real_model(&e.model) && !named_set.contains(&e.model.as_str()))
                     .map(|e| e.tokens)
                     .sum()
             })
             .collect::<Vec<u64>>();
         let total: u64 = daily.iter().sum();
-        series.push(("Other".to_string(), total, daily));
+        series.push((
+            crate::i18n::strings().stats_model_other.to_string(),
+            total,
+            daily,
+        ));
     }
 
-    let peak = series
-        .iter()
-        .flat_map(|(_, _, daily)| daily.iter().copied())
-        .max()
-        .unwrap_or(0);
+    let grand_total: u64 = series.iter().map(|(_, total, _)| *total).sum();
 
-    let lines: Vec<ModelTokenLine> = series
+    // Cumulative angles around the circle; the last wedge snaps to 360° so
+    // floating-point drift never leaves a sliver gap.
+    let mut cursor = 0.0f64;
+    let last = series.len() - 1;
+    let slices: Vec<ModelPieSlice> = series
         .iter()
         .enumerate()
-        .map(|(index, (name, total, daily))| ModelTokenLine {
-            name: shared(name),
-            value: shared(&compact_number(*total)),
-            commands: shared(&polyline_commands(daily, peak)),
-            color_index: index as i32,
+        .map(|(index, (name, total, daily))| {
+            let frac = if grand_total == 0 {
+                0.0
+            } else {
+                *total as f64 / grand_total as f64
+            };
+            let start_angle = cursor;
+            let end_angle = if index == last {
+                360.0
+            } else {
+                cursor + frac * 360.0
+            };
+            cursor = end_angle;
+            let (pop_dx, pop_dy) = pop_offset((start_angle + end_angle) / 2.0);
+            // Per-day heights normalized to this model's own peak day (so a
+            // small model's daily shape is still legible), with a small floor
+            // so non-zero days stay visible.
+            let peak_day = daily.iter().copied().max().unwrap_or(0);
+            let bars: Vec<f32> = daily
+                .iter()
+                .map(|value| {
+                    if *value == 0 || peak_day == 0 {
+                        0.0
+                    } else {
+                        (*value as f32 / peak_day as f32).max(0.04)
+                    }
+                })
+                .collect();
+            ModelPieSlice {
+                name: shared(name),
+                value: shared(&compact_number(*total)),
+                percent: shared(&format!("{}%", (frac * 100.0).round() as u64)),
+                commands: shared(&wedge_path(start_angle, end_angle)),
+                bars: ModelRc::from(Rc::new(VecModel::from(bars))),
+                peak: shared(&compact_number(peak_day)),
+                color_index: index as i32,
+                start_angle: start_angle as f32,
+                end_angle: end_angle as f32,
+                pop_dx,
+                pop_dy,
+            }
         })
         .collect();
-    ui.set_stats_model_lines(ModelRc::from(Rc::new(VecModel::from(lines))));
+
+    ui.set_stats_model_slices(ModelRc::from(Rc::new(VecModel::from(slices))));
     ui.set_stats_model_caption(shared(
         &crate::i18n::strings()
             .stats_model_caption_fmt
-            .replacen("{}", &compact_number(peak), 1)
+            .replacen("{}", &compact_number(grand_total), 1)
             .replacen("{}", &ranked.len().to_string(), 1),
     ));
 }
@@ -132,29 +178,45 @@ fn model_tokens(day: &DailyStats, model: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// Build an SVG polyline (`M`/`L`) in a 600x100 viewbox. The 6:1 width:height
-/// matches the plot element (552x92) so Slint's aspect-preserving Path mapping
-/// does not squish the line horizontally. Points sit at column centers so they
-/// align with the x-axis labels; y is inverted with a small top/bottom margin
-/// so the peak and the baseline stay inside the plot.
-fn polyline_commands(daily: &[u64], peak: u64) -> String {
-    let n = daily.len();
-    if n == 0 {
-        return String::new();
+/// A point on the pie circle. Angles are degrees with 0° at 12 o'clock and
+/// increasing clockwise, matching the hover hit-test in `ModelTokenPie`.
+fn point_on(deg: f64, radius: f64) -> (f64, f64) {
+    let a = deg.to_radians();
+    (100.0 + radius * a.sin(), 100.0 - radius * a.cos())
+}
+
+/// Filled wedge from `start_deg` to `end_deg` as an SVG path in a 200x200
+/// viewbox (centre 100/100, radius 90). A full circle (single model) is drawn
+/// as two semicircle arcs because one arc cannot span 360°.
+fn wedge_path(start_deg: f64, end_deg: f64) -> String {
+    const R: f64 = 90.0;
+    if end_deg - start_deg >= 359.999 {
+        return format!(
+            "M 100.00 10.00 A {0:.2} {0:.2} 0 1 1 100.00 190.00 A {0:.2} {0:.2} 0 1 1 100.00 10.00 Z",
+            R
+        );
     }
-    let mut cmd = String::with_capacity(n * 16);
-    for (i, value) in daily.iter().enumerate() {
-        let x = ((i as f32 + 0.5) / n as f32) * 600.0;
-        let frac = if peak == 0 {
-            0.0
-        } else {
-            *value as f32 / peak as f32
-        };
-        let y = 97.0 - frac * 94.0;
-        cmd.push_str(if i == 0 { "M " } else { " L " });
-        cmd.push_str(&format!("{:.2} {:.2}", x, y));
-    }
-    cmd
+    let (sx, sy) = point_on(start_deg, R);
+    let (ex, ey) = point_on(end_deg, R);
+    let large = if end_deg - start_deg > 180.0 { 1 } else { 0 };
+    format!(
+        "M 100.00 100.00 L {:.2} {:.2} A {:.2} {:.2} 0 {} 1 {:.2} {:.2} Z",
+        sx, sy, R, R, large, ex, ey
+    )
+}
+
+/// Offset (px) the hovered wedge shifts along its bisector to "pop" out.
+fn pop_offset(mid_deg: f64) -> (f32, f32) {
+    const POP: f64 = 7.0;
+    let a = mid_deg.to_radians();
+    ((POP * a.sin()) as f32, (-POP * a.cos()) as f32)
+}
+
+/// Real model ids only. Claude Code attributes some tokens to angle-bracket
+/// pseudo-model ids (e.g. "<synthetic>") for messages it generates without a
+/// real model call; those should not appear as their own pie wedge.
+fn is_real_model(model: &str) -> bool {
+    !model.trim_start().starts_with('<')
 }
 
 /// Drop the provider prefix and `[1m]` suffix so the legend stays readable.

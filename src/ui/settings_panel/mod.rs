@@ -308,6 +308,7 @@ pub(crate) fn apply_settings_i18n(window: &SettingsWindow) {
     g.set_stats_tool_mix(s.stats_tool_mix.into());
     g.set_stats_tokens_7d(s.stats_tokens_7d.into());
     g.set_stats_tokens_by_model(s.stats_tokens_by_model.into());
+    g.set_stats_model_hint(s.stats_model_hint.into());
     g.set_stat_write(s.stat_write.into());
     g.set_stat_bash(s.stat_bash.into());
     g.set_stat_search(s.stat_search.into());
