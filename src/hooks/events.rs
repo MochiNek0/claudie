@@ -79,13 +79,10 @@ pub(crate) fn process_hook_on_connection(
         let mut state = state.lock().expect("state poisoned");
         let event_session_id =
             event_session_id_for_state(&state, event.as_str(), explicit_session_id.as_deref());
-        state.note_session_event(
-            &event_session_id,
-            &cwd,
-            event.as_str(),
-            &tool_name,
-            mood_for_tool_use(&tool_name, &payload),
-        );
+        // Resolve any pending interaction this event answers BEFORE recording
+        // the new session status: `note_session_event` keeps a session in its
+        // waiting state while a request is still queued, so the queue must be
+        // cleared first for a turn-ending event (deny/stop) to update the row.
         if clears_pending_interaction(event.as_str()) {
             clear_stale_interactions(&mut state, &event_session_id);
         }
@@ -95,6 +92,13 @@ pub(crate) fn process_hook_on_connection(
             &event_session_id,
             &tool_name,
             &payload,
+        );
+        state.note_session_event(
+            &event_session_id,
+            &cwd,
+            event.as_str(),
+            &tool_name,
+            mood_for_tool_use(&tool_name, &payload),
         );
         let capture_official = state.llm_profiles.official_profile_active();
         update_quota_from_value(&mut state.quota, &payload, capture_official);
@@ -678,11 +682,18 @@ fn transcript_has_terminal_denial(path: &str, start: u64) -> bool {
 // text in the transcript merely mentioned a denial. The quote-anchored prefixes
 // cannot occur inside nested tool-result text because there the quotes are
 // JSON-escaped (\"). The `[requestinterruptedbyuser` marker is what ESC writes.
-const TERMINAL_DENIAL_MARKERS: [&str; 4] = [
+const TERMINAL_DENIAL_MARKERS: [&str; 5] = [
     "\"content\":\"theuserdoesn'twanttoproceedwiththistooluse",
     "\"text\":\"theuserdoesn'twanttoproceedwiththistooluse",
     "\"tooluseresult\":\"userrejected",
+    // ESC writes the interrupt as a user message whose content is a block array
+    // (`"content":[{"type":"text","text":"[Request interrupted by user]"}]`), so
+    // the marker lives under "text", not directly under "content". The old
+    // "content":"[... form never appears in real transcripts, so ESC went
+    // undetected and the pet stayed stuck. Keep both: structural quotes inside
+    // nested tool results are JSON-escaped (\"text\":\"...) and so won't match.
     "\"content\":\"[requestinterruptedbyuser",
+    "\"text\":\"[requestinterruptedbyuser",
 ];
 
 fn compact_json_contains_denial(text: &str) -> bool {
@@ -1458,12 +1469,13 @@ mod tests {
         // Nothing past the baseline yet.
         assert!(transcript_recently_interrupted(&path_str, baseline).is_none());
 
-        // Append the record Claude Code writes when the user hits ESC.
+        // Append the record Claude Code actually writes when the user hits ESC:
+        // a user message whose content is a text-block array, not a bare string.
         {
             let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
             writeln!(
                 file,
-                "{{\"type\":\"user\",\"message\":{{\"content\":\"[Request interrupted by user]\"}}}}"
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"[Request interrupted by user]\"}}]}}}}"
             )
             .unwrap();
         }

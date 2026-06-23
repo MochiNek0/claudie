@@ -21,7 +21,7 @@
 - **状态随动** — 接收 hook 事件并切换宠物状态：思考、打字、执行命令、搜索、子任务、报错、睡眠……完整映射见下方折叠表。
 - **权限请求** — 在宠物窗口显示 Allow / Always / Deny。Deny 写回 `continue=false` + `interrupt=true`，等同终端里回答 “No”：中断本轮，而不是把否决当作可重试的工具反馈喂回模型。终端与宠物两侧任一答复都会同步关闭弹窗。
 - **选择卡片** — 支持 `AskUserQuestion`（带「Other…」自由输入）和 `ExitPlanMode`（计划以 Markdown 渲染），可在窗口里选项 + Submit / Cancel。
-- **多会话切换** — 跟踪各会话状态，在宠物旁渲染会话切换面板，滚轮切换关注的会话；焦点会话决定宠物 mood 与 HUD。仅单会话时自动隐藏。
+- **多会话切换** — 跟踪各会话状态，在宠物旁渲染会话切换面板，滚轮切换关注的会话；焦点会话决定宠物 mood 与 HUD。仅单会话时自动隐藏。按 ESC 中断本轮后宠物会回到空闲；已关闭的会话（包括不发 `SessionEnd` 的强制退出）会自动移除。
 - **快捷键** — `Ctrl+Shift+Y` 允许 / 提交；`Ctrl+Shift+N` 拒绝 / 取消。
 - **国际化** — 内置简体中文与英文双语界面，自动跟随系统语言。`CLAUDIE_LANG=zh` / `CLAUDIE_LANG=en` 可强行指定，所有 UI 文本统一切换。
 - **番茄钟** — 内置 Pomodoro，支持 Start / Stop / Pause / Resume / Skip，阶段结束弹通知。

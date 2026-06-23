@@ -46,6 +46,17 @@ fn show_settings_panel_tab_for_parent(parent: HWND, tab: i32) {
     });
 }
 
+/// Request a repaint of the open settings window, if any. The software renderer
+/// does not auto-repaint when another window (e.g. a permission popup) appears
+/// over or beside it, so the panel must be told to redraw or it goes blank.
+pub(crate) fn request_settings_redraw() {
+    SETTINGS.with(|slot| {
+        if let Some(window) = slot.borrow().as_ref() {
+            window.window().request_redraw();
+        }
+    });
+}
+
 pub(crate) fn close_settings_panel() {
     SETTINGS.with(|slot| {
         if let Some(window) = slot.borrow_mut().take() {

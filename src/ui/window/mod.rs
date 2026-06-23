@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use render::{
     RenderState, fill_rect, filled_ellipse, filled_round_rect, render_fishing_hud_window,
@@ -422,6 +422,7 @@ unsafe extern "system" fn window_proc(
                 let user_idle = user_idle_snapshot();
                 state.tick_pomodoro();
                 state.tick_fishing();
+                state.prune_inactive_sessions(Instant::now());
                 state.decay_mood(
                     user_idle.map(|snapshot| snapshot.0),
                     user_idle.map(|snapshot| snapshot.1),

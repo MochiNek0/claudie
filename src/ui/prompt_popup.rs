@@ -64,6 +64,10 @@ fn sync_prompt_popup_impl(parent: HWND, force: bool) {
         if snapshot.is_none() {
             if let Some(window) = slot.borrow_mut().take() {
                 let _ = window.hide();
+                // The popup left the screen: repaint the settings panel so the
+                // area it overlapped does not stay blank under the software
+                // renderer.
+                crate::ui::settings_panel::request_settings_redraw();
             }
             PROMPT_OPTIONS.with(|options| options.borrow_mut().clear());
             PROMPT_SNAPSHOT.with(|last| last.borrow_mut().take());
@@ -102,6 +106,9 @@ fn sync_prompt_popup_impl(parent: HWND, force: bool) {
                 center_window_on_screen(window.window(), parent, PROMPT_WINDOW_LOGICAL_SIZE);
                 apply_slint_window_icons(window.window());
                 schedule_prompt_window_icon_refresh(window.as_weak());
+                // A newly shown popup damages the settings panel surface; the
+                // software renderer will not repaint it on its own, so ask it to.
+                crate::ui::settings_panel::request_settings_redraw();
             }
         }
     });

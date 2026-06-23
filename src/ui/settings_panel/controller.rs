@@ -51,21 +51,17 @@ impl SettingsController {
         let weak = self.weak.clone();
         self._timer
             .start(TimerMode::Repeated, Duration::from_secs(1), move || {
-                if let Some(ui) = weak.upgrade()
-                    && (ui.get_active_tab() == 1
-                        || ui.get_active_tab() == 2
-                        || ui.get_active_tab() == 3)
-                {
-                    if ui.get_active_tab() == 1 {
-                        pomodoro::set_pomodoro_status(&ui);
-                    } else if ui.get_active_tab() == 2 {
-                        controller_refresh_profile_usage(&ui);
-                    } else {
-                        stats::set_stats_status(&ui);
+                if let Some(ui) = weak.upgrade() {
+                    match ui.get_active_tab() {
+                        1 => pomodoro::set_pomodoro_status(&ui),
+                        2 => controller_refresh_profile_usage(&ui),
+                        3 => stats::set_stats_status(&ui),
+                        _ => {}
                     }
                     // The software renderer only repaints on explicit request or
-                    // window events; force a redraw so timer-driven text stays
-                    // fresh even when the window receives no input.
+                    // window events. Redraw every tick on every tab so the panel
+                    // self-heals if another window (e.g. a permission popup)
+                    // damaged its surface, and timer-driven text stays fresh.
                     ui.window().request_redraw();
                 }
             });

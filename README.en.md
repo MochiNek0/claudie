@@ -21,7 +21,7 @@ Inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/cla
 - **State follows activity** — receives hook events and switches the pet's state: thinking, typing, running commands, searching, subagents, errors, sleep… Full mapping in the table below.
 - **Permission requests** — shows Allow / Always / Deny in the pet window. Deny writes back `continue=false` + `interrupt=true`, matching a terminal "No": it stops the current turn instead of feeding the rejection back as a retriable tool error. Answering on either side (pet or terminal) closes the popup on both.
 - **Choice cards** — supports `AskUserQuestion` (with a free-text "Other…" option) and `ExitPlanMode` (plan rendered as Markdown), with options plus Submit / Cancel.
-- **Multi-session switcher** — tracks each session's status and renders a switcher panel beside the pet; scroll to change the focused session, which drives the pet mood and HUD. Hidden automatically when only one session is active.
+- **Multi-session switcher** — tracks each session's status and renders a switcher panel beside the pet; scroll to change the focused session, which drives the pet mood and HUD. Hidden automatically when only one session is active. Interrupting a turn (ESC) returns the pet to idle, and a closed session (including a force-quit that sends no `SessionEnd`) is removed automatically.
 - **Hotkeys** — `Ctrl+Shift+Y` allows / submits; `Ctrl+Shift+N` denies / cancels.
 - **i18n** — built-in Chinese and English bilingual UI, auto-detects the system language. Override with `CLAUDIE_LANG=zh` or `CLAUDIE_LANG=en`. All UI text switches in one go.
 - **Pomodoro** — built-in timer with Start / Stop / Pause / Resume / Skip and phase-completion notifications.

@@ -21,6 +21,12 @@ const SUBAGENT_MIN_VISIBLE: Duration = Duration::from_millis(2_500);
 const INTERACTION_MIN_VISIBLE: Duration = Duration::from_millis(1_800);
 const ENDED_SESSION_RETENTION: Duration = Duration::from_secs(30 * 60);
 const MAX_ENDED_SESSIONS: usize = 50;
+// A force-quit (Ctrl+C twice) never fires SessionEnd, so a dead session would
+// linger in the switcher forever. Drop a finished/idle session that has sent no
+// hook for this long; an actively-working session or one with a pending popup is
+// never touched. A still-alive session removed this way reappears on its next
+// hook (e.g. the user's next prompt).
+const STALE_SESSION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const STATS_FLUSH_INTERVAL: Duration = Duration::from_secs(3);
 // How often the UI tick re-scans a working session's transcript tail for a
 // terminal interrupt (ESC) marker. ESC fires no hook, so polling is the only
@@ -622,9 +628,44 @@ impl AppState {
         tool_name: &str,
         tool_mood: PetMood,
     ) {
+        // A session ended by /clear or exit must not be resurrected by trailing
+        // hooks for the same id (a late Stop/PostToolUse/Notification arriving
+        // after SessionEnd) — otherwise the row reappears on its own moments
+        // after /clear made it disappear. Only a deliberate new turn brings it
+        // back.
+        let revives_session =
+            matches!(event, "SessionStart" | "SessionResume" | "UserPromptSubmit");
+        if !revives_session {
+            let normalized = normalize_session_id(session_id);
+            if self
+                .sessions
+                .get(&normalized)
+                .is_some_and(|session| session.status == ClaudeSessionStatus::Ended)
+            {
+                return;
+            }
+        }
         match session_status_for_event(event, tool_name, tool_mood) {
             Some((status, detail)) => {
-                self.set_session_status(session_id, cwd, status, detail, None)
+                // While a permission/choice is genuinely pending (its blocking
+                // hook thread still owns the turn), an out-of-band event such as
+                // a Notification must not move the row off its waiting state and
+                // show it as "ready": the queue entry persists, so the badge and
+                // popup would disagree with the status. The blocking thread makes
+                // the real transition once the request is answered.
+                let downgrades_pending_wait = !matches!(
+                    status,
+                    ClaudeSessionStatus::WaitingPermission
+                        | ClaudeSessionStatus::WaitingChoice
+                        | ClaudeSessionStatus::Error
+                        | ClaudeSessionStatus::Denied
+                        | ClaudeSessionStatus::Ended
+                );
+                if downgrades_pending_wait && self.pending_count_for_session(session_id) > 0 {
+                    self.touch_session(session_id, cwd);
+                } else {
+                    self.set_session_status(session_id, cwd, status, detail, None);
+                }
             }
             None => self.touch_session(session_id, cwd),
         }
@@ -899,13 +940,33 @@ impl AppState {
         );
     }
 
+    /// Timer-driven cleanup of sessions whose Claude Code went away without a
+    /// SessionEnd. Hook-driven pruning only fires when some other session sends
+    /// an event, so a lone dead session needs this periodic sweep. Reconciles
+    /// focus and the pet mood when anything was removed.
+    pub(crate) fn prune_inactive_sessions(&mut self, now: Instant) {
+        let before = self.sessions.len();
+        self.prune_stale_sessions(now);
+        if self.sessions.len() != before {
+            self.reconcile_focused_session(None);
+            self.refresh_visual_mood();
+        }
+    }
+
     fn prune_stale_sessions(&mut self, now: Instant) {
         let mut remove = self
             .sessions
             .iter()
             .filter(|(_, session)| {
-                session.status == ClaudeSessionStatus::Ended
-                    && now.saturating_duration_since(session.last_seen) >= ENDED_SESSION_RETENTION
+                let stale_ended = session.status == ClaudeSessionStatus::Ended
+                    && now.saturating_duration_since(session.last_seen) >= ENDED_SESSION_RETENTION;
+                // A finished/idle session (not actively working, no pending
+                // popup) that has gone quiet for too long is almost certainly a
+                // force-quit Claude Code that never sent SessionEnd. Drop it.
+                let stale_idle = session.status.is_live()
+                    && !session.status.is_busy()
+                    && now.saturating_duration_since(session.last_seen) >= STALE_SESSION_TIMEOUT;
+                stale_ended || stale_idle
             })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
@@ -2107,7 +2168,11 @@ fn session_status_for_event(
         "StopFailure" => Some((ClaudeSessionStatus::Error, "Hook failure".to_string())),
         "Stop" => Some((ClaudeSessionStatus::Done, "Ready".to_string())),
         "SessionEnd" => Some((ClaudeSessionStatus::Ended, "Session ended".to_string())),
-        "Notification" => Some((ClaudeSessionStatus::Done, "Notification".to_string())),
+        // A Notification is informational (e.g. "needs permission", "waiting for
+        // input"); it must not flip a still-working or waiting session to
+        // "ready", which would drop it from interrupt polling and leave the pet
+        // stuck. Touch last_seen only and let the turn's real events drive status.
+        "Notification" => None,
         "Elicitation" => Some((
             ClaudeSessionStatus::WaitingChoice,
             "Waiting for input".to_string(),
@@ -2462,6 +2527,57 @@ mod tests {
     }
 
     #[test]
+    fn notification_does_not_clear_pending_permission_status() {
+        let mut state = AppState::new();
+        state.note_session_event("a", "", "UserPromptSubmit", "", PetMood::Thinking);
+        state.note_session_event("b", "", "SessionStart", "", PetMood::Thinking);
+
+        // b raises a permission while a stays focused/busy.
+        push_test_permission(&mut state, 1, 1, "b");
+        state.mark_session_waiting_permission("b", "", "Edit", 1);
+        assert_eq!(
+            state.sessions.get("b").map(|s| s.status),
+            Some(ClaudeSessionStatus::WaitingPermission)
+        );
+
+        // A Notification (or any non-clearing event) must not flip the row to
+        // "ready" while its request is still queued.
+        state.note_session_event("b", "", "Notification", "", PetMood::Thinking);
+        assert_eq!(
+            state.sessions.get("b").map(|s| s.status),
+            Some(ClaudeSessionStatus::WaitingPermission)
+        );
+        assert_eq!(state.pending_count_for_session("b"), 1);
+    }
+
+    #[test]
+    fn ended_session_is_not_resurrected_by_trailing_events() {
+        let mut state = AppState::new();
+        state.note_session_event("a", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("a", "", "SessionEnd", "", PetMood::Thinking);
+        assert_eq!(
+            state.sessions.get("a").map(|s| s.status),
+            Some(ClaudeSessionStatus::Ended)
+        );
+
+        // A late Stop/Notification for the same id arriving after /clear must
+        // not revive the row as a fresh live session.
+        state.note_session_event("a", "", "Stop", "", PetMood::Thinking);
+        state.note_session_event("a", "", "Notification", "", PetMood::Thinking);
+        assert_eq!(
+            state.sessions.get("a").map(|s| s.status),
+            Some(ClaudeSessionStatus::Ended)
+        );
+
+        // A genuine new turn still brings it back.
+        state.note_session_event("a", "", "SessionStart", "", PetMood::Thinking);
+        assert_eq!(
+            state.sessions.get("a").map(|s| s.status),
+            Some(ClaudeSessionStatus::Idle)
+        );
+    }
+
+    #[test]
     fn busy_focus_is_not_preempted_by_other_session_request() {
         let mut state = AppState::new();
         state.note_session_event("a", "", "UserPromptSubmit", "", PetMood::Thinking);
@@ -2630,6 +2746,28 @@ mod tests {
         let items = state.session_switcher_items();
 
         assert_eq!(items[0].display_name, "repo");
+    }
+
+    #[test]
+    fn stale_idle_session_is_pruned_but_working_one_is_kept() {
+        let mut state = AppState::new();
+        // A finished session whose Claude Code was force-quit (no SessionEnd):
+        // goes quiet past the staleness window.
+        state.note_session_event("dead", "", "SessionStart", "", PetMood::Thinking);
+        state.note_session_event("dead", "", "Stop", "", PetMood::Thinking);
+        state.sessions.get_mut("dead").expect("session").last_seen =
+            Instant::now() - STALE_SESSION_TIMEOUT - Duration::from_secs(1);
+
+        // A session that is genuinely still working (e.g. a long tool/retry)
+        // is equally quiet but must NOT be pruned.
+        state.note_session_event("busy", "", "UserPromptSubmit", "", PetMood::Thinking);
+        state.sessions.get_mut("busy").expect("session").last_seen =
+            Instant::now() - STALE_SESSION_TIMEOUT - Duration::from_secs(1);
+
+        state.prune_inactive_sessions(Instant::now());
+
+        assert!(!state.sessions.contains_key("dead"));
+        assert!(state.sessions.contains_key("busy"));
     }
 
     #[test]
