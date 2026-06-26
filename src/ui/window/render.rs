@@ -190,6 +190,18 @@ fn draw_session_switcher(hdc: HDC, state: &RenderState, x: i32, y: i32, w: i32, 
         let fitted_name = fit_text_to_width(hdc, name, name_max);
         text(hdc, name_x, text_y, &fitted_name, theme::INK);
 
+        // Model id (which provider this window uses) in muted ink, trailing the
+        // project name within whatever width is left before the status text.
+        let model = short_model_label(&item.model);
+        if !model.is_empty() {
+            let model_x = name_x + text_width(hdc, &fitted_name) + 8;
+            let model_max = status_x - 8 - model_x;
+            if model_max > 12 {
+                let fitted_model = fit_text_to_width(hdc, &model, model_max);
+                text(hdc, model_x, text_y, &fitted_model, theme::INK_MUTED);
+            }
+        }
+
         if index + 1 < visible_count {
             filled_rect(
                 hdc,
@@ -201,6 +213,19 @@ fn draw_session_switcher(hdc: HDC, state: &RenderState, x: i32, y: i32, w: i32, 
             );
         }
     }
+}
+
+/// Compact a model id for the session row: drop the `[1m]` context marker and
+/// any `vendor/` path prefix, leaving just the recognizable model name.
+fn short_model_label(model: &str) -> String {
+    let model = model.trim();
+    let model = model.strip_suffix("[1m]").unwrap_or(model).trim_end();
+    model
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or(model)
+        .trim()
+        .to_string()
 }
 
 /// Draws a rounded count badge ending at `right_x`; returns its left edge.

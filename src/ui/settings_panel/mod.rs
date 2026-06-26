@@ -138,6 +138,12 @@ fn wire_callbacks(window: &SettingsWindow, controller: Rc<RefCell<SettingsContro
             controller.borrow_mut().fetch_models();
         }
     }));
+    window.on_copy_launch_command(redraw_after(&weak, {
+        let controller = controller.clone();
+        move || {
+            controller.borrow_mut().copy_launch_command();
+        }
+    }));
     window.on_toggle_env_tool_search(redraw_after_arg(&weak, {
         let controller = controller.clone();
         move |enabled| {
@@ -296,6 +302,7 @@ pub(crate) fn apply_settings_i18n(window: &SettingsWindow) {
     g.set_llm_models(s.llm_models.into());
     g.set_llm_models_hint(s.llm_models_hint.into());
     g.set_btn_fetch_models(s.btn_fetch_models.into());
+    g.set_btn_copy_launch_command(s.btn_copy_launch_command.into());
     g.set_field_default_model(s.field_default_model.into());
     g.set_field_opus(s.field_opus.into());
     g.set_field_sonnet(s.field_sonnet.into());

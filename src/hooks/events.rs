@@ -75,7 +75,7 @@ pub(crate) fn process_hook_on_connection(
     // can be recorded without holding state during file I/O.
     let transcript_len_now = transcript_path.as_deref().and_then(transcript_len);
 
-    {
+    let event_session_id = {
         let mut state = state.lock().expect("state poisoned");
         let event_session_id =
             event_session_id_for_state(&state, event.as_str(), explicit_session_id.as_deref());
@@ -102,6 +102,11 @@ pub(crate) fn process_hook_on_connection(
         );
         let capture_official = state.llm_profiles.official_profile_active();
         update_quota_from_value(&mut state.quota, &payload, capture_official);
+        // Tag this session with the model it is using so the switcher can show
+        // which provider each window runs (empty values are ignored).
+        if let Some(model) = super::quota::model_from_value(&payload) {
+            state.set_session_model(&event_session_id, &model);
+        }
         if let Some(path) = transcript_path.as_deref() {
             state.quota.transcript_path = path.to_string();
             // UserPromptSubmit/SessionStart begin a turn: re-baseline so only a
@@ -125,7 +130,8 @@ pub(crate) fn process_hook_on_connection(
         }
 
         state.last_activity = Instant::now();
-    }
+        event_session_id
+    };
 
     if matches!(
         transcript_path.as_deref(),
@@ -160,6 +166,7 @@ pub(crate) fn process_hook_on_connection(
                 state.quota.quota_reset = snapshot.quota_reset;
             }
             if !snapshot.last_model.is_empty() {
+                state.set_session_model(&event_session_id, &snapshot.last_model);
                 state.quota.last_model = snapshot.last_model;
             }
             if !snapshot.rate_limits.is_empty() {

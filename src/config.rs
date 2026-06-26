@@ -29,6 +29,10 @@ pub(crate) const MENU_POMODORO_SKIP_ID: usize = 1007;
 pub(crate) const MENU_CHECK_UPDATE_ID: usize = 1008;
 pub(crate) const MENU_LLM_PROFILE_BASE_ID: usize = 1100;
 pub(crate) const MENU_LLM_PROFILE_MAX_ITEMS: usize = 24;
+/// Base id for the "copy launch command" submenu, one entry per profile,
+/// mirroring the profile submenu's capacity. Kept clear of the profile range
+/// (1100..1124).
+pub(crate) const MENU_LLM_COPY_CMD_BASE_ID: usize = 1130;
 
 pub(crate) fn scaled_pet_size_for_percent(scale_percent: u32) -> (i32, i32) {
     let scale = scale_percent.clamp(PET_SCALE_MIN_PERCENT, PET_SCALE_MAX_PERCENT) as i32;

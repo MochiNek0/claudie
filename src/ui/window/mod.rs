@@ -1362,6 +1362,7 @@ unsafe fn show_context_menu(hwnd: HWND) {
 
     append_menu_item(menu, MENU_SETTINGS_ID, s.menu_settings, theme::INK);
     append_llm_profile_menu(menu);
+    append_llm_copy_command_menu(menu);
     append_menu_separator(menu);
     if pomodoro_status == PomodoroStatus::Stopped {
         append_menu_item(
@@ -1438,6 +1439,8 @@ unsafe fn show_context_menu(hwnd: HWND) {
             show_settings_panel(hwnd);
         } else if let Some(index) = llm_profile_index_from_command(command) {
             activate_llm_profile(index);
+        } else if let Some(index) = llm_copy_command_index_from_command(command) {
+            copy_llm_launch_command(index);
         } else if command == MENU_POMODORO_START_ID {
             with_app_state(|state| state.start_pomodoro());
         } else if command == MENU_POMODORO_STOP_ID {
@@ -1507,6 +1510,35 @@ unsafe fn append_llm_profile_menu(menu: HMENU) {
         profile_menu as usize,
         vec![MenuTextSegment {
             text: crate::i18n::strings().menu_llm_profile.to_string(),
+            color: theme::INK,
+        }],
+    );
+}
+
+/// "Copy launch command" submenu: one entry per profile (no active checkmark),
+/// reusing the same labels as the profile submenu. Clicking copies a one-line
+/// PowerShell command that launches a Claude Code window bound to that profile.
+unsafe fn append_llm_copy_command_menu(menu: HMENU) {
+    let entries = llm_profile_menu_entries();
+    if entries.is_empty() {
+        return;
+    }
+    let copy_menu = CreatePopupMenu();
+    if copy_menu.is_null() {
+        return;
+    }
+
+    for (index, segments, _checked) in entries {
+        let command_id = MENU_LLM_COPY_CMD_BASE_ID + index;
+        append_menu_segments(copy_menu, 0, command_id, segments);
+    }
+
+    append_menu_segments(
+        menu,
+        MF_POPUP,
+        copy_menu as usize,
+        vec![MenuTextSegment {
+            text: crate::i18n::strings().menu_copy_launch_command.to_string(),
             color: theme::INK,
         }],
     );
@@ -1788,6 +1820,51 @@ fn llm_profile_index_from_command(command: usize) -> Option<usize> {
     (MENU_LLM_PROFILE_BASE_ID..end)
         .contains(&command)
         .then_some(command - MENU_LLM_PROFILE_BASE_ID)
+}
+
+fn llm_copy_command_index_from_command(command: usize) -> Option<usize> {
+    let end = MENU_LLM_COPY_CMD_BASE_ID + MENU_LLM_PROFILE_MAX_ITEMS;
+    (MENU_LLM_COPY_CMD_BASE_ID..end)
+        .contains(&command)
+        .then_some(command - MENU_LLM_COPY_CMD_BASE_ID)
+}
+
+/// Write the profile's `--settings` overlay file and place the
+/// `claude --settings "<path>"` command on the clipboard. Success nudges the
+/// pet to `Happy`, mirroring profile activation; a failure records the error.
+fn copy_llm_launch_command(index: usize) {
+    let Some(state_handle) = APP_STATE.get() else {
+        return;
+    };
+    let profile = {
+        let state = state_handle.lock().expect("state poisoned");
+        let mut db = state.llm_profiles.clone();
+        drop(state);
+        db.normalize();
+        let Some(profile) = db.profiles.get(index) else {
+            return;
+        };
+        profile.clone()
+    };
+
+    let path = match crate::settings::write_launch_settings_file(&profile) {
+        Ok(path) => path,
+        Err(err) => {
+            record_profile_activation_error(format!("Failed to write launch settings file: {err}"));
+            return;
+        }
+    };
+    let command = crate::settings::settings_launch_command(&path);
+    if crate::ui::clipboard::copy_text(&command) {
+        if let Some(state) = APP_STATE.get() {
+            state
+                .lock()
+                .expect("state poisoned")
+                .set_mood(PetMood::Happy);
+        }
+    } else {
+        record_profile_activation_error("Failed to copy launch command to clipboard".to_string());
+    }
 }
 
 fn activate_llm_profile(index: usize) {

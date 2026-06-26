@@ -263,18 +263,21 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
 
     let path = request.path.split('?').next().unwrap_or(&request.path);
     if request.method == "GET" && path.ends_with("/models") {
-        let profile = active_openai_profile(&state);
-        if let Some(profile) = profile.as_ref()
-            && !proxy_auth_authorized(&request, profile)
-        {
-            write_error_response(&mut stream, 401, PROXY_AUTH_ERROR_MESSAGE);
-            return;
-        }
-        let model = profile
-            .as_ref()
-            .map(|profile| profile.model.trim())
-            .filter(|model| !model.is_empty())
-            .unwrap_or("claudie-openai-proxy");
+        let model = match resolve_openai_profile(&state, &request) {
+            ProfileResolution::Matched(profile) => {
+                let model = profile.model.trim();
+                if model.is_empty() {
+                    "claudie-openai-proxy".to_string()
+                } else {
+                    model.to_string()
+                }
+            }
+            ProfileResolution::Unauthorized => {
+                write_error_response(&mut stream, 401, PROXY_AUTH_ERROR_MESSAGE);
+                return;
+            }
+            ProfileResolution::NoProfile => "claudie-openai-proxy".to_string(),
+        };
         let _ = write_json_response(
             &mut stream,
             200,
@@ -292,13 +295,15 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
     }
 
     if path.ends_with("/messages/count_tokens") {
-        if let Some(profile) = active_openai_profile(&state)
-            && !proxy_auth_authorized(&request, &profile)
-        {
-            write_error_response(&mut stream, 401, PROXY_AUTH_ERROR_MESSAGE);
-            return;
-        }
-        handle_count_tokens(&mut stream, &state, &request.body);
+        let profile = match resolve_openai_profile(&state, &request) {
+            ProfileResolution::Matched(profile) => Some(profile),
+            ProfileResolution::Unauthorized => {
+                write_error_response(&mut stream, 401, PROXY_AUTH_ERROR_MESSAGE);
+                return;
+            }
+            ProfileResolution::NoProfile => None,
+        };
+        handle_count_tokens(&mut stream, profile.as_ref(), &request.body);
         return;
     }
 
@@ -311,19 +316,21 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
         return;
     }
 
-    let Some(profile) = active_openai_profile(&state) else {
-        write_error_response(
-            &mut stream,
-            503,
-            "No active OpenAI chat/completions profile is configured in claudie.",
-        );
-        return;
+    let profile = match resolve_openai_profile(&state, &request) {
+        ProfileResolution::Matched(profile) => profile,
+        ProfileResolution::Unauthorized => {
+            write_error_response(&mut stream, 401, PROXY_AUTH_ERROR_MESSAGE);
+            return;
+        }
+        ProfileResolution::NoProfile => {
+            write_error_response(
+                &mut stream,
+                503,
+                "No active OpenAI chat/completions profile is configured in claudie.",
+            );
+            return;
+        }
     };
-
-    if !proxy_auth_authorized(&request, &profile) {
-        write_error_response(&mut stream, 401, PROXY_AUTH_ERROR_MESSAGE);
-        return;
-    }
 
     if profile.openai_upstream_api_key().is_empty() {
         write_error_response(
@@ -411,13 +418,72 @@ fn handle_proxy_client(mut stream: TcpStream, state: Arc<Mutex<AppState>>, agent
     let _ = write_json_response(&mut stream, 200, anthropic_response);
 }
 
-fn active_openai_profile(state: &Arc<Mutex<AppState>>) -> Option<LlmProfile> {
-    let state = state.lock().expect("state poisoned");
-    state
-        .llm_profiles
-        .active_profile()
-        .filter(|profile| profile.is_openai_chat_proxy())
-        .cloned()
+/// Outcome of mapping an incoming proxy request to an OpenAI-compatible profile.
+enum ProfileResolution {
+    /// An authorized profile; resolution already required a token match.
+    Matched(LlmProfile),
+    /// A token was supplied but matched no profile.
+    Unauthorized,
+    /// No OpenAI-compatible profile is configured at all.
+    NoProfile,
+}
+
+/// Resolve which OpenAI-compatible profile a request belongs to. The incoming
+/// auth token routes the request, so concurrently launched Claude Code windows
+/// pointed at this shared proxy each reach their own upstream. Requests whose
+/// token matches no profile fall back to the globally active profile (the bare
+/// `claude` path and legacy default-token clients).
+fn resolve_openai_profile(
+    state: &Arc<Mutex<AppState>>,
+    request: &HttpRequest,
+) -> ProfileResolution {
+    let (profiles, active) = {
+        let state = state.lock().expect("state poisoned");
+        let profiles: Vec<LlmProfile> = state
+            .llm_profiles
+            .profiles
+            .iter()
+            .filter(|profile| profile.is_openai_chat_proxy())
+            .cloned()
+            .collect();
+        let active = state
+            .llm_profiles
+            .active_profile()
+            .filter(|profile| profile.is_openai_chat_proxy())
+            .cloned();
+        (profiles, active)
+    };
+
+    if profiles.is_empty() && active.is_none() {
+        return ProfileResolution::NoProfile;
+    }
+
+    let candidates: Vec<&str> = request_auth_candidates(request).collect();
+    if let Some(profile) = match_profile_by_route_token(&profiles, &candidates) {
+        return ProfileResolution::Matched(profile.clone());
+    }
+
+    if let Some(active) = active
+        && proxy_auth_authorized(request, &active)
+    {
+        return ProfileResolution::Matched(active);
+    }
+
+    ProfileResolution::Unauthorized
+}
+
+/// Find the profile whose `proxy_route_token()` matches one of the request's
+/// auth tokens. This is the per-window routing key.
+fn match_profile_by_route_token<'a>(
+    profiles: &'a [LlmProfile],
+    candidates: &[&str],
+) -> Option<&'a LlmProfile> {
+    profiles.iter().find(|profile| {
+        let token = profile.proxy_route_token();
+        candidates
+            .iter()
+            .any(|candidate| constant_time_eq(candidate, &token))
+    })
 }
 
 fn proxy_auth_authorized(request: &HttpRequest, profile: &LlmProfile) -> bool {
@@ -523,14 +589,14 @@ fn write_error_response(stream: &mut TcpStream, status: u16, message: &str) {
     );
 }
 
-fn handle_count_tokens(stream: &mut TcpStream, state: &Arc<Mutex<AppState>>, body: &[u8]) {
+fn handle_count_tokens(stream: &mut TcpStream, profile: Option<&LlmProfile>, body: &[u8]) {
     let input: Value = serde_json::from_slice(body).unwrap_or_else(|_| json!({}));
     // Estimate over the text that actually reaches the prompt (messages + tool
     // schemas) instead of the whole serialized JSON, so Claude Code's context
     // meter and auto-compact timing track reality. Fall back to the coarse
     // whole-blob estimate when no OpenAI profile is active.
-    let estimate = match active_openai_profile(state) {
-        Some(profile) => request_conv::estimate_request_input_tokens(&input, &profile),
+    let estimate = match profile {
+        Some(profile) => request_conv::estimate_request_input_tokens(&input, profile),
         None => (input.to_string().chars().count() / 4).max(1) as u64,
     };
     let _ = write_json_response(stream, 200, json!({ "input_tokens": estimate }));
@@ -620,6 +686,36 @@ mod tests {
         };
         let request = request_with_header("Authorization", "Bearer wrong");
         assert!(!proxy_auth_authorized(&request, &profile));
+    }
+
+    #[test]
+    fn route_token_match_picks_the_owning_profile() {
+        let profiles = vec![
+            LlmProfile {
+                id: "glm".to_string(),
+                base_url: "https://a.example/v1/chat/completions".to_string(),
+                ..LlmProfile::default()
+            },
+            LlmProfile {
+                id: "gpt".to_string(),
+                base_url: "https://b.example/v1/chat/completions".to_string(),
+                auth_token: "explicit-gpt".to_string(),
+                ..LlmProfile::default()
+            },
+        ];
+
+        // Derived token routes to the empty-auth profile.
+        assert_eq!(
+            match_profile_by_route_token(&profiles, &["claudie-glm"]).map(|p| p.id.as_str()),
+            Some("glm")
+        );
+        // Explicit token routes to its profile.
+        assert_eq!(
+            match_profile_by_route_token(&profiles, &["explicit-gpt"]).map(|p| p.id.as_str()),
+            Some("gpt")
+        );
+        // An unknown token matches nothing (caller falls back to active).
+        assert!(match_profile_by_route_token(&profiles, &["claudie-openai-proxy"]).is_none());
     }
 
     #[test]

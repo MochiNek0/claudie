@@ -1,3 +1,4 @@
+pub(crate) mod clipboard;
 pub(crate) mod folder_dialog;
 pub(crate) mod gif_animation;
 pub(crate) mod prompt_popup;

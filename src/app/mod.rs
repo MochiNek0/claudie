@@ -400,6 +400,9 @@ pub(crate) struct ClaudeSession {
     pub(crate) detail: String,
     pub(crate) order: u64,
     pub(crate) last_seen: Instant,
+    // Model id this session was last seen using (from hook payload/transcript).
+    // Identifies the provider per window in the session switcher.
+    pub(crate) model: String,
     waiting_interaction_sequence: Option<u64>,
     // Latest transcript path seen for this session and the file length at the
     // current turn's start. A terminal-interrupt marker appearing past the
@@ -416,6 +419,7 @@ pub(crate) struct SessionSwitcherItem {
     pub(crate) detail: String,
     pub(crate) focused: bool,
     pub(crate) pending_count: usize,
+    pub(crate) model: String,
 }
 
 pub(crate) struct AppState {
@@ -872,8 +876,25 @@ impl AppState {
                     .as_deref()
                     .is_some_and(|focused| focused == session.id),
                 pending_count: self.pending_count_for_session(&session.id),
+                model: session.model.clone(),
             })
             .collect()
+    }
+
+    /// Record the model id a session is using. Called from hook handling when a
+    /// payload or transcript reveals the model; an empty value is ignored so a
+    /// later event without model info does not blank the row.
+    pub(crate) fn set_session_model(&mut self, session_id: &str, model: &str) {
+        let model = model.trim();
+        if model.is_empty() {
+            return;
+        }
+        let session_id = normalize_session_id(session_id);
+        if let Some(session) = self.sessions.get_mut(&session_id)
+            && session.model != model
+        {
+            session.model = model.to_string();
+        }
     }
 
     fn set_session_status(
@@ -933,6 +954,7 @@ impl AppState {
                 detail: String::new(),
                 order,
                 last_seen: now,
+                model: String::new(),
                 waiting_interaction_sequence: None,
                 transcript_path: String::new(),
                 turn_baseline_len: 0,

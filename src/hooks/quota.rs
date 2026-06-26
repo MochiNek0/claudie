@@ -27,6 +27,30 @@ pub(super) fn update_quota_from_value(
     }
 }
 
+/// First string value under a `model` key anywhere in the payload, used to tag
+/// a session with the model (provider) it is using. Mirrors the `model` case in
+/// `walk_quota_value` but is per-session rather than global.
+pub(super) fn model_from_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                if normalize_key(key) == "model"
+                    && let Some(model) = child.as_str()
+                    && !model.trim().is_empty()
+                {
+                    return Some(model.trim().to_string());
+                }
+                if let Some(found) = model_from_value(child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items.iter().find_map(model_from_value),
+        _ => None,
+    }
+}
+
 fn walk_quota_value(
     quota: &mut QuotaStats,
     value: &Value,

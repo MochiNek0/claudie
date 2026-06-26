@@ -267,6 +267,61 @@ impl LlmProfile {
         }
     }
 
+    /// The local proxy auth token this profile is reached by. An explicit
+    /// `auth_token` is used verbatim; otherwise a stable per-profile token is
+    /// derived from the id so concurrently launched windows pointed at the
+    /// shared proxy each resolve back to their own profile without the user
+    /// having to assign tokens by hand.
+    pub(crate) fn proxy_route_token(&self) -> String {
+        let token = self.auth_token.trim();
+        if !token.is_empty() {
+            return token.to_string();
+        }
+        let id = self.id.trim();
+        if id.is_empty() {
+            "claudie-openai-proxy".to_string()
+        } else {
+            format!("claudie-{id}")
+        }
+    }
+
+    /// A `--settings` overlay (`{ "env": { ... } }`) that binds a Claude Code
+    /// window to this profile. Top-level keys (hooks, model, statusLine, …) are
+    /// deliberately omitted so they fall through from the user settings.
+    ///
+    /// The `env` block is seeded from the user's current global env so that
+    /// even if Claude Code treats a provided `env` object as a whole-object
+    /// replacement (the docs don't specify deep vs shallow merge for nested
+    /// objects), the user's other env keys (e.g. `ENABLE_TOOL_SEARCH`) are
+    /// preserved. The provider connection keys this profile owns are excluded
+    /// from the seed so a previous profile's value can't leak in — they must
+    /// come solely from `env_pairs()` (and stay absent when cleared, e.g.
+    /// `ANTHROPIC_API_KEY` for OpenAI-proxy profiles).
+    pub(crate) fn settings_overlay_json(&self) -> Result<Value, String> {
+        self.settings_overlay_with_seed(current_claude_env())
+    }
+
+    fn settings_overlay_with_seed(
+        &self,
+        inherited_env: Map<String, Value>,
+    ) -> Result<Value, String> {
+        let mut env = Map::new();
+        for (key, value) in inherited_env {
+            if !CONNECTION_ENV_KEYS.contains(&key.as_str()) {
+                env.insert(key, value);
+            }
+        }
+        for (key, value) in self.env_pairs() {
+            env.insert(key.to_string(), Value::String(value));
+        }
+        for (key, value) in parse_extra_env(&self.extra_env)? {
+            env.insert(key, Value::String(value));
+        }
+        let mut root = Map::new();
+        root.insert("env".to_string(), Value::Object(env));
+        Ok(Value::Object(root))
+    }
+
     pub(crate) fn openai_extra_body_fields(&self) -> Result<Map<String, Value>, String> {
         parse_openai_extra_body(&self.openai_extra_body)
     }
@@ -286,14 +341,9 @@ impl LlmProfile {
         let haiku = apply_1m_suffix(&self.haiku_model, self.haiku_1m);
         let fields: [(&'static str, String); 7] = if self.is_openai_chat_proxy() {
             let proxy_base_url = format!("http://127.0.0.1:{DEFAULT_PROXY_PORT}");
-            let proxy_auth_token = if self.auth_token.trim().is_empty() {
-                "claudie-openai-proxy".to_string()
-            } else {
-                self.auth_token.trim().to_string()
-            };
             [
                 ("ANTHROPIC_BASE_URL", proxy_base_url),
-                ("ANTHROPIC_AUTH_TOKEN", proxy_auth_token),
+                ("ANTHROPIC_AUTH_TOKEN", self.proxy_route_token()),
                 ("ANTHROPIC_API_KEY", String::new()),
                 ("ANTHROPIC_MODEL", model),
                 ("ANTHROPIC_DEFAULT_OPUS_MODEL", opus),
@@ -317,6 +367,19 @@ impl LlmProfile {
             .collect()
     }
 }
+
+/// The provider connection env keys `env_pairs()` owns. These are excluded when
+/// seeding a launch overlay from the global env so a different profile's value
+/// can never leak into the overlay (and so cleared keys stay absent).
+const CONNECTION_ENV_KEYS: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+];
 
 /// Append the `[1m]` 1M-context suffix to a model id when the profile opts in.
 /// Empty ids and ids that already carry the suffix are left untouched.
@@ -352,6 +415,30 @@ pub(crate) fn settings_path() -> PathBuf {
 
 pub(crate) fn llm_profiles_path() -> PathBuf {
     claudie_home().join("llm_profiles.json")
+}
+
+/// Write a per-profile `--settings` overlay to `~/.claudie/plans/<id>.json` and
+/// return its path. Overwritten on every copy so it always reflects the current
+/// profile; Claude Code reads it once at launch, so a later overwrite/delete
+/// never disturbs an already-running window.
+pub(crate) fn write_launch_settings_file(profile: &LlmProfile) -> Result<PathBuf, String> {
+    let overlay = profile.settings_overlay_json()?;
+    let id = profile.id.trim();
+    let id = if id.is_empty() {
+        default_profile_id(&profile.name)
+    } else {
+        id.to_string()
+    };
+    let path = claudie_home().join("plans").join(format!("{id}.json"));
+    save_pretty_json(&path, &overlay)?;
+    Ok(path)
+}
+
+/// The shell-agnostic command that launches a Claude Code window bound to a
+/// profile's overlay file. Quoted so paths with spaces survive PowerShell,
+/// cmd, and POSIX shells alike.
+pub(crate) fn settings_launch_command(path: &Path) -> String {
+    format!("claude --settings \"{}\"", path.display())
 }
 
 pub(crate) fn load_user_settings() -> UserSettings {
@@ -555,6 +642,24 @@ pub(crate) fn current_claude_llm_profile() -> Option<LlmProfile> {
         haiku_1m,
         hide_attribution,
     })
+}
+
+/// The `env` object currently in `~/.claude/settings.json`, used to seed a
+/// launch overlay so a per-window `--settings` file cannot silently drop the
+/// user's other env keys. Returns an empty map if the file is missing or has
+/// no `env` object.
+fn current_claude_env() -> Map<String, Value> {
+    let Ok(text) = fs::read_to_string(claude_settings_path()) else {
+        return Map::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(json_without_bom(&text)) else {
+        return Map::new();
+    };
+    value
+        .get("env")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Fixed filename convention for each mood's GIF. A custom GIF folder must use
@@ -1205,6 +1310,104 @@ mod tests {
         };
 
         assert_eq!(profile.openai_upstream_api_key(), "upstream-token");
+    }
+
+    #[test]
+    fn proxy_route_token_derives_unique_token_when_auth_empty() {
+        let profile = LlmProfile {
+            id: "glm".to_string(),
+            base_url: "https://example.com/v1/chat/completions".to_string(),
+            ..LlmProfile::default()
+        };
+        assert_eq!(profile.proxy_route_token(), "claudie-glm");
+
+        let with_token = LlmProfile {
+            id: "glm".to_string(),
+            auth_token: "explicit-token".to_string(),
+            ..LlmProfile::default()
+        };
+        assert_eq!(with_token.proxy_route_token(), "explicit-token");
+    }
+
+    #[test]
+    fn settings_overlay_for_openai_profile_targets_proxy_with_route_token() {
+        let profile = LlmProfile {
+            id: "glm".to_string(),
+            base_url: "https://example.com/v1/chat/completions".to_string(),
+            model: "glm-4.6".to_string(),
+            ..LlmProfile::default()
+        };
+        let overlay = profile.settings_overlay_with_seed(Map::new()).unwrap();
+        let env = overlay.get("env").and_then(Value::as_object).unwrap();
+
+        assert_eq!(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:17388");
+        assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], "claudie-glm");
+        assert_eq!(env["ANTHROPIC_MODEL"], "glm-4.6");
+        // The OpenAI branch clears the API key, so it must not appear.
+        assert!(!env.contains_key("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn settings_overlay_preserves_inherited_env_but_owns_connection_keys() {
+        // Simulate the global settings env: a non-connection key the user wants
+        // kept, plus a stale connection key from a different active profile.
+        let mut seed = Map::new();
+        seed.insert(
+            "ENABLE_TOOL_SEARCH".to_string(),
+            Value::String("true".into()),
+        );
+        seed.insert(
+            "ANTHROPIC_API_KEY".to_string(),
+            Value::String("stale-other-profile-key".into()),
+        );
+        seed.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            Value::String("https://other.example".into()),
+        );
+
+        let profile = LlmProfile {
+            id: "glm".to_string(),
+            base_url: "https://example.com/v1/chat/completions".to_string(),
+            model: "glm-4.6".to_string(),
+            ..LlmProfile::default()
+        };
+        let overlay = profile.settings_overlay_with_seed(seed).unwrap();
+        let env = overlay.get("env").and_then(Value::as_object).unwrap();
+
+        // Non-connection key is preserved across the launch.
+        assert_eq!(env["ENABLE_TOOL_SEARCH"], "true");
+        // Connection keys come solely from this profile; the stale ones are gone.
+        assert_eq!(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:17388");
+        assert!(!env.contains_key("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn settings_overlay_for_direct_profile_targets_real_upstream() {
+        let profile = LlmProfile {
+            id: "anthropic".to_string(),
+            base_url: "https://api.anthropic.com".to_string(),
+            api_key: "sk-real".to_string(),
+            model: "claude-opus-4-8".to_string(),
+            extra_env: "ENABLE_TOOL_SEARCH=true".to_string(),
+            ..LlmProfile::default()
+        };
+        let overlay = profile.settings_overlay_with_seed(Map::new()).unwrap();
+        let env = overlay.get("env").and_then(Value::as_object).unwrap();
+
+        assert_eq!(env["ANTHROPIC_BASE_URL"], "https://api.anthropic.com");
+        assert_eq!(env["ANTHROPIC_API_KEY"], "sk-real");
+        assert_eq!(env["ANTHROPIC_MODEL"], "claude-opus-4-8");
+        // Extra env is folded into the same overlay env block.
+        assert_eq!(env["ENABLE_TOOL_SEARCH"], "true");
+    }
+
+    #[test]
+    fn settings_launch_command_quotes_the_overlay_path() {
+        let path = Path::new(r"C:\Users\EDY\.claudie\plans\glm.json");
+        assert_eq!(
+            settings_launch_command(path),
+            r#"claude --settings "C:\Users\EDY\.claudie\plans\glm.json""#
+        );
     }
 
     #[test]

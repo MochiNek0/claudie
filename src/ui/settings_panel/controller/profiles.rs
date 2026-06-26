@@ -142,6 +142,34 @@ impl SettingsController {
         });
     }
 
+    /// Write the currently edited profile's `--settings` overlay file and copy
+    /// the `claude --settings "<path>"` command. Mirrors `save_profile`'s id
+    /// derivation so the file name and proxy route token are stable.
+    pub(in crate::ui::settings_panel) fn copy_launch_command(&mut self) {
+        let Some(mut profile) = self.current_profile_from_fields() else {
+            return;
+        };
+        if profile.id.trim().is_empty() {
+            profile.id = default_profile_id(&profile.name);
+        }
+        let s = crate::i18n::strings();
+        let path = match crate::settings::write_launch_settings_file(&profile) {
+            Ok(path) => path,
+            Err(_) => {
+                self.status(s.status_copy_fail);
+                return;
+            }
+        };
+        if crate::ui::clipboard::copy_text(&crate::settings::settings_launch_command(&path)) {
+            self.status(
+                &s.status_copied_launch_fmt
+                    .replace("{}", &profile_label_for_message(&profile)),
+            );
+        } else {
+            self.status(s.status_copy_fail);
+        }
+    }
+
     pub(in crate::ui::settings_panel) fn toggle_env_tool_search(&mut self, enabled: bool) {
         self.set_env_flag("ENABLE_TOOL_SEARCH", "true", enabled);
     }

@@ -103,6 +103,7 @@ slint::slint! {
         in property <string> llm-models: "Models";
         in property <string> llm-models-hint: "Toggle 1M per model to request a 1M context window. Fetch, then pick an id.";
         in property <string> btn-fetch-models: "Fetch models";
+        in property <string> btn-copy-launch-command: "Copy launch command";
         in property <string> field-default-model: "Default model";
         in property <string> field-opus: "Opus";
         in property <string> field-sonnet: "Sonnet";
@@ -1105,6 +1106,7 @@ slint::slint! {
         callback import_profile();
         callback delete_profile();
         callback fetch_models();
+        callback copy_launch_command();
         callback toggle_env_tool_search(bool);
         callback toggle_env_no_autoupdate(bool);
         callback toggle_env_max_thinking(bool);
@@ -1366,6 +1368,7 @@ slint::slint! {
 
                 ActionButton { x: 448px; y: 828px; width: 64px; height: 32px; text: I18n.btn-save; clicked => { root.save_profile(); } }
                 ActionButton { x: 520px; y: 828px; width: 64px; height: 32px; text: I18n.btn-use; kind: "primary"; clicked => { root.use_profile(); } }
+                ActionButton { x: 448px; y: 866px; width: 136px; height: 32px; text: I18n.btn-copy-launch-command; clicked => { root.copy_launch_command(); } }
             }
 
             if active_tab == 3: Rectangle {
