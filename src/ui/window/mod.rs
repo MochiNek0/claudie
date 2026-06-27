@@ -847,15 +847,25 @@ unsafe fn sync_window_layout(hwnd: HWND, layout: &WindowLayout) {
     if GetWindowRect(hwnd, &mut pet_rect) == 0 {
         return;
     }
-    // Anchor HUDs to the stable nominal pet box rather than the per-mood
-    // visible window rect, so they hold position as the GIF (and thus the
-    // tightly-wrapped pet window) changes size between moods.
-    let anchor = nominal_pet_screen_rect(
+    // Horizontally, anchor HUDs to the stable nominal pet box so they stay
+    // centered without shifting as the GIF width changes between moods.
+    // Vertically, anchor to the actual visible pet: the GIF is bottom-aligned
+    // inside the taller nominal box and usually has transparent top margin, so
+    // anchoring to the nominal top/bottom would float the HUD far from the pet.
+    let nominal = nominal_pet_screen_rect(
         &pet_rect,
         layout.pet_visible_rect,
         layout.pet_nominal_width,
         layout.pet_nominal_height,
     );
+    let (_, origin_y) = pet_nominal_origin(&pet_rect, layout.pet_visible_rect);
+    let visible = layout.pet_visible_rect;
+    let anchor = RECT {
+        left: nominal.left,
+        right: nominal.right,
+        top: origin_y + visible.y,
+        bottom: origin_y + visible.y + visible.height,
+    };
     sync_pomodoro_window(&anchor, aux.pomodoro_hud, layout);
     sync_fishing_window(&anchor, aux.fishing_hud, layout);
     sync_session_window(&anchor, aux.session_switcher, layout);
