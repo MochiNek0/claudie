@@ -21,7 +21,8 @@ Inspired by [rullerzhou-afk/clawd-on-desk](https://github.com/rullerzhou-afk/cla
 - **State follows activity** — receives hook events and switches the pet's state: thinking, typing, running commands, searching, subagents, errors, sleep… Full mapping in the table below.
 - **Permission requests** — shows Allow / Always / Deny in the pet window. Deny writes back `continue=false` + `interrupt=true`, matching a terminal "No": it stops the current turn instead of feeding the rejection back as a retriable tool error. Answering on either side (pet or terminal) closes the popup on both.
 - **Choice cards** — supports `AskUserQuestion` (with a free-text "Other…" option) and `ExitPlanMode` (plan rendered as Markdown), with options plus Submit / Cancel.
-- **Multi-session switcher** — tracks each session's status and renders a switcher panel beside the pet; scroll to change the focused session, which drives the pet mood and HUD. Hidden automatically when only one session is active. Interrupting a turn (ESC) returns the pet to idle, and a closed session (including a force-quit that sends no `SessionEnd`) is removed automatically.
+- **Multi-session switcher** — tracks each session's status and renders a switcher panel beside the pet (each row shows the session's model id); scroll to change the focused session, which drives the pet mood and HUD. Hidden automatically when only one session is active. Interrupting a turn (ESC) returns the pet to idle, and a closed session (including a force-quit that sends no `SessionEnd`) is removed automatically.
+- **Multi-window routing** — the proxy routes each request to a profile by its Bearer token, so several Claude Code windows can share one local proxy yet hit different upstreams. "Copy launch command" writes a `~/.claudie/plans/<id>.json` overlay and copies `claude --settings "<path>"` to the clipboard, from the Settings button or the tray submenu.
 - **Hotkeys** — `Ctrl+Shift+Y` allows / submits; `Ctrl+Shift+N` denies / cancels.
 - **i18n** — built-in Chinese and English bilingual UI, auto-detects the system language. Override with `CLAUDIE_LANG=zh` or `CLAUDIE_LANG=en`. All UI text switches in one go.
 - **Pomodoro** — built-in timer with Start / Stop / Pause / Resume / Skip and phase-completion notifications.
@@ -94,6 +95,8 @@ Configure a profile in **Settings → LLM Profiles**:
 
 After clicking `Use`, if the profile is OpenAI format claudie points Claude Code's `ANTHROPIC_BASE_URL` at the local proxy (the upstream URL/key stay only in the claudie profile). A `Base URL` containing `/chat/completions` enables the proxy automatically; if you enter an upstream root URL, add `CLAUDIE_API_FORMAT=openai` to `Extra env`.
 
+The proxy routes each request to a profile by its Bearer token (the profile's `auth_token`, derived as `claudie-<id>` when empty), falling back to the active profile when none matches. To run several Claude Code windows on different upstreams at once, use "Copy launch command" to generate each profile's `claude --settings "<path>"`.
+
 **Proxy capabilities:** Bidirectional conversion between streaming/non-streaming OpenAI ↔ Anthropic Messages / SSE; tool-call mapping; `parallel_tool_calls=true` by default; DeepSeek/QwQ/GLM-Zero reasoning streams mapped to Anthropic thinking blocks, OpenAI/Azure/OpenRouter auto-derive `reasoning_effort`; image forwarding auto-detected; compat prompt off by default for known upstreams; automatic fallback to text transcript when tools are rejected; upstream 429/529 `Retry-After` forwarded, transient errors return HTTP 529.
 
 **Context optimization** (on by default): compresses very long tool results and text; when input exceeds the threshold it keeps recent messages and summarizes older history in chunks using a local extractive summary (no upstream call). The cache stores only chunk summaries and capability probes — never API keys or original request bodies.
@@ -116,6 +119,7 @@ All under `%USERPROFILE%\.claudie\` (except the last two, under `.claude\`):
 | `llm_profiles.json` | LLM profiles, active profile, upstream auth, OpenAI body, Extra env |
 | `secrets.json` | DPAPI-encrypted credentials (API keys, OAuth tokens), decryptable only by the current Windows user |
 | `daily_stats.json` | daily counters (prompts, tools, permissions/choices, errors, focus, tokens), kept 45 days |
+| `plans/` | per-profile `--settings` overlay files (`<id>.json`) that "copy launch command" binds a window to |
 | `proxy_cache/` | proxy cache: `chunks/`, `capabilities/` |
 | `.claude\settings.json` | Claude Code hook settings and claudie-managed LLM env |
 | `.claude\settings.json.claudie.bak` | one-time backup created before the first modification |
